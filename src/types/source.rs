@@ -150,8 +150,8 @@ impl Parser for Source {
                 // External identifier (GEDCOM 7.0)
                 "EXID" => self.external_ids.push(tokenizer.take_line_value()?),
                 _ => {
-                    // Gracefully skip unknown tags
-                    tokenizer.take_line_value()?;
+                    // Leave unknown tags to `parse_subset`, which keeps them with
+                    // their substructures.
                 }
             }
 

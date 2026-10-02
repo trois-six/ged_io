@@ -85,8 +85,8 @@ impl Parser for SortDate {
                 "TIME" => self.time = Some(tokenizer.take_line_value()?),
                 "PHRASE" => self.phrase = Some(tokenizer.take_line_value()?),
                 _ => {
-                    // Gracefully skip unknown tags
-                    tokenizer.take_line_value()?;
+                    // Leave unknown tags to `parse_subset`, which keeps them with
+                    // their substructures.
                 }
             }
             Ok(())
@@ -138,12 +138,10 @@ impl Parser for CreationDate {
         tokenizer.next_token()?;
 
         let handle_subset = |tag: &str, tokenizer: &mut Tokenizer<'_>| -> Result<(), GedcomError> {
-            match tag {
-                "DATE" => self.date = Some(Date::new(tokenizer, level + 1)?),
-                _ => {
-                    // Gracefully skip unknown tags
-                    tokenizer.take_line_value()?;
-                }
+            // Unknown tags are left to `parse_subset`, which keeps them with
+            // their substructures.
+            if tag == "DATE" {
+                self.date = Some(Date::new(tokenizer, level + 1)?);
             }
             Ok(())
         };
@@ -378,8 +376,8 @@ impl Parser for NonEvent {
                         )?);
                 }
                 _ => {
-                    // Gracefully skip unknown tags
-                    tokenizer.take_line_value()?;
+                    // Leave unknown tags to `parse_subset`, which keeps them with
+                    // their substructures.
                 }
             }
             Ok(())
