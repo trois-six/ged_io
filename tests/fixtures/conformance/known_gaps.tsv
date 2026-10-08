@@ -48,7 +48,6 @@ calendar/*	output:v7-gedc-form	TS17	NONCONFORMANT	-	every output of the family
 case/*	output:eol-final	TS32	NONCONFORMANT	-	every output of the family
 case/*	output:head-required	TS33	NONCONFORMANT	-	every output of the family
 case/*	output:v7-gedc-form	TS17	NONCONFORMANT	-	every output of the family
-case/G5-AGES	keep	TS14	LOST	-	model lacks `1y`; model lacks `79y`
 case/G5-AMBIG-NUMERIC-DATE	output:payload-date	TS34	NONCONFORMANT	-	line 10: payload-date: DATE "25/3/1934": not in the date grammar
 case/G5-CONTACTS	keep	TS13	LOST	-	missing line `3 PHON 555-0100`; missing line `3 EMAIL corp@@example.com`
 case/G5-CONTACTS-ON-INDI	output:misplaced	TS34	NONCONFORMANT	-	line 7: misplaced: ADDR under INDI
@@ -102,8 +101,6 @@ case/G5-WRITE-NO-CHAR-MISMATCH	output:char-mismatch	TS18	NONCONFORMANT	-	line 5:
 case/G5-XREF-INVALID	output:pointer-syntax	TS23	NONCONFORMANT	-	line 14: pointer-syntax: @IABCDEFGHIJKLMNOPQRSTUVWXYZ0123@
 case/G5-XREF-INVALID	output:xref-syntax	TS23	NONCONFORMANT	-	line 6: xref-syntax: @#I1@
 case/G5-XREF-WITH-SPACE	parse	TS7	FATAL	-	Parse error at line 10: Unhandled tag ref@
-case/G7-AGE-OVERFLOW	keep	TS14	LOST	-	missing line `2 AGE 1y 30m 100w 400d`
-case/G7-AGE-OVERFLOW	roundtrip	TS14	DIFF	-	- INDI#0/CHR/AGE = "1y 30m 100w 400d"; + INDI#0/CHR/AGE = ""; + INDI#0/CHR/AGE/PHRASE = "1y 30m 100w 400d"
 case/G7-AT-ONLY-FIRST	keep	TS20	LOST	-	missing line `0 @N1@ SNOTE @@@@@ has four`
 case/G7-AT-ONLY-FIRST	roundtrip	TS20	DIFF	-	- SNOTE#0 = "@@@@ has four"; + SNOTE#0 = "@@@ has four"
 case/G7-BANNED-C0	output:banned-char	TS22	NONCONFORMANT	-	line 6: banned-char: U+0007
@@ -187,7 +184,6 @@ case/X-DUP-XREF-UNIQUE	output:xref-duplicate	TS23	NONCONFORMANT	-	line 7: xref-d
 convert/*	output:eol-final	TS32	NONCONFORMANT	-	every output of the family
 convert/*	output:v7-char	TS17	NONCONFORMANT	-	every output of the family
 convert/*	output:v7-gedc-form	TS17	NONCONFORMANT	-	every output of the family
-convert/age-invalid	convert	TS25	DIFF	-	108 differences: - INDI#0/EVEN[10]/AGE = "<0y"; - INDI#0/EVEN[11]/AGE = ">0y"; - INDI#0/EVEN[12]/AGE = ">0y"; - INDI#0/EVEN[13]/AGE = "<0y"; - INDI#0/EVEN[14...
 convert/age-valid	convert	TS25	DIFF	-	48 differences: - INDI#0/DEAT = ""; - INDI#0/DEAT/AGE = "0y"; - INDI#0/DEAT/AGE/PHRASE = "Stillborn"; - INDI#0/EVEN/AGE = "<8y"; - INDI#0/EVEN[10]/AGE = "0y"...
 convert/atsign	convert	TS25	DIFF	-	24 differences: - SNOTE#10 = "JULIAN  date escape two spaces"; - SNOTE#11 = "non-leading JULIAN date escape"; - SNOTE#12 = "JULIAN_AND_SUCH date escape inter...
 convert/atsign	output:escape	TS25	NONCONFORMANT	-	line 10: escape: @ one leading
@@ -219,7 +215,6 @@ convert/sour-1	output:payload-pointer	TS25	NONCONFORMANT	-	line 11: payload-poin
 convert/xref-case	parse	TS7	FATAL	-	Parse error at line 13: Unhandled tag ref@
 corpus/*	output:eol-final	TS32	NONCONFORMANT	-	every output of the family
 corpus/*	output:v7-gedc-form	TS17	NONCONFORMANT	-	every output of the family
-corpus/familysearch/gedcom70/age.ged	roundtrip	TS14	DIFF	-	- INDI#0/CHR[93]/AGE = "1y 400d"; - INDI#0/CHR[97]/AGE = "1y 30m 100w 400d"; + INDI#0/CHR[93]/AGE = ""; + INDI#0/CHR[93]/AGE/PHRASE = 
 corpus/familysearch/gedcom70/escapes.ged	output:escape	TS20	NONCONFORMANT	-	line 12: escape: @ one leading
 corpus/familysearch/gedcom70/escapes.ged	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Doe"
 corpus/familysearch/gedcom70/extension-record.ged	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Doe"
@@ -495,7 +490,6 @@ matrix/utf8-crlf	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Пример"
 matrix/utf8-lf	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Пример"
 payload/*	output:eol-final	TS32	NONCONFORMANT	-	every output of the family
 payload/*	output:v7-gedc-form	TS17	NONCONFORMANT	-	every output of the family
-payload/551/age/invalid10	output:payload-age	TS34	NONCONFORMANT	-	line 12: payload-age: AGE "1w": not in the age grammar
 payload/551/age/invalid11	output:payload-age	TS34	NONCONFORMANT	-	line 12: payload-age: AGE "about ten": not in the age grammar
 payload/551/date/invalid14	output:payload-date	TS34	NONCONFORMANT	-	line 12: payload-date: DATE "1 jan 1900": not in the date grammar
 payload/551/date/invalid16	output:payload-date	TS34	NONCONFORMANT	-	line 12: payload-date: DATE "BET 1900": not in the date grammar
@@ -797,7 +791,6 @@ references/G7-VOIDPTR	validate	TS26	FATAL	-	Invalid GEDCOM format: Individual re
 vendored/*	output:eol-final	TS32	NONCONFORMANT	-	every output of the family
 vendored/*	output:head-required	TS33	NONCONFORMANT	-	every output of the family
 vendored/*	output:v7-gedc-form	TS17	NONCONFORMANT	-	every output of the family
-vendored/5/age-invalid	output:payload-age	TS34	NONCONFORMANT	-	line 100: payload-age: AGE "> 0 m": not in the age grammar
 vendored/5/age-invalid	output:payload-unexpected	TS34	NONCONFORMANT	-	line 101: payload-unexpected: EVEN "when > 0 M": this structure takes no payload
 vendored/5/age-valid	output:payload-age	TS34	NONCONFORMANT	-	line 13: payload-age: AGE "child": not in the age grammar
 vendored/5/age-valid	output:payload-unexpected	TS34	NONCONFORMANT	-	line 101: payload-unexpected: EVEN "when 11m": this structure takes no payload

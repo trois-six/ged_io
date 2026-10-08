@@ -63,17 +63,19 @@ fn test_write_age_phrase_per_version() {
 
     let data = GedcomBuilder::new().build_from_str(original).unwrap();
 
-    // GEDCOM 5.5.1 has no PHRASE: a text-only age is the payload itself.
+    // GEDCOM 5.5.1 has no PHRASE: a text-only age is the payload itself. Its
+    // bound is written against the number.
     let v551 = GedcomWriter::new()
         .gedcom_version("5.5.1")
         .write_to_string(&data)
         .unwrap();
     assert!(!v551.contains("PHRASE"), "{v551}");
-    assert!(v551.contains("2 AGE > 80y\n"), "{v551}");
+    assert!(v551.contains("2 AGE >80y\n"), "{v551}");
     assert!(v551.contains("2 AGE of full age\n"), "{v551}");
     assert!(v551.contains("2 AGE CHILD\n"), "{v551}");
 
-    // GEDCOM 7.0 has no CHILD keyword, and keeps every phrase, the
+    // GEDCOM 7.0 has no CHILD keyword: it becomes its duration, with the
+    // keyword as written as the phrase. Every phrase is kept, the
     // attribute's included.
     let v7 = GedcomWriter::new()
         .gedcom_version("7.0")
@@ -82,7 +84,7 @@ fn test_write_age_phrase_per_version() {
     for expected in [
         "2 AGE > 80y\n3 PHRASE over eighty\n",
         "2 AGE\n3 PHRASE of full age\n",
-        "2 AGE < 8y\n3 PHRASE Child\n",
+        "2 AGE < 8y\n3 PHRASE CHILD\n",
         "2 AGE 30y\n3 PHRASE about thirty\n",
     ] {
         assert!(v7.contains(expected), "missing {expected:?} in:\n{v7}");

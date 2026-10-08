@@ -264,10 +264,7 @@ impl Parser for Detail {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        types::age::{Age, AgeModifier},
-        Gedcom,
-    };
+    use crate::{types::age::Age, Gedcom};
 
     #[test]
     fn test_parse_event_with_cause() {
@@ -329,13 +326,9 @@ mod tests {
         let death = &data.individuals[0].events[0];
         assert_eq!(
             death.age.as_ref().unwrap(),
-            &Age::Numeric {
-                years: Some(75),
-                months: Some(3),
-                weeks: None,
-                days: None,
+            &Age {
+                value: Some("75y 3m".to_string()),
                 phrase: None,
-                modifier: AgeModifier::Exact,
             }
         );
     }
@@ -404,13 +397,9 @@ mod tests {
         assert_eq!(death.cause.as_ref().unwrap(), "Pneumonia");
         assert_eq!(
             death.age.as_ref().unwrap(),
-            &Age::Numeric {
-                years: Some(80),
-                months: None,
-                weeks: None,
-                days: None,
+            &Age {
+                value: Some("80y".to_string()),
                 phrase: None,
-                modifier: AgeModifier::Exact
             }
         );
         assert_eq!(
