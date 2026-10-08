@@ -58,7 +58,8 @@ pub struct Gap {
     pub line: usize,
 }
 
-fn tier() -> &'static str {
+/// The pipeline under test: `current` (default) or `next`.
+pub fn tier() -> &'static str {
     static T: OnceLock<String> = OnceLock::new();
     T.get_or_init(|| std::env::var("RATCHET_TIER").unwrap_or_else(|_| "current".into()))
 }
@@ -277,8 +278,8 @@ mod tests {
             );
             let n: u32 = g.cause[2..].parse().unwrap_or(0);
             assert!(
-                (1..=34).contains(&n),
-                "line {}: cause {} is not TS1–TS34",
+                (1..=35).contains(&n),
+                "line {}: cause {} is not TS1–TS35",
                 g.line,
                 g.cause
             );

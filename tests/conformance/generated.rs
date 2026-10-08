@@ -493,6 +493,11 @@ fn run_probe(g: &Gen, check: &str, p: &Probe, kind_lenient: bool, failures: &mut
             return;
         }
     };
+    // A valid input is read into the types the model has.
+    let untyped = adapter::untyped(&m);
+    if !kind_lenient && !untyped.is_empty() {
+        failures.push(Failure::new(&p.id, "typed", "UNTYPED", untyped.join(", ")));
+    }
     let out = match adapter::write(&m, g.write_target()) {
         Ok(o) => o,
         Err(e) => {
