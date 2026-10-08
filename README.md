@@ -25,6 +25,7 @@ Whether you're building a genealogy application, migrating data between platform
 | **Multiple Encodings** | UTF-8, UTF-16 (with or without BOM), ANSEL (to Unicode NFC), ASCII, Windows-1252 (`ANSI`), ISO-8859-1, ISO-8859-15, IBM PC (cp437), Macintosh; in memory and streaming |
 | **JSON Export** | Optional serde integration for JSON serialization |
 | **Type Safe** | Strongly-typed Rust structs for all GEDCOM record types |
+| **Validation** | Checks a file against the 5.5.1, 7.0 or 7.1 specification tables and reports every deviation with its line; a repair pass makes any tree conformant without losing data |
 | **Compatible** | Relax rules to be compatible with most of GEDCOM files |
 
 ---
@@ -353,6 +354,32 @@ let indexed = IndexedGedcomData::from(data);
 let person = indexed.find_individual("@I1@");
 let family = indexed.find_family("@F1@");
 ```
+
+### Validation and Conformance Repair
+
+`ged_io::spec` holds the specifications as data (generated from the
+FamilySearch GEDCOM 7.0 and 7.1 tables and a 5.5.1 transcription checked
+against the PDF; see `NOTICE`). It validates a file, a parsed tree or owned
+structures, and repairs a tree so that it validates:
+
+```rust
+use ged_io::spec::{conform, validate, validate_bytes};
+use ged_io::tree::parse_tree;
+use ged_io::GedcomVersion;
+
+let bytes = b"0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 SEX male\n0 TRLR\n";
+for deviation in validate_bytes(bytes) {
+    println!("{deviation}"); // line 5: SEX "male": not a value of enumset-SEX
+}
+
+let mut records = parse_tree("0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 SEX male\n0 TRLR\n")
+    .to_structures();
+let repairs = conform(&mut records, GedcomVersion::V7_0); // SEX male becomes _SEX male
+assert!(validate(&records, GedcomVersion::V7_0).is_empty());
+```
+
+Every rule the validator checks and every repair are listed in the
+[`spec` module documentation](https://docs.rs/ged_io/latest/ged_io/spec/).
 
 ---
 
