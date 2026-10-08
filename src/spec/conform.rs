@@ -630,6 +630,8 @@ impl<'n> Conformer<'n> {
         self.repair_dirty(records, head_ty, dirty);
         self.path.clear();
         if !self.new_records.is_empty() {
+            // Room for them only: doubling the records would cost more.
+            records.reserve_exact(self.new_records.len());
             let at = records.len().saturating_sub(1);
             records.splice(at..at, self.new_records.drain(..).map(Rec::owned));
         }
@@ -1829,6 +1831,7 @@ impl<'n> Conformer<'n> {
         }
         self.scratch = scratch;
         if !added.is_empty() {
+            records.reserve_exact(added.len());
             let at = records.len().saturating_sub(1);
             records.splice(at..at, added.into_iter().map(Rec::owned));
         }
