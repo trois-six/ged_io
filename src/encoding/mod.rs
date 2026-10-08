@@ -165,6 +165,27 @@ pub fn decode(bytes: &[u8]) -> Decoded {
         (Mode::Utf8 { .. }, true) => String::from_utf8_lossy(body).into_owned(),
         (mode, _) => decode_body(body, mode),
     };
+    decoded(text, sniff)
+}
+
+/// Decodes GEDCOM bytes it owns: like [`decode`], but UTF-8 input becomes
+/// the text without a copy, which halves the peak memory of reading a large
+/// UTF-8 file.
+#[must_use]
+pub fn decode_owned(mut bytes: Vec<u8>) -> Decoded {
+    let sniff = sniff(&bytes, true);
+    let text = match (sniff.mode, sniff.valid_utf8) {
+        (Mode::Utf8 { .. }, true) => {
+            bytes.drain(..sniff.bom.min(bytes.len()));
+            String::from_utf8(bytes)
+                .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+        }
+        (mode, _) => decode_body(bytes.get(sniff.bom..).unwrap_or_default(), mode),
+    };
+    decoded(text, sniff)
+}
+
+fn decoded(text: String, sniff: detect::Sniff) -> Decoded {
     let declared = sniff.declared.or_else(|| {
         matches!(sniff.mode, Mode::Utf16 { .. })
             .then(|| {
@@ -287,6 +308,19 @@ mod tests {
             });
         }
         bytes
+    }
+
+    #[test]
+    fn owned_decoding_matches() {
+        let inputs: [&[u8]; 4] = [
+            b"\xEF\xBB\xBF0 HEAD\n1 NOTE \xC3\xA9\n",
+            b"0 HEAD\n1 CHAR ANSEL\n1 NOTE \xE2e\n",
+            b"\xFF\xFE0\x00",
+            b"",
+        ];
+        for input in inputs {
+            assert_eq!(decode_owned(input.to_vec()), decode(input));
+        }
     }
 
     #[test]

@@ -15,9 +15,6 @@ use super::tag::{standard_index, STANDARD_TAGS};
 /// depth, as siblings, so that nothing recursive can overflow the stack.
 pub(crate) const MAX_DEPTH: u8 = u8::MAX;
 
-/// Marks a node without a cross-reference identifier.
-pub(crate) const NO_XREF: u32 = u32::MAX;
-
 /// How `@` is escaped in text payloads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Escaping {
@@ -83,14 +80,14 @@ pub(crate) struct RawNode {
     pub payload: Span,
     /// Index into the standard tag table, or past it into the tree's other tags.
     pub tag: u32,
-    /// Index into the segment's identifiers, or [`NO_XREF`].
-    pub xref: u32,
     /// 1-based source line.
     pub line: u32,
     /// Index just past this node's subtree.
     pub end: u32,
     pub depth: u8,
     pub kind: Kind,
+    /// Whether the segment's identifier table has an entry for this node.
+    pub has_xref: bool,
 }
 
 /// The tags that are not standard, interned per tree.
@@ -142,26 +139,49 @@ impl TagInterner {
 /// Finds the first CR or LF, eight bytes at a time.
 #[inline]
 pub(crate) fn find_eol(bytes: &[u8]) -> Option<usize> {
-    const ONES: u64 = 0x0101_0101_0101_0101;
-    const HIGH: u64 = 0x8080_8080_8080_8080;
+    find_eol_and_at(bytes).0
+}
+
+const ONES: u64 = 0x0101_0101_0101_0101;
+const HIGH: u64 = 0x8080_8080_8080_8080;
+
+/// The bytes of `word` equal to `byte`, flagged in their high bit. The
+/// lowest flag is exact; a flag above a true one may be spurious, which
+/// "is there one" and "where is the first" questions do not mind.
+#[inline]
+const fn matches(word: u64, byte: u8) -> u64 {
+    let x = word ^ (ONES * byte as u64);
+    x.wrapping_sub(ONES) & !x & HIGH
+}
+
+/// Finds the first CR or LF, and tells whether an `@` comes before it, in
+/// one pass eight bytes at a time.
+#[inline]
+fn find_eol_and_at(bytes: &[u8]) -> (Option<usize>, bool) {
     let (words, remainder) = bytes.as_chunks::<8>();
     let mut offset = 0;
+    let mut at = false;
     for &chunk in words {
         let word = u64::from_le_bytes(chunk);
-        let lf = word ^ (ONES * u64::from(b'\n'));
-        let cr = word ^ (ONES * u64::from(b'\r'));
-        // A byte is zero in `lf` or `cr` where the word holds LF or CR; the
-        // lowest flagged byte is exact (higher ones may be false positives).
-        let hits = (lf.wrapping_sub(ONES) & !lf | cr.wrapping_sub(ONES) & !cr) & HIGH;
+        let hits = matches(word, b'\n') | matches(word, b'\r');
+        let ats = matches(word, b'@');
         if hits != 0 {
-            return Some(offset + (hits.trailing_zeros() / 8) as usize);
+            let first = hits.trailing_zeros();
+            // The `@` flags below the first terminator.
+            at |= ats & ((1_u64 << first) - 1) != 0;
+            return (Some(offset + (first / 8) as usize), at);
         }
+        at |= ats != 0;
         offset += 8;
     }
-    remainder
-        .iter()
-        .position(|&b| b == b'\n' || b == b'\r')
-        .map(|p| offset + p)
+    for (i, &b) in remainder.iter().enumerate() {
+        match b {
+            b'\n' | b'\r' => return (Some(offset + i), at),
+            b'@' => at = true,
+            _ => {}
+        }
+    }
+    (None, at)
 }
 
 /// The length of the line terminator at the start of `rest`, which starts
@@ -184,6 +204,7 @@ pub(crate) const TERMINATOR_LOOKAHEAD: usize = 3;
 pub(crate) struct Lines<'s> {
     bytes: &'s [u8],
     pos: usize,
+    at: bool,
 }
 
 impl<'s> Lines<'s> {
@@ -191,7 +212,13 @@ impl<'s> Lines<'s> {
         Self {
             bytes: text.as_bytes(),
             pos: 0,
+            at: false,
         }
+    }
+
+    /// Whether the line last returned holds an `@`.
+    pub(crate) fn has_at(&self) -> bool {
+        self.at
     }
 }
 
@@ -205,7 +232,9 @@ impl Iterator for Lines<'_> {
             return None;
         }
         let start = self.pos;
-        if let Some(k) = find_eol(rest) {
+        let (eol, at) = find_eol_and_at(rest);
+        self.at = at;
+        if let Some(k) = eol {
             let term = rest.get(k..).map_or(1, terminator_len);
             self.pos = start + k + term;
             Some((start, start + k))
@@ -411,7 +440,7 @@ pub(crate) fn head_version(text: &str) -> Option<String> {
     // The first root that came from a structure line.
     let mut root = 0;
     while let Some(node) = nodes.get(root) {
-        if node.tag != empty || node.xref != NO_XREF {
+        if node.tag != empty || node.has_xref {
             break;
         }
         root = (node.end as usize).max(root + 1);
@@ -493,6 +522,17 @@ pub(crate) fn normalize_eol(text: &str) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
+/// A structure line, with offsets into the text being read.
+#[derive(Clone, Copy)]
+struct Parts<'l> {
+    level: u32,
+    xref: Option<(usize, usize)>,
+    tag: &'l str,
+    payload: Option<(usize, usize)>,
+    /// Whether the line holds an `@` (else the payload is plain text).
+    has_at: bool,
+}
+
 /// An open structure while its record is being read.
 #[derive(Clone, Copy, Debug)]
 struct Open {
@@ -518,7 +558,8 @@ struct Piece {
 #[derive(Debug)]
 pub(crate) struct Builder {
     pub nodes: Vec<RawNode>,
-    pub xrefs: Vec<Span>,
+    /// `(node, identifier)`, by node.
+    pub xrefs: Vec<(u32, Span)>,
     pub side: String,
     escaping: Escaping,
     stack: Vec<Open>,
@@ -560,15 +601,25 @@ impl Builder {
 
     /// Reads every line of `text` (offsets are relative to it).
     pub(crate) fn read(&mut self, text: &str, tags: &mut TagInterner) {
-        // About one structure per 24 bytes of text.
-        self.nodes.reserve(text.len() / 24);
-        for (start, end) in Lines::new(text) {
-            self.push_line(text, start, end, tags);
+        // Lines average 20 to 30 bytes: this rarely needs to grow, and the
+        // part never written is never touched (the arena is shrunk to fit
+        // once built).
+        self.nodes.reserve(text.len() / 16);
+        let mut lines = Lines::new(text);
+        while let Some((start, end)) = lines.next() {
+            self.push_line(text, start, end, lines.has_at(), tags);
         }
         self.close_record(text);
     }
 
-    fn push_line(&mut self, text: &str, start: usize, end: usize, tags: &mut TagInterner) {
+    fn push_line(
+        &mut self,
+        text: &str,
+        start: usize,
+        end: usize,
+        has_at: bool,
+        tags: &mut TagInterner,
+    ) {
         self.line = self.line.saturating_add(1);
         let line = text.get(start..end).unwrap_or_default();
         match lex_line(line) {
@@ -581,8 +632,14 @@ impl Builder {
                 payload,
             } => {
                 let at = |(s, e): (usize, usize)| (start + s, start + e);
-                let tag_text = line.get(tag.0..tag.1).unwrap_or_default();
-                self.structure(text, level, xref.map(at), tag_text, payload.map(at), tags);
+                let parts = Parts {
+                    level,
+                    xref: xref.map(at),
+                    tag: line.get(tag.0..tag.1).unwrap_or_default(),
+                    payload: payload.map(at),
+                    has_at,
+                };
+                self.structure(text, parts, tags);
             }
         }
     }
@@ -596,7 +653,7 @@ impl Builder {
     fn accepts_text(&self, node: u32, empty_tag: u32) -> bool {
         self.nodes
             .get(node as usize)
-            .is_some_and(|n| n.kind != Kind::Pointer && !(n.tag == empty_tag && n.xref != NO_XREF))
+            .is_some_and(|n| n.kind != Kind::Pointer && !(n.tag == empty_tag && n.has_xref))
     }
 
     fn len(&self) -> u32 {
@@ -633,16 +690,14 @@ impl Builder {
         index
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn structure(
-        &mut self,
-        text: &str,
-        level: u32,
-        xref: Option<(usize, usize)>,
-        tag: &str,
-        payload: Option<(usize, usize)>,
-        tags: &mut TagInterner,
-    ) {
+    fn structure(&mut self, text: &str, parts: Parts<'_>, tags: &mut TagInterner) {
+        let Parts {
+            level,
+            xref,
+            tag,
+            payload,
+            has_at,
+        } = parts;
         let starts_record = level == 0 || self.stack.is_empty();
         if starts_record {
             self.close_record(text);
@@ -661,7 +716,7 @@ impl Builder {
             None => (Kind::None, Span::default()),
             Some((s, e)) => {
                 let raw = text.get(s..e).unwrap_or_default();
-                if !raw.as_bytes().contains(&b'@') {
+                if !has_at || !raw.as_bytes().contains(&b'@') {
                     // Most payloads: neither a pointer nor an escape.
                     (Kind::Text, Span::new(s, e - s))
                 } else if let Some(p) = pointer(raw) {
@@ -675,20 +730,19 @@ impl Builder {
                 }
             }
         };
-        let xref = xref.map_or(NO_XREF, |(s, e)| {
-            self.xrefs.push(Span::new(s, e - s));
-            u32::try_from(self.xrefs.len() - 1).unwrap_or(NO_XREF)
-        });
+        let index = self.len();
+        if let Some((s, e)) = xref {
+            self.xrefs.push((index, Span::new(s, e - s)));
+        }
         let mut node = RawNode {
             payload: span,
             tag: tags.intern(tag),
-            xref,
             line: self.line,
             end: 0,
             depth: 0,
             kind,
+            has_xref: xref.is_some(),
         };
-        let index = self.len();
         if starts_record {
             node.end = index + 1;
             self.push_node(node);
@@ -766,7 +820,7 @@ impl Builder {
         let mut node = RawNode {
             payload: raw,
             tag: empty_tag,
-            xref: NO_XREF,
+            has_xref: false,
             line: self.line,
             end: index + 1,
             depth: 0,
@@ -854,6 +908,20 @@ mod tests {
             lines("0123456789abcdef\r0123456789"),
             ["0123456789abcdef", "0123456789"]
         );
+    }
+
+    #[test]
+    fn at_signs_before_the_terminator_are_seen() {
+        for text in [
+            "@\n",
+            "abcdefgh@\nx",
+            "abcdefghijklmno@",
+            "a\n@",
+            "abcdefgh\r@@@@@@@",
+        ] {
+            let plain = text.split(['\n', '\r']).next().unwrap().contains('@');
+            assert_eq!(find_eol_and_at(text.as_bytes()).1, plain, "{text:?}");
+        }
     }
 
     #[test]

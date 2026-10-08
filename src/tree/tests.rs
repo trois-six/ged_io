@@ -309,7 +309,7 @@ fn segments_split_large_inputs_at_records() {
 
 #[test]
 fn structure_size_budget() {
-    assert_eq!(std::mem::size_of::<RawNode>(), 28);
+    assert_eq!(std::mem::size_of::<RawNode>(), 24);
     assert!(std::mem::size_of::<Structure>() <= 96);
     assert_eq!(std::mem::size_of::<Tag>(), 16);
     assert_eq!(std::mem::size_of::<Payload>(), 24);
