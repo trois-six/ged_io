@@ -213,8 +213,8 @@ impl fmt::Display for GedcomVersion {
 
 /// Detects the GEDCOM version from file content.
 ///
-/// This function scans the beginning of the content to find the `GEDC.VERS` tag
-/// and extracts the version number.
+/// This function reads the `HEAD.GEDC.VERS` line of the `HEAD` record, with
+/// any line terminator; it does not look at other records.
 ///
 /// # Arguments
 ///
@@ -237,33 +237,9 @@ impl fmt::Display for GedcomVersion {
 /// ```
 #[must_use]
 pub fn detect_version(content: &str) -> GedcomVersion {
-    // Look for the version in the first ~1000 characters (should be in header)
-    let search_area = if content.len() > 1000 {
-        &content[..1000]
-    } else {
-        content
-    };
-
-    // Try to find "VERS" tag after "GEDC"
-    if let Some(gedc_pos) = search_area.find("GEDC") {
-        let after_gedc = &search_area[gedc_pos..];
-        if let Some(vers_pos) = after_gedc.find("VERS") {
-            let after_vers = &after_gedc[vers_pos + 4..];
-            // Skip whitespace and get version string
-            let version_str: String = after_vers
-                .trim_start()
-                .chars()
-                .take_while(|c| !c.is_whitespace() && *c != '\n' && *c != '\r')
-                .collect();
-
-            if !version_str.is_empty() {
-                return GedcomVersion::from_version_str(&version_str);
-            }
-        }
-    }
-
-    // Default to 5.5.1 if we can't detect
-    GedcomVersion::V5_5_1
+    crate::tree::head_version(content).map_or(GedcomVersion::V5_5_1, |v| {
+        GedcomVersion::from_version_str(&v)
+    })
 }
 
 /// Checks if content appears to be a GEDCOM 7.0 file based on heuristics.
