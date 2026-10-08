@@ -41,7 +41,10 @@ const LENIENT: [(&str, &str); 10] = [
     ("5/date-dual-invalid", "invalid dual years"),
     ("5/obje-1", "FORM `other` is not a 5.5.1 multimedia format"),
     ("5/tiny-1", "header without GEDC, SOUR or SUBM"),
-    ("5/xref-case", "a pointer with a space"),
+    (
+        "5/xref-case",
+        "a dangling pointer: xrefs are case-sensitive (`@test@` against `@TEST@`)",
+    ),
 ];
 
 /// Labels the text checker cannot confirm: they are about the bytes.

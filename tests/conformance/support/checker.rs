@@ -238,7 +238,7 @@ pub fn check(output: &str, target: Target, input: Option<&str>) -> Vec<Issue> {
         ));
         // Payload escapes and pointers.
         if let Some(p) = l.payload {
-            if tree::is_pointer(p) && !is_cont {
+            if tree::is_pointer(p, v) && !is_cont {
                 pointers.push((n, p.to_string()));
                 if !(xref_ok(p, v) || (target.is_v7() && p == "@VOID@")) {
                     push("pointer-syntax", n, p.to_string());
@@ -360,10 +360,11 @@ fn xref_ok(x: &str, v: Version) -> bool {
                     .bytes()
                     .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == b'_')
         }
+        // p.13: any non-`@` after a first alphanumeric, spaces included.
         Version::V551 => {
             x.chars().count() <= 22
                 && inner.as_bytes()[0].is_ascii_alphanumeric()
-                && !inner.contains(['@', ' ', '\t'])
+                && !inner.contains(['@', '\t'])
         }
     }
 }
@@ -1229,7 +1230,10 @@ mod tests {
             Vec::<&str>::new()
         );
         assert_eq!(rules(&n5("a@b"), Target::V551), ["escape"]);
-        assert_eq!(rules(&n5("@NoTe ref@"), Target::V551), ["escape"]);
+        assert_eq!(
+            rules(&n5("@NoTe ref@"), Target::V551),
+            ["payload-pointer", "pointer-dangling"]
+        );
     }
 
     #[test]

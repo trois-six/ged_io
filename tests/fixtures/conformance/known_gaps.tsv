@@ -128,7 +128,7 @@ case/G5-SUBN	roundtrip	TS13	DIFF	-	- HEAD#0/SUBN = "@SN@"; - SUBN@SN@ = ""; - SU
 case/G5-WRITE-NO-CHAR-MISMATCH	parse	TS9	FATAL	-	Encoding error: Invalid UTF-16 sequence: odd byte length
 case/G5-XREF-INVALID	output:pointer-syntax	TS23	NONCONFORMANT	-	line 14: pointer-syntax: @IABCDEFGHIJKLMNOPQRSTUVWXYZ0123@
 case/G5-XREF-INVALID	output:xref-syntax	TS23	NONCONFORMANT	-	line 6: xref-syntax: @#I1@
-case/G5-XREF-WITH-SPACE	output:escape	TS20	NONCONFORMANT	-	line 7: escape: @@NoTe ref@
+case/G5-XREF-WITH-SPACE	parse	TS7	FATAL	-	Parse error at line 10: Unhandled tag ref@
 case/G7-AGE-INVALID	keep	TS14	LOST	-	model lacks `79`
 case/G7-AGE-INVALID	roundtrip	TS14	LOST	-	text 79 (x1)
 case/G7-AGE-OVERFLOW	keep	TS14	LOST	-	missing line `2 AGE 1y 30m 100w 400d`
@@ -139,13 +139,13 @@ case/G7-BANNED-C0	output:banned-char	TS22	NONCONFORMANT	-	line 6: banned-char: U
 case/G7-BLANK-LINE	parse	TS5	FATAL	-	Parse error at line 4: Expected digit for level number
 case/G7-CONT-AFTER-SUB	roundtrip	TS16	LOST	-	tag LANG (x1); text b (x1); text en (x1)
 case/G7-CONT-ORPHAN	output:cont-position	TS16	NONCONFORMANT	-	line 7: cont-position: after another substructure
-case/G7-CONT-ORPHAN	output:payload-unexpected	TS16	NONCONFORMANT	-	line 5: payload-unexpected: INDI "orphan text": this structure takes no payload
+case/G7-CONT-ORPHAN	output:payload-enum	TS16	NONCONFORMANT	-	line 6: payload-enum: SEX "F\norphan text": not in enumset-SEX
 case/G7-CONT-UNDER-PTR	keep	TS16	LOST	-	missing line `1 FAMC @F1@`
 case/G7-CONT-UNDER-PTR	output:line-syntax	TS16	NONCONFORMANT	-	line 7: line-syntax: stray text
 case/G7-CONT-UNDER-PTR	output:payload-pointer	TS16	NONCONFORMANT	-	line 6: payload-pointer: FAMC "@F1@\nstray text": text where a pointer is required
 case/G7-CONT-UNDER-PTR	reparse	TS16	FATAL	-	Parse error at line 6: Expected digit for level number
+case/G7-CONT-WRONG-LEVEL	keep	TS16	LOST	-	missing line `2 CONT b`; model lacks `a\nb`
 case/G7-CONT-WRONG-LEVEL	output:cont-position	TS16	NONCONFORMANT	-	line 7: cont-position: after another substructure
-case/G7-CONT-WRONG-LEVEL	output:payload-unexpected	TS16	NONCONFORMANT	-	line 5: payload-unexpected: INDI "b": this structure takes no payload
 case/G7-COORD-INVALID	keep	TS14	LOST	-	model lacks `91.5N`; model lacks `W200`
 case/G7-COORD-INVALID	output:payload-coordinate	TS34	NONCONFORMANT	-	line 10: payload-coordinate: LONG "W200": not a coordinate
 case/G7-CORP-CONTACTS	keep	TS13	LOST	-	missing line `3 PHON +1 555 0100`; missing line `3 EMAIL a@example.com`; missing line `3 WWW https://example.com`
@@ -203,6 +203,8 @@ case/G7-UID-MULTI	keep	TS12	LOST	-	missing line `1 UID 0b0f2b0a-0000-4000-8000-0
 case/G7-UID-MULTI	roundtrip	TS12	DIFF	-	- INDI#0/REFN = "a"; - INDI#0/REFN[1] = "b"; - INDI#0/UID = "0b0f2b0a-0000-4000-8000-000000000001"; - INDI#0/UID[1] = "0b0f2b0a-0000-4000-8000-000000000002";...
 case/G7-VOID-AS-XREF	lacks	TS23	PRESENT	-	output has `0 @VOID@`
 case/G7-VOID-AS-XREF	output:xref-syntax	TS23	NONCONFORMANT	-	line 5: xref-syntax: @VOID@
+case/G7-XREF-INVALID	output:escape	TS23	NONCONFORMANT	-	line 10: escape: @I#1@
+case/G7-XREF-INVALID	output:payload-pointer	TS23	NONCONFORMANT	-	line 10: payload-pointer: WIFE "@I#1@": text where a pointer is required
 case/G7-XREF-INVALID	output:pointer-syntax	TS23	NONCONFORMANT	-	line 10: pointer-syntax: @I#1@
 case/G7-XREF-INVALID	output:xref-syntax	TS23	NONCONFORMANT	-	line 5: xref-syntax: @I#1@
 case/G7-XREF-LOWER	output:xref-syntax	TS23	NONCONFORMANT	-	line 5: xref-syntax: @i1@

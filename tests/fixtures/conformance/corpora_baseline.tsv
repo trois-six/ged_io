@@ -53,7 +53,7 @@ gedcom4j/sample/utf8_cr_nobom.ged	FATAL	0
 gedcom4j/sample/utf8_crlf_bom.ged	OK	0	eol-final,head-required
 gedcom4j/sample/utf8_crlf_nobom.ged	OK	0	eol-final,head-required
 gedcom4j/sample/utf8_lf_nobom.ged	OK	0	eol-final,head-required
-gedcom4j/sample/validatesOk.ged	OK	0	cardinality-min,cont-position,eol-final,gedc-vers,misplaced,payload-unexpected
+gedcom4j/sample/validatesOk.ged	OK	0	cardinality-min,cont-position,eol-final,gedc-vers,misplaced
 gedcom4j/sample/willis-ansel.ged	FATAL	0	
 gedcom4j/sample/willis-ascii.ged	FATAL	0	
 gedcom4j/sample/willis-unicode-bigendian.ged	FATAL	0	
