@@ -16,7 +16,7 @@
 //! | Blank or whitespace-only lines; a level with nothing after it | Skipped. |
 //! | Spaces, tabs or a byte order mark before the level; leading zeros or more than two digits in it; runs of spaces or tabs between level, identifier and tag | Accepted. |
 //! | The delimiter after the tag | Exactly one space (or tab); the payload keeps its own leading and trailing spaces. |
-//! | `CONT` and `CONC` | Joined into the payload they continue, under any tag, at any level, also after substructures: the parent's text, else the previous sibling's (a continuation written one level too high), else the parent's empty payload. Under a pointer with nothing else to continue, kept as a structure. |
+//! | `CONT` and `CONC` | Joined into the payload they continue (an identifier on the line is dropped), under any tag, at any level, also after substructures: the parent's text, else the previous sibling's (a continuation written one level too high), else the parent's empty payload. Under a pointer with nothing else to continue, kept as a structure. |
 //! | A line without a level number | Continues the previous line's text after a newline; after a pointer (or before any record) it becomes a structure with an empty tag holding the line. |
 //! | A level that jumps by more than one | The line nests in the deepest open structure of its record, never in another record. |
 //! | Deeper than 255 levels | Attached at depth 255, as a sibling. |

@@ -54,10 +54,10 @@ gedcom4j/sample/utf8_crlf_bom.ged	OK	0
 gedcom4j/sample/utf8_crlf_nobom.ged	OK	0	
 gedcom4j/sample/utf8_lf_nobom.ged	OK	0	
 gedcom4j/sample/validatesOk.ged	OK	0	
-gedcom4j/sample/willis-ansel.ged	OK	33	
-gedcom4j/sample/willis-ascii.ged	OK	29	
-gedcom4j/sample/willis-unicode-bigendian.ged	OK	29	
-gedcom4j/sample/willis-unicode-littleendian.ged	OK	29	
+gedcom4j/sample/willis-ansel.ged	OK	5	
+gedcom4j/sample/willis-ascii.ged	OK	1	
+gedcom4j/sample/willis-unicode-bigendian.ged	OK	1	
+gedcom4j/sample/willis-unicode-littleendian.ged	OK	1	
 gedcom4j/sample/willis.ged	OK	1	
 gramps/data/tests/exp_sample_ged.ged	OK	3	
 gramps/data/tests/imp_ANSEL_CR.ged	OK	66	

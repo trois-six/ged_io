@@ -103,6 +103,14 @@ fn continuations_join_under_any_tag() {
 }
 
 #[test]
+fn continuation_with_an_identifier_joins() {
+    let tree = parse_tree(&h5("0 @N1@ NOTE a\n1 @N2@ CONT b\n1 @C@ CONC c\n"));
+    let note = find(&tree, "@N1@", &[]);
+    assert_eq!(note.text(), Some("a\nbc"));
+    assert_eq!(note.substructures().count(), 0);
+}
+
+#[test]
 fn continuation_of_an_empty_payload() {
     let tree = parse_tree(&h5(
         "0 @N1@ NOTE\n1 CONC abc\n1 CONT def\n0 @N2@ NOTE\n1 CONC\n",

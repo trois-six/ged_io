@@ -769,7 +769,9 @@ impl Builder {
             self.close_record(text);
         } else {
             self.pop_for(level);
-            if xref.is_none() && (tag == "CONT" || tag == "CONC") {
+            // An identifier on a continuation names nothing a reader could
+            // point to: the line continues its text all the same.
+            if tag == "CONT" || tag == "CONC" {
                 if let Some(target) = self.continuation_target(tags.intern("")) {
                     let raw = payload.map_or(Span::default(), |(s, e)| Span::new(s, e - s));
                     self.add_piece(target, tag == "CONT", false, raw);
