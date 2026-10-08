@@ -109,7 +109,31 @@ pub fn encode_ansel(text: &str) -> Result<Vec<u8>, String> {
 
 /// The whole model as text, for "the model keeps this value" checks.
 pub fn dump(m: &Model) -> String {
-    format!("{:?}", m.0)
+    use std::fmt::Write;
+    let mut d = format!("{:?}", m.0);
+    // The `Debug` of an event shows little of it: add the dates and ages,
+    // which the model keeps as written.
+    let mut add = |date: &Option<ged_io::types::date::Date>,
+                   age: &Option<ged_io::types::age::Age>| {
+        let _ = write!(d, "\n{date:?} {age:?}");
+    };
+    for i in &m.0.individuals {
+        for e in &i.events {
+            add(&e.date, &e.age);
+        }
+        for a in &i.attributes {
+            add(&a.date, &a.age);
+        }
+    }
+    for f in &m.0.families {
+        for e in &f.events {
+            add(&e.date, &e.age);
+            for detail in &e.family_event_details {
+                add(&None, &detail.age);
+            }
+        }
+    }
+    d
 }
 
 /// True when `needle` appears in the model. A needle is matched against the

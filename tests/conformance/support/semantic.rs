@@ -7,14 +7,23 @@
 //!
 //! 1. An empty payload equals an absent one.
 //! 2. Substructure order matters only among siblings with the same tag.
-//! 3. In dates, `GREGORIAN ` (7.0) and `@#DGREGORIAN@ ` (5.5.1) are dropped.
+//! 3. Dates compare by meaning, not by version spelling: `GREGORIAN ` (7.0)
+//!    and `@#DGREGORIAN@ ` (5.5.1) are dropped, the other 5.5.1 escapes
+//!    equal the 7.0 calendar keywords (`@#DROMAN@`, `ROMAN` and `_ROMAN`
+//!    alike), `B.C.` equals `BCE`, keywords and months compare without
+//!    case, a dual year's suffix is two digits (`613/4` is `613/14`), and
+//!    words outside parentheses are single-spaced.
 //! 4. Extension tags declared in `HEAD.SCHMA` compare by URI.
 //! 5. Xrefs are arbitrary: records are matched by content and by the content
 //!    of what they point to (iterated, Weisfeiler-Lehman style), then by xref.
 //! 6. `@@` is decoded per version before comparing (done by `tree.rs`).
 //! 7. 5.5.1 enumeration payloads compare case-insensitively.
 //! 8. Optionally, `GIVN a b` equals `GIVN a` + `GIVN b` (name pieces).
-//! 9. Age spacing: `<1y` equals `< 1y`.
+//! 9. Ages compare by meaning: `<1y` equals `< 1y`, units of any case and
+//!    spacing are equal (`0 Y` is `0y`), a week is seven days (5.5.1 has
+//!    no weeks), and a number alone counts years, as the test-files convert
+//!    it.
+//! 10. Times compare with zero-padded fields: `2:5` equals `02:05`.
 //!
 //! Conversion mode (5.5.1 against its 7.0 conversion) also treats a NOTE
 //! record referenced once, an inline NOTE and a single-use SNOTE as equal, and
@@ -322,15 +331,198 @@ fn norm(
 pub fn normalise_value(tag: &str, s: &str, v: Version) -> String {
     let mut s = s.to_string();
     if tag == "DATE" || tag == "SDATE" {
+        s = normalise_date(&s);
         s = s.replace("@#DGREGORIAN@ ", "");
         if v == Version::V70 || s.starts_with("GREGORIAN ") || s.contains(" GREGORIAN ") {
             s = s.replace("GREGORIAN ", "");
         }
     }
     if tag == "AGE" {
-        s = s.replace("< ", "<").replace("> ", ">");
+        s = normalise_age(&s.replace("< ", "<").replace("> ", ">"));
+    }
+    if tag == "TIME" {
+        s = normalise_time(&s);
     }
     s
+}
+
+/// The keywords, calendars, months and epochs of dates, which compare
+/// without case (5.5.1 p. 21).
+const DATE_WORDS: &[&str] = &[
+    "ABT",
+    "CAL",
+    "EST",
+    "BEF",
+    "AFT",
+    "BET",
+    "AND",
+    "FROM",
+    "TO",
+    "INT",
+    "GREGORIAN",
+    "JULIAN",
+    "HEBREW",
+    "FRENCH_R",
+    "ROMAN",
+    "UNKNOWN",
+    "BCE",
+    "B.C.",
+    "JAN",
+    "FEB",
+    "MAR",
+    "APR",
+    "MAY",
+    "JUN",
+    "JUL",
+    "AUG",
+    "SEP",
+    "OCT",
+    "NOV",
+    "DEC",
+    "VEND",
+    "BRUM",
+    "FRIM",
+    "NIVO",
+    "PLUV",
+    "VENT",
+    "GERM",
+    "FLOR",
+    "PRAI",
+    "MESS",
+    "THER",
+    "FRUC",
+    "COMP",
+    "TSH",
+    "CSH",
+    "KSL",
+    "TVT",
+    "SHV",
+    "ADR",
+    "ADS",
+    "NSN",
+    "IYR",
+    "SVN",
+    "TMZ",
+    "AAV",
+    "ELL",
+];
+
+/// A 5.5.1 dual year with its other year's last two digits: `613/4` is the
+/// year 613 or 614, written `613/14`. `None` for any other word.
+fn dual_year(word: &str) -> Option<String> {
+    let (year, digits) = word.split_once('/')?;
+    if digits.is_empty() || digits.len() > 2 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let year: u64 = year.parse().ok()?;
+    let modulus = 10u64.pow(u32::try_from(digits.len()).ok()?);
+    let mut other = year - year % modulus + digits.parse::<u64>().ok()?;
+    if other <= year {
+        other += modulus;
+    }
+    Some(format!("{year}/{:02}", other % 100))
+}
+
+/// Rule 3: the words of a date outside parentheses, single-spaced, with
+/// keywords and months upper case, dual years with two digits, and 5.5.1
+/// escapes and `B.C.` in their 7.0 spelling.
+fn normalise_date(s: &str) -> String {
+    let (head, phrase) = s.split_at(s.find('(').unwrap_or(s.len()));
+    let mut words: Vec<String> = Vec::new();
+    let mut rest = head.trim();
+    while !rest.is_empty() {
+        // An escape is one word even with its space: `@#DFRENCH R@`.
+        let end = if let Some(escape) = rest.strip_prefix("@#") {
+            escape.find('@').map_or(rest.len(), |at| at + 3)
+        } else {
+            rest.find(char::is_whitespace).unwrap_or(rest.len())
+        };
+        let word = rest[..end].to_string();
+        rest = rest[end..].trim_start();
+        let upper = word.to_ascii_uppercase();
+        let word = if DATE_WORDS.contains(&upper.as_str()) || upper.starts_with("@#D") {
+            upper
+        } else {
+            dual_year(&word).unwrap_or(word)
+        };
+        let word = match word.as_str() {
+            "@#DJULIAN@" => "JULIAN".to_string(),
+            "@#DHEBREW@" => "HEBREW".to_string(),
+            "@#DFRENCH R@" => "FRENCH_R".to_string(),
+            "@#DROMAN@" | "ROMAN" => "_ROMAN".to_string(),
+            "@#DUNKNOWN@" | "UNKNOWN" => "_UNKNOWN".to_string(),
+            "B.C." => "BCE".to_string(),
+            _ => word,
+        };
+        words.push(word);
+    }
+    let mut out = words.join(" ");
+    if !phrase.is_empty() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(phrase);
+    }
+    out
+}
+
+/// Rule 9: an age's `<n><unit>` parts, lower case, weeks as days, in the
+/// order years, months, days; anything else as it is.
+fn normalise_age(s: &str) -> String {
+    let (bound, body) = match s.strip_prefix(['<', '>']) {
+        Some(body) => (&s[..1], body),
+        None => ("", s),
+    };
+    let mut counts = [None::<u64>; 3];
+    let compact: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+    let mut rest = compact.as_str();
+    while !rest.is_empty() {
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        let Ok(n) = rest[..digits].parse::<u64>() else {
+            return s.to_string();
+        };
+        // A number without unit counts years, as the test-files convert it.
+        let unit = match rest[digits..].chars().next() {
+            None if counts == [None; 3] => 'y',
+            Some(unit) => unit,
+            None => return s.to_string(),
+        };
+        if digits == rest.len() {
+            counts[0] = Some(n);
+            break;
+        }
+        let (slot, n) = match unit.to_ascii_lowercase() {
+            'y' => (0, n),
+            'm' => (1, n),
+            'w' => (2, n.saturating_mul(7)),
+            'd' => (2, n),
+            _ => return s.to_string(),
+        };
+        counts[slot] = Some(counts[slot].unwrap_or(0).saturating_add(n));
+        rest = &rest[digits + 1..];
+    }
+    let parts: Vec<String> = counts
+        .iter()
+        .zip(['y', 'm', 'd'])
+        .filter_map(|(n, unit)| n.map(|n| format!("{n}{unit}")))
+        .collect();
+    if parts.is_empty() {
+        return s.to_string();
+    }
+    format!("{bound}{}", parts.join(" "))
+}
+
+/// Rule 10: a time's numeric fields zero-padded to two digits.
+fn normalise_time(s: &str) -> String {
+    let (clock, rest) = s.split_at(s.find(['.', 'Z', 'z']).unwrap_or(s.len()));
+    if !clock
+        .split(':')
+        .all(|f| !f.is_empty() && f.len() <= 2 && f.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return s.to_string();
+    }
+    let padded: Vec<String> = clock.split(':').map(|f| format!("{f:0>2}")).collect();
+    format!("{}{}", padded.join(":"), rest.to_ascii_uppercase())
 }
 
 /// Conversion rule: a NOTE/SNOTE record pointed to exactly once is inlined.
@@ -662,6 +854,31 @@ mod tests {
                 .any(|l| l.starts_with("- INDI#0/BIRT/DATE = \"1900\"")),
             "{d:?}"
         );
+    }
+
+    #[test]
+    fn dates_ages_and_times_compare_by_meaning() {
+        let date = |s: &str| normalise_value("DATE", s, Version::V551);
+        assert_eq!(date("abt @#DJULIAN@ 1700"), date("ABT JULIAN 1700"));
+        assert_eq!(date("@#DFRENCH R@ 1 vend 2"), date("FRENCH_R 1 VEND 2"));
+        assert_eq!(date("ROMAN 28"), date("_ROMAN 28"));
+        assert_eq!(date("20 B.C."), date("20  BCE"));
+        assert_eq!(date("INT 1 jan 1900 (in jan)"), "INT 1 JAN 1900 (in jan)");
+        assert_eq!(date("26 AUG 613/4"), date("26 AUG 613/14"));
+        assert_eq!(date("Value DATE A"), "Value DATE A");
+        assert_ne!(date("1 JAN 1900"), date("2 JAN 1900"));
+        let age = |s: &str| normalise_value("AGE", s, Version::V551);
+        assert_eq!(age("1w"), age("7d"));
+        assert_eq!(age("< 0 Y"), age("<0y"));
+        assert_eq!(age("11m99y"), age("99y 11m"));
+        assert_eq!(age("majeur"), "majeur");
+        assert_eq!(age("79"), age("79y"));
+        assert_eq!(age("< 8"), age("<8y"));
+        assert_ne!(age("1y"), age("1m"));
+        let time = |s: &str| normalise_value("TIME", s, Version::V70);
+        assert_eq!(time("2:5"), time("02:05"));
+        assert_eq!(time("2:50:00.00z"), time("02:50:00.00Z"));
+        assert_eq!(time("noon"), "noon");
     }
 
     #[test]
