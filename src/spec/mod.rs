@@ -123,7 +123,7 @@
 //! assert_eq!(records[1].substructures[0].tag, "_SEX");
 //! ```
 
-mod conform;
+pub(crate) mod conform;
 mod lines;
 mod payload;
 pub(crate) mod schema;

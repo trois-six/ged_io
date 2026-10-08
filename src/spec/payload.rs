@@ -4,9 +4,12 @@
 //!
 //! Each check returns `None` when the payload is valid, else why it is not.
 
+use std::borrow::Cow;
+
 use crate::types::age::AgeValue;
 use crate::types::date::{DateExact, DatePeriod, DateValue, Time};
 use crate::version::VersionRules;
+use crate::writer::{special_bytes, CONTROL, MAYBE_BANNED, TAB};
 use crate::GedcomVersion;
 
 use super::schema::{EnumSet, Kind};
@@ -40,8 +43,88 @@ impl Family {
 /// Whether a character may not appear in a payload of the tree
 /// ([`VersionRules::is_banned`]). Line breaks inside text are written as
 /// `CONT` lines, so they are never banned here.
+#[inline]
 pub(crate) fn is_banned(c: char, rules: &VersionRules) -> bool {
     !matches!(c, '\n' | '\r') && rules.is_banned(c)
+}
+
+/// Whether `text` holds a character [`is_banned`] bans. Only a C0 control
+/// but a line break, DEL, or the lead bytes of a C1 control (`C2`) or of
+/// U+FFFE and U+FFFF (`EF`) can start one: text without them, nearly all
+/// of it, is tested eight bytes at a time ([`special_bytes`]).
+#[inline]
+pub(crate) fn has_banned(text: &str, rules: &VersionRules) -> bool {
+    special_bytes(text) & (TAB | CONTROL | MAYBE_BANNED) != 0
+        && text.chars().any(|c| is_banned(c, rules))
+}
+
+/// Whether `text` is a valid payload of `kind` ([`check`] finds nothing).
+#[inline]
+pub(crate) fn is_valid(kind: Kind, set: Option<&EnumSet>, text: &str, family: Family) -> bool {
+    let simple = match kind {
+        // 5.5.1 reads month names in any case (p. 21).
+        Kind::Date => is_simple_date(text, false, family == Family::V551),
+        Kind::DateExact => is_simple_date(text, true, family == Family::V551),
+        _ => false,
+    };
+    if simple {
+        debug_assert_eq!(check(kind, set, text, family), None, "{text:?}");
+        return true;
+    }
+    check(kind, set, text, family).is_none()
+}
+
+/// Whether `text` is a Gregorian date of the commonest shapes, valid in
+/// both versions without a full parse: `[ABT|CAL|EST|BEF|AFT ]` then
+/// `YYYY`, `MON YYYY` or `D MON YYYY` (only the last, without a keyword,
+/// when `exact`), single spaces, keywords and months in upper case (months
+/// in any case when `any_case`, valid in 5.5.1 only), a year of one to four
+/// digits from 1, a day of the month from 1. Anything else is left to the
+/// grammar.
+pub(crate) fn is_simple_date(text: &str, exact: bool, any_case: bool) -> bool {
+    // A number of one to `max_len` digits, not starting with 0.
+    let number = |w: &[u8], max_len: usize| -> Option<u16> {
+        if w.is_empty() || w.len() > max_len || w.first() == Some(&b'0') {
+            return None;
+        }
+        w.iter().try_fold(0_u16, |n, &c| {
+            c.is_ascii_digit().then(|| n * 10 + u16::from(c - b'0'))
+        })
+    };
+    let leap = |y: u16| y.is_multiple_of(4) && (!y.is_multiple_of(100) || y.is_multiple_of(400));
+    let days = |m: &[u8], y: u16| -> Option<u16> {
+        let upper = match *m {
+            [x, y, z] => [x, y, z].map(|c| c.to_ascii_uppercase()),
+            _ => return None,
+        };
+        if !any_case && upper != m {
+            return None;
+        }
+        Some(match &upper {
+            b"JAN" | b"MAR" | b"MAY" | b"JUL" | b"AUG" | b"OCT" | b"DEC" => 31,
+            b"APR" | b"JUN" | b"SEP" | b"NOV" => 30,
+            b"FEB" if leap(y) => 29,
+            b"FEB" => 28,
+            _ => return None,
+        })
+    };
+    let mut words = text.as_bytes().split(|&c| c == b' ');
+    let mut first = words.next();
+    if !exact && matches!(first, Some(b"ABT" | b"CAL" | b"EST" | b"BEF" | b"AFT")) {
+        first = words.next();
+    }
+    match (first, words.next(), words.next(), words.next()) {
+        (Some(y), None, None, None) => !exact && number(y, 4).is_some(),
+        (Some(m), Some(y), None, None) => {
+            !exact && number(y, 4).is_some_and(|y| days(m, y).is_some())
+        }
+        (Some(d), Some(m), Some(y), None) => number(y, 4).is_some_and(|y| {
+            number(d, 2)
+                .zip(days(m, y))
+                .is_some_and(|(d, max)| d <= max)
+        }),
+        _ => false,
+    }
 }
 
 /// Why `text` is not a valid payload of `kind` (an enumeration of `set`).
@@ -67,12 +150,11 @@ pub(crate) fn check(
             // 5.5.1 shows the bound and the age with a space between them,
             // as its patterns show every part (p. 42); both spellings are
             // read as written.
-            let text = match family {
-                Family::V551 => match text.as_bytes() {
-                    [b'<' | b'>', b' ', ..] => format!("{}{}", &text[..1], &text[2..]),
-                    _ => text.to_string(),
-                },
-                Family::V7 => text.to_string(),
+            let text = match (family, text.as_bytes()) {
+                (Family::V551, [b'<' | b'>', b' ', ..]) => {
+                    Cow::Owned(format!("{}{}", &text[..1], &text[2..]))
+                }
+                _ => Cow::Borrowed(text),
             };
             AgeValue::parse_strict(&text, v).err().map(|e| e.reason)
         }
@@ -379,5 +461,106 @@ mod tests {
         assert!(!is_banned('\r', &V70));
         assert!(is_banned('\u{85}', &V70));
         assert!(!is_banned('é', &V551));
+    }
+
+    #[test]
+    fn banned_characters_by_bytes() {
+        use crate::version::{V551, V70};
+        for rules in [&V551, &V70] {
+            for c in [
+                'a', 'é', '\t', '\n', '\r', '\u{7}', '\u{7f}', '\u{85}', '\u{a0}', '\u{fffd}',
+            ]
+            .into_iter()
+            .chain(['\u{fffe}', '\u{ffff}', '\u{10000}'])
+            {
+                let text = format!("ab{c}cd\nef");
+                assert_eq!(
+                    has_banned(&text, rules),
+                    text.chars().any(|c| is_banned(c, rules)),
+                    "{c:?}"
+                );
+            }
+        }
+    }
+
+    /// The dates the fast path takes are exactly those of the grammar that
+    /// it takes: every one valid in both versions.
+    #[test]
+    fn simple_dates_are_valid() {
+        let months = [
+            "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+            "Jan", "oct", "fEb", "FOO", "Foo",
+        ];
+        let mut taken = 0;
+        for keyword in [
+            "", "ABT ", "CAL ", "EST ", "BEF ", "AFT ", "abt ", "BET ", "FROM ",
+        ] {
+            for year in [
+                "1", "4", "99", "100", "400", "1600", "1700", "1900", "1999", "2000", "2024",
+                "9999", "0", "01", "10000",
+            ] {
+                let mut texts = vec![format!("{keyword}{year}")];
+                for month in months {
+                    texts.push(format!("{keyword}{month} {year}"));
+                    for day in ["0", "1", "9", "01", "28", "29", "30", "31", "32"] {
+                        texts.push(format!("{keyword}{day} {month} {year}"));
+                        texts.push(format!("{keyword}{day}  {month} {year}"));
+                    }
+                }
+                for text in texts {
+                    for (kind, exact) in [(Kind::Date, false), (Kind::DateExact, true)] {
+                        if is_simple_date(&text, exact, true) {
+                            assert_eq!(
+                                check(kind, None, &text, Family::V551),
+                                None,
+                                "{text:?} {kind:?}"
+                            );
+                            // Written as it is in 5.5.1, its month in upper
+                            // case in 7.x.
+                            let date = crate::types::date::Date {
+                                value: Some(text.clone()),
+                                time: None,
+                                phrase: None,
+                            };
+                            let upper = crate::types::date::Date {
+                                value: Some(text.to_ascii_uppercase()),
+                                ..date.clone()
+                            };
+                            assert_eq!(date.to_version(GedcomVersion::V5_5_1), date, "{text:?}");
+                            for version in [GedcomVersion::V7_0, GedcomVersion::V7_1] {
+                                assert_eq!(date.to_version(version), upper, "{text:?} {version}");
+                            }
+                        }
+                        if !is_simple_date(&text, exact, false) {
+                            continue;
+                        }
+                        taken += 1;
+                        for family in [Family::V551, Family::V7] {
+                            assert_eq!(check(kind, None, &text, family), None, "{text:?} {kind:?}");
+                        }
+                        // Written alike in every version (the conversion
+                        // of the typed model skips them).
+                        let date = crate::types::date::Date {
+                            value: Some(text.clone()),
+                            time: None,
+                            phrase: None,
+                        };
+                        for version in [
+                            GedcomVersion::V5_5_1,
+                            GedcomVersion::V7_0,
+                            GedcomVersion::V7_1,
+                        ] {
+                            assert_eq!(date.to_version(version), date, "{text:?} {version}");
+                        }
+                    }
+                }
+            }
+        }
+        assert!(taken > 5000, "{taken}");
+        assert!(!is_simple_date("29 FEB 1900", false, false));
+        assert!(is_simple_date("29 FEB 2000", true, false));
+        assert!(!is_simple_date("ABT 1 JAN 1900", true, false));
+        assert!(!is_simple_date("2 Oct 1822", false, false));
+        assert!(is_simple_date("2 Oct 1822", true, true));
     }
 }

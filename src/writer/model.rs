@@ -93,7 +93,7 @@ pub(crate) fn write_data(
             .submitters
             .first()
             .and_then(|s| xrefs.record(0, s.xref.as_deref()))
-            .map(str::to_string);
+            .map(Cow::into_owned);
         Some(first.unwrap_or_else(|| {
             let xref = xrefs.fresh("U");
             stub = Some(head::stub_submitter(xref.clone()));
@@ -175,7 +175,12 @@ impl<'c, 'a> Ctx<'c, 'a> {
     fn write_record(&mut self, tag: &str, xref: Option<&str>) -> Result<(), WriteError> {
         let index = self.next_record();
         let Ctx { out, xrefs, .. } = self;
-        out.put(0, xrefs.record(index, xref), tag, PayloadRef::None)
+        out.put(
+            0,
+            xrefs.record(index, xref).as_deref(),
+            tag,
+            PayloadRef::None,
+        )
     }
 
     /// Writes a record line with a text payload (a shared note record).
@@ -187,7 +192,12 @@ impl<'c, 'a> Ctx<'c, 'a> {
     ) -> Result<(), WriteError> {
         let index = self.next_record();
         let Ctx { out, xrefs, .. } = self;
-        out.put(0, xrefs.record(index, xref), tag, PayloadRef::Text(text))
+        out.put(
+            0,
+            xrefs.record(index, xref).as_deref(),
+            tag,
+            PayloadRef::Text(text),
+        )
     }
 
     /// Writes a structure whose payload, if any, is text.
@@ -1746,7 +1756,7 @@ impl<'c, 'a> Ctx<'c, 'a> {
                 let xref = self
                     .xrefs
                     .record(index, tag.xref.as_deref())
-                    .map(str::to_string);
+                    .map(Cow::into_owned);
                 self.put_untyped(0, xref.as_deref(), &name, tag.value.as_deref())?;
             } else {
                 self.put_untyped(level, tag.xref.as_deref(), &tag.tag, tag.value.as_deref())?;

@@ -6,10 +6,13 @@
 //! [`super::lines`].
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use super::payload::{self, Family};
 use super::schema::{tag_index, Kind, Schema, StructId, DATASET};
+use super::tables::{self, TAGS};
 use super::{Deviation, DeviationKind};
+use crate::tree::node::STANDARD_TAGS;
 use crate::tree::Node;
 use crate::tree::PayloadRef;
 use crate::version::VersionRules;
@@ -45,7 +48,7 @@ pub(crate) struct Validator<'a> {
 /// The extension tags `HEAD.SCHMA` documents with a standard URI (7.x
 /// §1.5.1): a tag that stands for a standard structure type, and a tag that
 /// stands for a standard enumeration value, month or calendar.
-#[derive(Default)]
+#[derive(Default, PartialEq)]
 pub(crate) struct Aliases {
     pub(crate) structs: HashMap<String, StructId>,
     pub(crate) words: HashMap<String, String>,
@@ -222,7 +225,6 @@ pub(crate) enum Pick {
 /// Among a pointer form and a text form of one tag (5.5.1), the one the
 /// payload has.
 pub(crate) fn pick(rules: &VersionRules, sup: StructId, tag: &str, is_pointer: bool) -> Pick {
-    let schema = rules.spec;
     if !rules.is_valid_tag(tag) {
         return Pick::BadTag;
     }
@@ -232,18 +234,170 @@ pub(crate) fn pick(rules: &VersionRules, sup: StructId, tag: &str, is_pointer: b
     let Some(index) = tag_index(tag) else {
         return Pick::Unknown;
     };
-    let mut found = None;
-    for s in schema.subs_tagged(sup, index) {
-        let ptr = matches!(schema.kind(s.id).0, Kind::Pointer | Kind::NullablePointer);
-        if ptr == is_pointer {
-            return Pick::Type(s.id);
+    pick_tagged(rules.spec, sup, index, tag, is_pointer)
+}
+
+/// [`pick`] for a node: a standard tag (valid in every version, and no
+/// extension) is found by its index instead of its text.
+pub(crate) fn pick_node<'a, N: Node<'a>>(
+    rules: &VersionRules,
+    sup: StructId,
+    n: N,
+    is_pointer: bool,
+) -> Pick {
+    Picker::of(rules).pick(sup, n, is_pointer)
+}
+
+/// [`pick`] with the tables of one version at hand.
+#[derive(Clone, Copy)]
+pub(crate) struct Picker {
+    rules: &'static VersionRules,
+    table: Option<&'static PickTable>,
+    spec_tags: &'static [u8; STANDARD_TAGS.len()],
+}
+
+impl Picker {
+    pub(crate) fn of(rules: &VersionRules) -> Picker {
+        let rules = rules.version.rules();
+        Picker {
+            rules,
+            table: PickTable::of(rules.spec),
+            spec_tags: spec_tags(),
         }
-        found = found.or(Some(s.id));
     }
+
+    /// The most substructures tagged `TAGS[tag]` a `sup` takes
+    /// ([`bounds`]).
+    #[inline]
+    pub(crate) fn max(self, sup: StructId, tag: u8) -> Option<u8> {
+        match self.table.and_then(|t| t.cell(sup, tag)) {
+            Some(&[_, _, max]) => u8::try_from(max).ok(),
+            None => bounds(self.rules.spec, sup, tag).1,
+        }
+    }
+
+    /// [`pick_node`].
+    #[inline]
+    pub(crate) fn pick<'a, N: Node<'a>>(self, sup: StructId, n: N, is_pointer: bool) -> Pick {
+        let index = n
+            .standard_tag()
+            .and_then(|t| self.spec_tags.get(usize::from(t)))
+            .copied()
+            .filter(|&t| t != u8::MAX);
+        match index {
+            Some(index) => {
+                let found = match self.table {
+                    Some(table) => table.get(sup, index, is_pointer),
+                    None => choose(self.rules.spec, sup, index, is_pointer),
+                };
+                picked(found, n.tag())
+            }
+            None => pick(self.rules, sup, n.tag(), is_pointer),
+        }
+    }
+
+    /// The index in the tables' tags of a tag of the tree's standard table.
+    pub(crate) fn spec_tag(self, standard: u16) -> Option<u8> {
+        self.spec_tags
+            .get(usize::from(standard))
+            .copied()
+            .filter(|&t| t != u8::MAX)
+    }
+}
+
+/// The index in the tables' tags of each tag of the tree's standard table,
+/// `u8::MAX` for none.
+fn spec_tags() -> &'static [u8; STANDARD_TAGS.len()] {
+    static TABLE: OnceLock<[u8; STANDARD_TAGS.len()]> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut table = [u8::MAX; STANDARD_TAGS.len()];
+        for (t, tag) in table.iter_mut().zip(STANDARD_TAGS) {
+            *t = tag_index(tag).unwrap_or(u8::MAX);
+        }
+        table
+    })
+}
+
+/// [`pick`] of a tag the tables know, `TAGS[index]`.
+fn pick_tagged(schema: &Schema, sup: StructId, index: u8, tag: &str, is_pointer: bool) -> Pick {
+    let found = match PickTable::of(schema) {
+        Some(table) => table.get(sup, index, is_pointer),
+        None => choose(schema, sup, index, is_pointer),
+    };
+    picked(found, tag)
+}
+
+/// What [`choose`] found, as a [`Pick`] of `tag`.
+fn picked(found: Option<StructId>, tag: &str) -> Pick {
     match found {
         Some(id) => Pick::Type(id),
         None if matches!(tag, "CONT" | "CONC") => Pick::Continuation,
         None => Pick::Misplaced,
+    }
+}
+
+/// The substructure type of `sup` tagged `TAGS[index]`: among its forms
+/// (5.5.1 has a pointer form and a text form of some tags), the first whose
+/// payload is a pointer exactly when `is_pointer`, else the first.
+fn choose(schema: &Schema, sup: StructId, index: u8, is_pointer: bool) -> Option<StructId> {
+    let mut found = None;
+    for s in schema.subs_tagged(sup, index) {
+        let ptr = matches!(schema.kind(s.id).0, Kind::Pointer | Kind::NullablePointer);
+        if ptr == is_pointer {
+            return Some(s.id);
+        }
+        found = found.or(Some(s.id));
+    }
+    found
+}
+
+/// [`choose`] for every structure type and tag of a version's tables,
+/// computed once: `[pointer, other]` per type and tag, 0 for none (0 is the
+/// dataset, never a substructure).
+pub(crate) struct PickTable {
+    /// Per type and tag: [`choose`] with a pointer, without one, and the
+    /// most occurrences ([`bounds`]; `u16::MAX`: no bound).
+    cells: Box<[[u16; 3]]>,
+}
+
+impl PickTable {
+    fn of(schema: &Schema) -> Option<&'static PickTable> {
+        static TABLES: [OnceLock<PickTable>; 3] = [const { OnceLock::new() }; 3];
+        let (slot, schema) = [&tables::V551, &tables::V70, &tables::V71]
+            .into_iter()
+            .enumerate()
+            .find(|(_, s)| std::ptr::eq(*s, schema))?;
+        Some(TABLES.get(slot)?.get_or_init(|| {
+            let mut cells = Vec::with_capacity(schema.structs.len() * TAGS.len());
+            for sup in 0..schema.structs.len() {
+                for index in 0..TAGS.len() {
+                    let (Ok(sup), Ok(index)) = (StructId::try_from(sup), u8::try_from(index))
+                    else {
+                        cells.push([0, 0, u16::MAX]);
+                        continue;
+                    };
+                    let [pointer, other] = [true, false]
+                        .map(|is_pointer| choose(schema, sup, index, is_pointer).unwrap_or(0));
+                    let max = bounds(schema, sup, index).1.map_or(u16::MAX, u16::from);
+                    cells.push([pointer, other, max]);
+                }
+            }
+            PickTable {
+                cells: cells.into_boxed_slice(),
+            }
+        }))
+    }
+
+    #[inline]
+    fn cell(&self, sup: StructId, index: u8) -> Option<&[u16; 3]> {
+        self.cells
+            .get(usize::from(sup) * TAGS.len() + usize::from(index))
+    }
+
+    #[inline]
+    fn get(&self, sup: StructId, index: u8, is_pointer: bool) -> Option<StructId> {
+        let [pointer, other, _] = *self.cell(sup, index)?;
+        Some(if is_pointer { pointer } else { other }).filter(|&id| id != 0)
     }
 }
 
@@ -436,7 +590,7 @@ impl<'a> Validator<'a> {
             self.schema.tag(sup)
         };
         let is_pointer = matches!(n.payload(), PayloadRef::Pointer(_));
-        match pick(self.rules, sup, tag, is_pointer) {
+        match pick_node(self.rules, sup, n, is_pointer) {
             Pick::Type(id) => Ok(id),
             Pick::Extension => Err(None),
             Pick::BadTag => Err(Some((

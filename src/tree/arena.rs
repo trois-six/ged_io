@@ -18,6 +18,7 @@ pub(crate) struct View<'a> {
 }
 
 impl<'a> View<'a> {
+    #[inline]
     pub(crate) fn tag(self, node: &RawNode) -> &'a str {
         let id = node.tag as usize;
         match STANDARD_TAGS.get(id) {
@@ -33,6 +34,7 @@ impl<'a> View<'a> {
         }
     }
 
+    #[inline]
     pub(crate) fn xref(self, index: usize) -> Option<&'a str> {
         if !self.nodes.get(index)?.has_xref {
             return None;
@@ -42,6 +44,7 @@ impl<'a> View<'a> {
         self.xrefs.get(at).map(|(_, span)| span.get(self.text))
     }
 
+    #[inline]
     pub(crate) fn payload(self, node: &RawNode) -> PayloadRef<'a> {
         match node.kind {
             Kind::None => PayloadRef::None,

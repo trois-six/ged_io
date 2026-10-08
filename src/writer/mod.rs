@@ -53,18 +53,20 @@ mod head;
 mod model;
 mod xref;
 
+use std::borrow::Cow;
 use std::fmt;
 use std::io;
 
+use crate::spec::conform::{conform_records, Rec, RecRef};
 use crate::tree::{Node, PayloadRef, Structure, Tree};
 use crate::types::GedcomData;
 use crate::version::{GedcomVersion, VersionRules};
-use emit::{emit, LineSink};
+use emit::{emit, emit_tagged, LineSink};
 use xref::XrefMap;
 
-pub(crate) use emit::{extension_tag, new_xref};
+pub(crate) use emit::{extension_tag, new_xref, special_bytes, CONTROL, MAYBE_BANNED, TAB};
 pub(crate) use head::{complete as complete_head, needs_submitter, stub_submitter, PLACEHOLDER};
-pub(crate) use xref::numbered_xref;
+pub(crate) use xref::{numbered_xref, XrefIndex};
 
 /// The line terminator of written files.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -562,7 +564,7 @@ impl GedcomWriter {
         tree: &Tree,
     ) -> Result<WriteReport, WriteError> {
         let rules = self.rules_for(tree.declared_version());
-        self.write_conformed(&mut writer, rules, tree.to_structures())
+        self.write_given(&mut writer, rules, tree.records().map(Rec::given).collect())
     }
 
     /// Writes owned records — such as [`Tree::to_structures`] gives — like
@@ -667,36 +669,53 @@ impl GedcomWriter {
             repairs: sink.repairs,
         })
     }
+
+    /// Repairs records as they are given ([`conform_records`]: only those
+    /// that need a repair are copied), then writes them.
+    fn write_given<'n, N: Node<'n>>(
+        &self,
+        writer: &mut dyn io::Write,
+        rules: &'static VersionRules,
+        mut records: Vec<Rec<'n, N>>,
+    ) -> Result<WriteReport, WriteError> {
+        let mut conformed = conform_records(&mut records, rules.version);
+        let repairs = std::mem::take(&mut conformed.repairs);
+        let known = |x: &str| conformed.knows(x);
+        if self.config.on_nonconformant == RepairPolicy::Error {
+            if let Some(first) = repairs.into_iter().next() {
+                return Err(WriteError::NonConformant(Box::new(first)));
+            }
+            return self.write_given_nodes(writer, rules, &mut records, &known);
+        }
+        let mut report = self.write_given_nodes(writer, rules, &mut records, &known)?;
+        report.repairs.splice(0..0, repairs);
+        Ok(report)
+    }
+
+    fn write_given_nodes<'n, N: Node<'n>>(
+        &self,
+        writer: &mut dyn io::Write,
+        rules: &'static VersionRules,
+        records: &mut [Rec<'n, N>],
+        known: &dyn Fn(&str) -> bool,
+    ) -> Result<WriteReport, WriteError> {
+        let encoding = self.encoding(rules);
+        let mut sink = self.sink(Some(writer), rules, encoding);
+        if self.wants_bom(rules, encoding, false) {
+            sink.bom();
+        }
+        write_recs(rules, &mut sink, records, Some(known))?;
+        sink.finish()?;
+        Ok(WriteReport {
+            repairs: sink.repairs,
+        })
+    }
 }
 
-/// What a level-0 structure of a tree is to the writer.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Role {
-    /// The first `HEAD`, completed and written first.
-    Head,
-    /// An empty `TRLR`, replaced by the writer's own.
-    Trailer,
-    /// Any other record, written in order.
-    Record,
-}
-
-fn roles<'n, N: Node<'n>>(
-    records: impl Iterator<Item = N> + Clone,
-) -> impl Iterator<Item = (Role, N)> + Clone {
-    let mut head_seen = false;
-    records.map(move |r| {
-        let role = match r.tag() {
-            "HEAD" if !head_seen => {
-                head_seen = true;
-                Role::Head
-            }
-            "TRLR" if r.payload() == PayloadRef::None && r.children().next().is_none() => {
-                Role::Trailer
-            }
-            _ => Role::Record,
-        };
-        (role, r)
-    })
+/// Whether a record is the trailer the writer replaces by its own: an
+/// empty `TRLR`.
+fn is_trailer<'n, N: Node<'n>>(r: &Rec<'n, N>) -> bool {
+    r.tag() == "TRLR" && r.is_empty()
 }
 
 /// The prefix of the identifiers generated for a standard record without
@@ -715,31 +734,36 @@ fn record_prefix(tag: &str) -> Option<&'static str> {
     })
 }
 
-/// Writes the records of a tree: the completed header, the records in
-/// order (identifiers mapped), then `TRLR`.
-fn write_records<'n, N, I>(
+/// Writes the records of a dataset: the completed header (the first
+/// `HEAD`), the other records in order (identifiers mapped), then `TRLR`
+/// (in place of any empty one). `known` tells the identifiers of records
+/// the conformance repair made valid and unique.
+fn write_recs<'n, N: Node<'n>>(
     rules: &'static VersionRules,
     sink: &mut LineSink<'_>,
-    records: I,
-) -> Result<(), WriteError>
-where
-    N: Node<'n>,
-    I: Iterator<Item = N> + Clone,
-{
-    let others = roles(records.clone())
-        .filter(|(role, _)| *role == Role::Record)
+    records: &mut [Rec<'n, N>],
+    known: Option<&dyn Fn(&str) -> bool>,
+) -> Result<(), WriteError> {
+    let head_at = records.iter().position(|r| r.tag() == "HEAD");
+    let mut head = match head_at.and_then(|i| records.get_mut(i)) {
+        Some(h) => h.take_structure(),
+        None => Structure::new("HEAD"),
+    };
+    let records = &*records;
+    let others = records
+        .iter()
+        .enumerate()
+        .filter(move |&(i, r)| Some(i) != head_at && !is_trailer(r))
         .map(|(_, r)| r);
-    let mut xrefs = XrefMap::new(
-        rules,
-        others.clone().map(|r| (record_prefix(r.tag()), r.xref())),
-    );
+    let ids = others.clone().map(|r| (record_prefix(r.tag()), r.xref()));
+    let mut xrefs = match known {
+        Some(known) => XrefMap::conformed(rules, ids, known),
+        None => XrefMap::new(rules, ids),
+    };
     for repair in std::mem::take(&mut xrefs.repairs) {
         sink.repair(repair)?;
     }
 
-    let mut head = roles(records)
-        .find(|(role, _)| *role == Role::Head)
-        .map_or_else(|| Structure::new("HEAD"), |(_, h)| h.to_owned_structure());
     map_pointers(&mut head, &mut xrefs);
     let mut stub = None;
     let submitter = if head::needs_submitter(&head, rules) {
@@ -747,7 +771,7 @@ where
             .clone()
             .enumerate()
             .find(|(_, r)| r.tag() == "SUBM")
-            .and_then(|(i, r)| xrefs.record(i, r.xref()).map(str::to_string));
+            .and_then(|(i, r)| xrefs.record(i, r.xref()).map(Cow::into_owned));
         Some(first.unwrap_or_else(|| {
             let xref = xrefs.fresh("U");
             stub = Some(head::stub_submitter(xref.clone()));
@@ -763,71 +787,121 @@ where
         put_structure(&mut out, &stub)?;
     }
 
+    let (mut given, mut owned) = (Vec::new(), Vec::new());
     for (index, record) in others.enumerate() {
-        let xref = xrefs.record(index, record.xref()).map(Box::<str>::from);
-        out.sink.source_line = record.line();
-        let tag = match record.tag() {
-            "HEAD" | "TRLR" => {
-                let to = format!("_{}", record.tag());
-                let detail = format!(
-                    "output line {}: record {} written as {to}",
-                    out.sink.line_no(),
-                    record.tag()
-                );
-                out.sink
-                    .repair(Repair::new(record.line(), RepairKind::Misplaced, detail))?;
-                std::borrow::Cow::Owned(to)
-            }
-            tag => std::borrow::Cow::Borrowed(tag),
-        };
-        out.sink.source_line = record.line();
-        put_node(
-            &mut out,
-            &mut xrefs,
-            0,
-            xref.as_deref(),
-            &tag,
-            record.payload(),
-        )?;
-        // The substructures, depth first, without recursion.
-        let mut stack = vec![(1_usize, record.children())];
-        while let Some((level, children)) = stack.last_mut() {
-            let level = *level;
-            let Some(child) = children.next() else {
-                stack.pop();
-                continue;
-            };
-            out.sink.source_line = child.line();
-            put_node(
-                &mut out,
-                &mut xrefs,
-                level,
-                child.xref(),
-                child.tag(),
-                child.payload(),
-            )?;
-            stack.push((level + 1, child.children()));
+        let xref = xrefs.record(index, record.xref());
+        let xref = xref.as_deref();
+        match record.get() {
+            RecRef::Given(n) => put_record(&mut out, &mut xrefs, xref, n, &mut given)?,
+            RecRef::Owned(s) => put_record(&mut out, &mut xrefs, xref, s, &mut owned)?,
         }
     }
     out.sink.source_line = 0;
     out.put(0, None, "TRLR", PayloadRef::None)
 }
 
+/// Writes the records of a dataset that the conformance repair repaired
+/// already, as owned structures ([`write_recs`]).
+fn write_records<'n, N, I>(
+    rules: &'static VersionRules,
+    sink: &mut LineSink<'_>,
+    records: I,
+) -> Result<(), WriteError>
+where
+    N: Node<'n>,
+    I: Iterator<Item = N>,
+{
+    let mut records: Vec<Rec<'n, N>> = records.map(Rec::given).collect();
+    write_recs(rules, sink, &mut records, None)
+}
+
+/// Writes a record, with the identifier `xref`, and its substructures,
+/// pointers mapped. `stack` is room for the walk, kept from record to
+/// record.
+fn put_record<'a, M: Node<'a>>(
+    out: &mut Emitter<'_, '_>,
+    xrefs: &mut XrefMap<'_>,
+    xref: Option<&str>,
+    record: M,
+    stack: &mut Vec<(usize, M::Children)>,
+) -> Result<(), WriteError> {
+    put_record_line(out, xrefs, xref, record)?;
+    // The substructures, depth first, without recursion.
+    stack.clear();
+    stack.push((1, record.children()));
+    while let Some((level, children)) = stack.last_mut() {
+        let level = *level;
+        let Some(child) = children.next() else {
+            stack.pop();
+            continue;
+        };
+        out.sink.source_line = child.line();
+        put_node(
+            out,
+            xrefs,
+            level,
+            child.xref(),
+            child.tag(),
+            child.standard_tag().is_some(),
+            child.payload(),
+        )?;
+        stack.push((level + 1, child.children()));
+    }
+    Ok(())
+}
+
+/// Writes the line of a record, with the identifier `xref`.
+fn put_record_line<'a, M: Node<'a>>(
+    out: &mut Emitter<'_, '_>,
+    xrefs: &mut XrefMap<'_>,
+    xref: Option<&str>,
+    record: M,
+) -> Result<(), WriteError> {
+    out.sink.source_line = record.line();
+    let tag = match record.tag() {
+        "HEAD" | "TRLR" => {
+            let to = format!("_{}", record.tag());
+            let detail = format!(
+                "output line {}: record {} written as {to}",
+                out.sink.line_no(),
+                record.tag()
+            );
+            out.sink
+                .repair(Repair::new(record.line(), RepairKind::Misplaced, detail))?;
+            Cow::Owned(to)
+        }
+        tag => Cow::Borrowed(tag),
+    };
+    out.sink.source_line = record.line();
+    let standard = matches!(tag, Cow::Borrowed(_)) && record.standard_tag().is_some();
+    put_node(out, xrefs, 0, xref, &tag, standard, record.payload())
+}
+
 /// Writes one structure with its pointer mapped.
 fn put_node(
-    out: &mut dyn Out,
+    out: &mut Emitter<'_, '_>,
     xrefs: &mut XrefMap<'_>,
     level: usize,
     xref: Option<&str>,
     tag: &str,
+    standard: bool,
     payload: PayloadRef<'_>,
 ) -> Result<(), WriteError> {
+    let (rules, sink) = (out.rules, &mut *out.sink);
     match payload {
         PayloadRef::Pointer(p) => {
             let p = xrefs.pointer(p);
-            out.put(level, xref, tag, PayloadRef::Pointer(&p))
+            emit_tagged(
+                rules,
+                sink,
+                level,
+                xref,
+                tag,
+                standard,
+                PayloadRef::Pointer(&p),
+            )
         }
-        payload => out.put(level, xref, tag, payload),
+        payload => emit_tagged(rules, sink, level, xref, tag, standard, payload),
     }
 }
 
