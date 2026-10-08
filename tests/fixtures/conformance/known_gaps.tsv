@@ -41,36 +41,8 @@ id	check	cause	current	next	note
 # TS33 the written header is not synthesised for the target (5.5.1 SOUR/SUBM, GEDC.VERS, FORM)
 # TS34 values and structures the target does not allow are written verbatim (no conformance repair)
 ansel/*	output:eol-final	TS32	NONCONFORMANT	-	every output of the family
-ansel/file	ansel-write	TS30	CHANGED	-	ANSEL write then read differs
 ansel/file	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ANSEL for UTF-8 output
 ansel/file	roundtrip	TS30	DIFF	-	- INDI#0/NOTE[37] = "mark E0: Ả B\u{309} C\u{309} D\u{309} Ẻ F\u{309} G\u{309} H\u{309} Ỉ J\u{309} K\u{309} L\u{309} M\u{309} N\u{309} Ỏ P\u{309} Q\u{309} R\...
-ansel/mark-E0	decode	TS30	CHANGED	-	model lacks "mark E0: Ả B\u{309} C\u{309} D\u{309} Ẻ F\u{309} G\u{309} H\u{309} Ỉ J\u{309} K\u{309} L\u{309} M\u{309} N\u{309} Ỏ P\u{309} Q\u{309} R\u{309} S...
-ansel/mark-E1	decode	TS30	CHANGED	-	model lacks "mark E1: À B\u{300} C\u{300} D\u{300} È F\u{300} G\u{300} H\u{300} Ì J\u{300} K\u{300} L\u{300} M\u{300} Ǹ Ò P\u{300} Q\u{300} R\u{300} S\u{300}...
-ansel/mark-E2	decode	TS30	CHANGED	-	model lacks "mark E2: Á B\u{301} Ć D\u{301} É F\u{301} Ǵ H\u{301} Í J\u{301} Ḱ Ĺ Ḿ Ń Ó Ṕ Q\u{301} Ŕ Ś T\u{301} Ú V\u{301} Ẃ X\u{301} Ý Ź á b\u{301} ć d\u{301...
-ansel/mark-E3	decode	TS30	CHANGED	-	model lacks "mark E3: Â B\u{302} Ĉ D\u{302} Ê F\u{302} Ĝ Ĥ Î Ĵ K\u{302} L\u{302} M\u{302} N\u{302} Ô P\u{302} Q\u{302} R\u{302} Ŝ T\u{302} Û V\u{302} Ŵ X\u{3...
-ansel/mark-E4	decode	TS30	CHANGED	-	model lacks "mark E4: Ã B\u{303} C\u{303} D\u{303} Ẽ F\u{303} G\u{303} H\u{303} Ĩ J\u{303} K\u{303} L\u{303} M\u{303} Ñ Õ P\u{303} Q\u{303} R\u{303} S\u{303}...
-ansel/mark-E5	decode	TS30	CHANGED	-	model lacks "mark E5: Ā B\u{304} C\u{304} D\u{304} Ē F\u{304} Ḡ H\u{304} Ī J\u{304} K\u{304} L\u{304} M\u{304} N\u{304} Ō P\u{304} Q\u{304} R\u{304} S\u{304}...
-ansel/mark-E6	decode	TS30	CHANGED	-	model lacks "mark E6: Ă B\u{306} C\u{306} D\u{306} Ĕ F\u{306} Ğ H\u{306} Ĭ J\u{306} K\u{306} L\u{306} M\u{306} N\u{306} Ŏ P\u{306} Q\u{306} R\u{306} S\u{306}...
-ansel/mark-E7	decode	TS30	CHANGED	-	model lacks "mark E7: Ȧ Ḃ Ċ Ḋ Ė Ḟ Ġ Ḣ İ J\u{307} K\u{307} L\u{307} Ṁ Ṅ Ȯ Ṗ Q\u{307} Ṙ Ṡ Ṫ U\u{307} V\u{307} Ẇ Ẋ Ẏ Ż ȧ ḃ ċ ḋ ė ḟ ġ ḣ i\u{307} j\u{307} k\u{307...
-ansel/mark-E8	decode	TS30	CHANGED	-	model lacks "mark E8: Ä B\u{308} C\u{308} D\u{308} Ë F\u{308} G\u{308} Ḧ Ï J\u{308} K\u{308} L\u{308} M\u{308} N\u{308} Ö P\u{308} Q\u{308} R\u{308} S\u{308}...
-ansel/mark-E9	decode	TS30	CHANGED	-	model lacks "mark E9: Ǎ B\u{30c} Č Ď Ě F\u{30c} Ǧ Ȟ Ǐ J\u{30c} Ǩ Ľ M\u{30c} Ň Ǒ P\u{30c} Q\u{30c} Ř Š Ť Ǔ V\u{30c} W\u{30c} X\u{30c} Y\u{30c} Ž ǎ b\u{30c} č ...
-ansel/mark-EA	decode	TS30	CHANGED	-	model lacks "mark EA: Å B\u{30a} C\u{30a} D\u{30a} E\u{30a} F\u{30a} G\u{30a} H\u{30a} I\u{30a} J\u{30a} K\u{30a} L\u{30a} M\u{30a} N\u{30a} O\u{30a} P\u{30a...
-ansel/mark-EE	decode	TS30	CHANGED	-	model lacks "mark EE: A\u{30b} B\u{30b} C\u{30b} D\u{30b} E\u{30b} F\u{30b} G\u{30b} H\u{30b} I\u{30b} J\u{30b} K\u{30b} L\u{30b} M\u{30b} N\u{30b} Ő P\u{30b...
-ansel/mark-F0	decode	TS30	CHANGED	-	model lacks "mark F0: A\u{327} B\u{327} Ç Ḑ Ȩ F\u{327} Ģ Ḩ I\u{327} J\u{327} Ķ Ļ M\u{327} Ņ O\u{327} P\u{327} Q\u{327} Ŗ Ş Ţ U\u{327} V\u{327} W\u{327} X\u{3...
-ansel/mark-F1	decode	TS30	CHANGED	-	model lacks "mark F1: Ą B\u{328} C\u{328} D\u{328} Ę F\u{328} G\u{328} H\u{328} Į J\u{328} K\u{328} L\u{328} M\u{328} N\u{328} Ǫ P\u{328} Q\u{328} R\u{328} S...
-ansel/mark-F2	decode	TS30	CHANGED	-	model lacks "mark F2: Ạ Ḅ C\u{323} Ḍ Ẹ F\u{323} G\u{323} Ḥ Ị J\u{323} Ḳ Ḷ Ṃ Ṇ Ọ P\u{323} Q\u{323} Ṛ Ṣ Ṭ Ụ Ṿ Ẉ X\u{323} Ỵ Ẓ ạ ḅ c\u{323} ḍ ẹ f\u{323} g\u{323}...
-ansel/mark-F3	decode	TS30	CHANGED	-	model lacks "mark F3: A\u{324} B\u{324} C\u{324} D\u{324} E\u{324} F\u{324} G\u{324} H\u{324} I\u{324} J\u{324} K\u{324} L\u{324} M\u{324} N\u{324} O\u{324} ...
-ansel/mark-F4	decode	TS30	CHANGED	-	model lacks "mark F4: Ḁ B\u{325} C\u{325} D\u{325} E\u{325} F\u{325} G\u{325} H\u{325} I\u{325} J\u{325} K\u{325} L\u{325} M\u{325} N\u{325} O\u{325} P\u{325...
-ansel/mark-F7	decode	TS30	CHANGED	-	model lacks "mark F7: A\u{326} B\u{326} C\u{326} D\u{326} E\u{326} F\u{326} G\u{326} H\u{326} I\u{326} J\u{326} K\u{326} L\u{326} M\u{326} N\u{326} O\u{326} ...
-ansel/mark-F9	decode	TS30	CHANGED	-	model lacks "mark F9: A\u{32e} B\u{32e} C\u{32e} D\u{32e} E\u{32e} F\u{32e} G\u{32e} Ḫ I\u{32e} J\u{32e} K\u{32e} L\u{32e} M\u{32e} N\u{32e} O\u{32e} P\u{32e...
-ansel/stacked-0	decode	TS30	CHANGED	-	model lacks "stacked 0: ầ"
-ansel/stacked-1	decode	TS30	CHANGED	-	model lacks "stacked 1: ế"
-ansel/stacked-2	decode	TS30	CHANGED	-	model lacks "stacked 2: ậ"
-ansel/stacked-3	decode	TS30	CHANGED	-	model lacks "stacked 3: ắ"
-ansel/stacked-4	decode	TS30	CHANGED	-	model lacks "stacked 4: ǖ"
-ansel/stacked-5	decode	TS30	CHANGED	-	model lacks "stacked 5: ḹ"
-ansel/stacked-6	decode	TS30	CHANGED	-	model lacks "stacked 6: ṍ"
-ansel/stacked-7	decode	TS30	CHANGED	-	model lacks "stacked 7: ỏ\u{302}"
 calendar/*	output:eol-final	TS32	NONCONFORMANT	-	every output of the family
 calendar/*	output:v7-gedc-form	TS17	NONCONFORMANT	-	every output of the family
 case/*	output:eol-final	TS32	NONCONFORMANT	-	every output of the family
@@ -125,7 +97,8 @@ case/G5-SEX-LOWER	parse	TS3	FATAL	-	Parse error at line 7: Unknown gender value 
 case/G5-SOUR-TEXT-CITATION	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Example"
 case/G5-SUBN	keep	TS13	LOST	-	missing line `1 ORDI yes`
 case/G5-SUBN	roundtrip	TS13	DIFF	-	- HEAD#0/SUBN = "@SN@"; - SUBN@SN@ = ""; - SUBN@SN@/ANCE = "4"; - SUBN@SN@/DESC = "4"; - SUBN@SN@/FAMF = "Family file"; - SUBN@SN@/ORDI = "yes"; - SUBN@SN@/R...
-case/G5-WRITE-NO-CHAR-MISMATCH	parse	TS9	FATAL	-	Encoding error: Invalid UTF-16 sequence: odd byte length
+case/G5-WRITE-NO-CHAR-MISMATCH	lacks	TS18	PRESENT	-	output has `CHAR UNICODE`
+case/G5-WRITE-NO-CHAR-MISMATCH	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
 case/G5-XREF-INVALID	output:pointer-syntax	TS23	NONCONFORMANT	-	line 14: pointer-syntax: @IABCDEFGHIJKLMNOPQRSTUVWXYZ0123@
 case/G5-XREF-INVALID	output:xref-syntax	TS23	NONCONFORMANT	-	line 6: xref-syntax: @#I1@
 case/G5-XREF-WITH-SPACE	parse	TS7	FATAL	-	Parse error at line 10: Unhandled tag ref@
@@ -222,7 +195,6 @@ convert/age-invalid	convert	TS25	DIFF	-	108 differences: - INDI#0/EVEN[10]/AGE =
 convert/age-valid	convert	TS25	DIFF	-	48 differences: - INDI#0/DEAT = ""; - INDI#0/DEAT/AGE = "0y"; - INDI#0/DEAT/AGE/PHRASE = "Stillborn"; - INDI#0/EVEN/AGE = "<8y"; - INDI#0/EVEN[10]/AGE = "0y"...
 convert/atsign	convert	TS25	DIFF	-	24 differences: - SNOTE#10 = "JULIAN  date escape two spaces"; - SNOTE#11 = "non-leading JULIAN date escape"; - SNOTE#12 = "JULIAN_AND_SUCH date escape inter...
 convert/atsign	output:escape	TS25	NONCONFORMANT	-	line 10: escape: @ one leading
-convert/char_utf8-2	parse	TS9	FATAL	-	Encoding error: Invalid UTF-16 sequence: odd byte length
 convert/date-all	convert	TS25	DIFF	-	8292 differences: - INDI#0/BIRT[10]/DATE = "NOV 1401 BCE"; - INDI#0/BIRT[10]/DATE/PHRASE = "NOV 1401/8 B.C."; - INDI#0/BIRT[11]/DATE = "8 MAR 1401 BCE"; - IN...
 convert/date-all	output:payload-date	TS25	NONCONFORMANT	-	line 1002: payload-date: DATE "AFT UNKNOWN _MONTH 11": not in the date grammar
 convert/date-dual-invalid	convert	TS25	DIFF	-	252 differences: - INDI#0/BIRT/DATE = "BET 1701 AND 1799"; - INDI#0/BIRT/DATE/PHRASE = "1701/99"; - INDI#0/BIRT[10]/DATE = "8 JAN 1703"; - INDI#0/BIRT[10]/DA...
@@ -282,35 +254,28 @@ corpus/familysearch/gedcom71/warnings71.ged	roundtrip	TS13	DIFF	-	- FAM#0/SLGS[1
 encoding/*	output:eol-final	TS32	NONCONFORMANT	-	every output of the family
 encoding/*	output:head-required	TS33	NONCONFORMANT	-	every output of the family
 encoding/*	output:v7-gedc-form	TS17	NONCONFORMANT	-	every output of the family
-encoding/ansel-conc-diacritic	parse	TS10	FATAL	-	Parse error at line 9: Expected digit for level number
+encoding/ansel-conc-diacritic	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ANSEL for UTF-8 output
 encoding/ansel-cr	parse	TS1	FATAL	-	Parse error at line 1: Tokenization error! LineValue("1 SOUR EXAMPLE_APP")
-encoding/ansel-lf	keep	TS30	LOST	-	model lacks `André`
 encoding/ansel-lf	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ANSEL for UTF-8 output
 encoding/ansel-lf	roundtrip	TS30	DIFF	-	- INDI#0/NAME = "André /Exemple/"; + INDI#0/NAME = "Andre\u{301} /Exemple/"; + INDI#0/NAME/SURN = "Exemple"
-encoding/ansi-cp1252	parse	TS9	FATAL	-	Encoding error: Invalid UTF-8: invalid utf-8 sequence of 1 bytes from index 117
-encoding/ascii-declared-latin1-bytes	parse	TS9	FATAL	-	Encoding error: Invalid UTF-8: invalid utf-8 sequence of 1 bytes from index 116
+encoding/ansi-cp1252	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ANSI for UTF-8 output
+encoding/ascii-declared-latin1-bytes	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ASCII for UTF-8 output
 encoding/cp1252-lower-case-label	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: cp1252 for UTF-8 output
 encoding/eol-lfcr	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Exemple"
 encoding/eol-mixed-cr-lf	keep	TS11	LOST	-	model lacks `Ann /Example/`
 encoding/eol-mixed-cr-lf	roundtrip	TS11	LOST	-	tag NAME (x1); text Ann /Example/ (x1)
-encoding/ibmpc-cp437	keep	TS9	LOST	-	model lacks `André`
 encoding/ibmpc-cp437	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: IBMPC for UTF-8 output
-encoding/ibmpc-cp437	roundtrip	TS9	LOST	-	text André /Exemple/ (x1)
 encoding/latin1-declared	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ISO-8859-1 for UTF-8 output
 encoding/latin9-euro	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ISO-8859-15 for UTF-8 output
-encoding/macintosh	keep	TS9	LOST	-	model lacks `André`
 encoding/macintosh	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: MACINTOSH for UTF-8 output
-encoding/macintosh	roundtrip	TS9	LOST	-	text André /Exemple/ (x1)
 encoding/utf16be-crlf	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
-encoding/utf16be-crlf	reparse	TS18	FATAL	-	Encoding error: Invalid UTF-16 sequence: odd byte length
 encoding/utf16be-crlf	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Exemple"
 encoding/utf16le-cr	parse	TS1	FATAL	-	Parse error at line 1: Tokenization error! LineValue("1 SOUR EXAMPLE_APP")
 encoding/utf16le-nobom	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
-encoding/utf16le-nobom	reparse	TS18	FATAL	-	Encoding error: Invalid UTF-16 sequence: odd byte length
 encoding/utf16le-nobom	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Exemple"
 encoding/utf8-bom-v7-crlf	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Exemple"
 encoding/utf8-cr	parse	TS1	FATAL	-	Parse error at line 1: Tokenization error! LineValue("1 SOUR EXAMPLE_APP")
-encoding/utf8-mislabel-unicode	parse	TS9	FATAL	-	Encoding error: Invalid UTF-16 sequence: odd byte length
+encoding/utf8-mislabel-unicode	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
 encoding/windows-1252-euro	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: WINDOWS-1252 for UTF-8 output
 enum551/*	output:eol-final	TS32	NONCONFORMANT	-	every output of the family
 enum551/*/EVENT_DETAIL.RESN/Confidential	enum	TS19	CHANGED	-	49 superstructures; e.g. now "Confidential"
@@ -492,11 +457,9 @@ feature/*	output:eol-final	TS32	NONCONFORMANT	-	every output of the family
 feature/*	output:head-required	TS33	NONCONFORMANT	-	every output of the family
 feature/*	output:v7-char	TS17	NONCONFORMANT	-	every output of the family
 feature/*	output:v7-gedc-form	TS17	NONCONFORMANT	-	every output of the family
-feature/gedzip/test-files-5-char_utf16le-2	archive	TS18	FATAL	-	GEDCOM error: Parse error at line 0: Expected digit for level number
 feature/read/extensions70	parse	TS3	FATAL	-	Parse error at line 21: Unrecognized FamilyLink.pedigree code: _ENUMVAL
 feature/streaming/test-files-5-char_utf16le-2	parse	TS9	FATAL	-	Encoding error: Streaming parser requires UTF-8 input; file appears to use a different encoding (possibly UTF-16)
 feature/write-551/test-files-5-char_utf16le-2	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
-feature/write-551/test-files-5-char_utf16le-2	reparse	TS18	FATAL	-	Parse error at line 0: Expected digit for level number
 feature/write-551/test-files-7-date-all	output:payload-date	TS25	NONCONFORMANT	-	line 1007: payload-date: DATE "BET 1950 AND 302 BCE": not in the date grammar
 feature/write-551/test-files-7-date-all	output:record-size	TS27	NONCONFORMANT	-	line 4876: record-size: 128973 bytes
 feature/write-551/test-files-7-obje-1	output:payload-enum	TS25	NONCONFORMANT	-	line 10: payload-enum: FORM "audio/wav": not in MULTIMEDIA_FORMAT
@@ -509,34 +472,25 @@ feature/write-70/maximal551	output:payload-enum	TS25	NONCONFORMANT	-	line 179: p
 feature/write-70/maximal551	output:payload-file-path	TS25	NONCONFORMANT	-	line 651: payload-file-path: FILE "Value FILE A": not a URI reference
 feature/write-70/maximal551	output:payload-media-type	TS25	NONCONFORMANT	-	line 640: payload-media-type: FORM "wav": not a media type
 feature/write-70/maximal551	output:payload-pointer	TS25	NONCONFORMANT	-	line 208: payload-pointer: SOUR "Free text source description\nsecond line": text where a pointer is required
-feature/write-70/test-files-5-char_utf16le-2	reparse	TS18	FATAL	-	Parse error at line 0: Expected digit for level number
 fixture/*	output:eol-final	TS32	NONCONFORMANT	-	every output of the family
 fixture/extensions70	parse	TS3	FATAL	-	Parse error at line 21: Unrecognized FamilyLink.pedigree code: _ENUMVAL
 fixture/maximal551	roundtrip	TS13	DIFF	-	- FAM#21/OBJE/FILE = "Value FILE A"; - FAM#21/OBJE/FILE[1] = "Value FILE A"; - FAM#21/OBJE/FILE[1]/FORM = "bmp"; - FAM#21/OBJE/FILE[2] = "Value FILE B"; - FA...
 matrix/*	output:eol-final	TS32	NONCONFORMANT	-	every output of the family
 matrix/ansel-cr	parse	TS1	FATAL	-	Parse error at line 1: Tokenization error! LineValue("1 SOUR EXAMPLE_APP")
-matrix/ansel-crlf	keep	TS30	LOST	-	model lacks `Zoé`; model lacks `Saint-Étienne, Région`; model lacks `Deuxième ligne, Weiß`; model lacks `Jürgen`; model lacks `Façade, Île`
 matrix/ansel-crlf	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ANSEL for UTF-8 output
-matrix/ansel-crlf	roundtrip	TS30	DIFF	-	- FAM@F1@/MARR/PLAC = "Façade, Île"; - INDI@I1@/BIRT/PLAC = "Saint-Étienne, Région"; - INDI@I1@/NAME = "Zoé /Exemple/"; - INDI@I1@/NAME/GIVN = "Zoé"; - INDI@...
-matrix/ansel-lf	keep	TS30	LOST	-	model lacks `Zoé`; model lacks `Saint-Étienne, Région`; model lacks `Deuxième ligne, Weiß`; model lacks `Jürgen`; model lacks `Façade, Île`
 matrix/ansel-lf	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ANSEL for UTF-8 output
-matrix/ansel-lf	roundtrip	TS30	DIFF	-	- FAM@F1@/MARR/PLAC = "Façade, Île"; - INDI@I1@/BIRT/PLAC = "Saint-Étienne, Région"; - INDI@I1@/NAME = "Zoé /Exemple/"; - INDI@I1@/NAME/GIVN = "Zoé"; - INDI@...
 matrix/latin1-cr	parse	TS1	FATAL	-	Parse error at line 1: Tokenization error! LineValue("1 SOUR EXAMPLE_APP")
 matrix/latin1-crlf	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ISO-8859-1 for UTF-8 output
 matrix/latin1-lf	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ISO-8859-1 for UTF-8 output
 matrix/utf16be-cr	parse	TS1	FATAL	-	Parse error at line 1: Tokenization error! LineValue("1 SOUR EXAMPLE_APP")
 matrix/utf16be-crlf	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
-matrix/utf16be-crlf	reparse	TS18	FATAL	-	Parse error at line 0: Expected digit for level number
 matrix/utf16be-crlf	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Пример"
 matrix/utf16be-lf	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
-matrix/utf16be-lf	reparse	TS18	FATAL	-	Parse error at line 0: Expected digit for level number
 matrix/utf16be-lf	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Пример"
 matrix/utf16le-cr	parse	TS1	FATAL	-	Parse error at line 1: Tokenization error! LineValue("1 SOUR EXAMPLE_APP")
 matrix/utf16le-crlf	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
-matrix/utf16le-crlf	reparse	TS18	FATAL	-	Parse error at line 0: Expected digit for level number
 matrix/utf16le-crlf	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Пример"
 matrix/utf16le-lf	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
-matrix/utf16le-lf	reparse	TS18	FATAL	-	Parse error at line 0: Expected digit for level number
 matrix/utf16le-lf	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Пример"
 matrix/utf8-bom-cr	parse	TS1	FATAL	-	Parse error at line 1: Tokenization error! LineValue("1 SOUR EXAMPLE_APP")
 matrix/utf8-bom-crlf	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Пример"
@@ -869,14 +823,10 @@ vendored/5/atsign	output:escape	TS20	NONCONFORMANT	-	line 10: escape: @ one lead
 vendored/5/char_ascii_1	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ASCII for UTF-8 output
 vendored/5/char_ascii_2	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: LATIN1 for UTF-8 output
 vendored/5/char_utf16be-1	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
-vendored/5/char_utf16be-1	reparse	TS18	FATAL	-	Encoding error: Invalid UTF-16 sequence: odd byte length
 vendored/5/char_utf16be-2	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
-vendored/5/char_utf16be-2	reparse	TS18	FATAL	-	Parse error at line 0: Expected digit for level number
 vendored/5/char_utf16le-1	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
-vendored/5/char_utf16le-1	reparse	TS18	FATAL	-	Encoding error: Invalid UTF-16 sequence: odd byte length
 vendored/5/char_utf16le-2	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
-vendored/5/char_utf16le-2	reparse	TS18	FATAL	-	Parse error at line 0: Expected digit for level number
-vendored/5/char_utf8-2	parse	TS9	FATAL	-	Encoding error: Invalid UTF-16 sequence: odd byte length
+vendored/5/char_utf8-2	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
 vendored/5/date-all	output:payload-date	TS34	NONCONFORMANT	-	line 1026: payload-date: DATE "BET 1950 AND GREGORIAN 302": not in the date grammar
 vendored/5/date-all	output:record-size	TS27	NONCONFORMANT	-	line 4877: record-size: 131517 bytes
 vendored/5/date-dual-invalid	output:payload-date	TS34	NONCONFORMANT	-	line 100: payload-date: DATE "JAN 1751/9": not in the date grammar

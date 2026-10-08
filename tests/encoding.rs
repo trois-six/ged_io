@@ -6,7 +6,7 @@
 //! - ISO-8859-1 (Latin-1)
 //! - ISO-8859-15 (Latin-9)
 
-use ged_io::encoding::{decode_gedcom_bytes, encode_to_bytes, GedcomEncoding};
+use ged_io::encoding::{decode, encode_to_bytes, GedcomEncoding};
 use ged_io::GedcomBuilder;
 
 /// Helper to create a minimal GEDCOM string with a name containing special characters.
@@ -309,7 +309,7 @@ fn test_detect_encoding_utf8_bom() {
     let mut bytes = vec![0xEF, 0xBB, 0xBF];
     bytes.extend_from_slice(b"0 HEAD\n0 TRLR\n");
 
-    let (_, encoding) = decode_gedcom_bytes(&bytes).unwrap();
+    let encoding = decode(&bytes).encoding;
     assert_eq!(encoding, GedcomEncoding::Utf8);
 }
 
@@ -318,7 +318,7 @@ fn test_detect_encoding_utf16_le_bom() {
     let content = "0 HEAD\n0 TRLR\n";
     let bytes = encode_to_bytes(content, GedcomEncoding::Utf16Le).unwrap();
 
-    let (_, encoding) = decode_gedcom_bytes(&bytes).unwrap();
+    let encoding = decode(&bytes).encoding;
     assert_eq!(encoding, GedcomEncoding::Utf16Le);
 }
 
@@ -327,7 +327,7 @@ fn test_detect_encoding_utf16_be_bom() {
     let content = "0 HEAD\n0 TRLR\n";
     let bytes = encode_to_bytes(content, GedcomEncoding::Utf16Be).unwrap();
 
-    let (_, encoding) = decode_gedcom_bytes(&bytes).unwrap();
+    let encoding = decode(&bytes).encoding;
     assert_eq!(encoding, GedcomEncoding::Utf16Be);
 }
 
@@ -335,7 +335,7 @@ fn test_detect_encoding_utf16_be_bom() {
 fn test_detect_encoding_from_char_tag_utf8() {
     let bytes = b"0 HEAD\n1 CHAR UTF-8\n0 TRLR\n";
 
-    let (_, encoding) = decode_gedcom_bytes(bytes).unwrap();
+    let encoding = decode(bytes).encoding;
     assert_eq!(encoding, GedcomEncoding::Utf8);
 }
 
@@ -343,7 +343,7 @@ fn test_detect_encoding_from_char_tag_utf8() {
 fn test_detect_encoding_from_char_tag_iso8859_1() {
     let bytes = b"0 HEAD\n1 CHAR ISO-8859-1\n0 TRLR\n";
 
-    let (_, encoding) = decode_gedcom_bytes(bytes).unwrap();
+    let encoding = decode(bytes).encoding;
     assert_eq!(encoding, GedcomEncoding::Iso8859_1);
 }
 
@@ -351,7 +351,7 @@ fn test_detect_encoding_from_char_tag_iso8859_1() {
 fn test_detect_encoding_from_char_tag_iso8859_15() {
     let bytes = b"0 HEAD\n1 CHAR ISO-8859-15\n0 TRLR\n";
 
-    let (_, encoding) = decode_gedcom_bytes(bytes).unwrap();
+    let encoding = decode(bytes).encoding;
     assert_eq!(encoding, GedcomEncoding::Iso8859_15);
 }
 
@@ -359,7 +359,7 @@ fn test_detect_encoding_from_char_tag_iso8859_15() {
 fn test_detect_encoding_ascii_fallback() {
     let bytes = b"0 HEAD\n1 GEDC\n2 VERS 5.5\n0 TRLR\n";
 
-    let (_, encoding) = decode_gedcom_bytes(bytes).unwrap();
+    let encoding = decode(bytes).encoding;
     assert_eq!(encoding, GedcomEncoding::Ascii);
 }
 
@@ -436,7 +436,7 @@ fn test_roundtrip_utf16_le_special_characters() {
     let bytes = encode_to_bytes(&original, GedcomEncoding::Utf16Le).unwrap();
 
     // Decode
-    let (decoded, _) = decode_gedcom_bytes(&bytes).unwrap();
+    let decoded = decode(&bytes).text;
 
     // Verify content is preserved
     assert!(decoded.contains("日本語 /テスト/"));
@@ -453,7 +453,7 @@ fn test_roundtrip_utf16_be_special_characters() {
     let bytes = encode_to_bytes(&original, GedcomEncoding::Utf16Be).unwrap();
 
     // Decode
-    let (decoded, _) = decode_gedcom_bytes(&bytes).unwrap();
+    let decoded = decode(&bytes).text;
 
     // Verify content is preserved
     assert!(decoded.contains("Ελληνικά /Κείμενο/"));
@@ -551,7 +551,7 @@ fn test_mixed_encoding_header() {
 
 #[test]
 fn test_ansi_as_ascii() {
-    // Some GEDCOM files use "ANSI" which should be treated as ASCII/ISO-8859-1
+    // "ANSI" is the Windows code page (Windows-1252); ASCII text reads the same
     let bytes: &[u8] = b"0 HEAD\n\
                          1 GEDC\n\
                          2 VERS 5.5.1\n\
@@ -660,7 +660,7 @@ fn test_parse_simple_fixture_with_build_from_bytes() {
     let bytes = std::fs::read("tests/fixtures/simple.ged").unwrap();
 
     // Verify encoding detection (ASCII since it's a simple file)
-    let (_, encoding) = decode_gedcom_bytes(&bytes).unwrap();
+    let encoding = decode(&bytes).encoding;
     assert!(
         encoding == GedcomEncoding::Ascii || encoding == GedcomEncoding::Utf8,
         "Expected ASCII or UTF-8, got {encoding:?}"
