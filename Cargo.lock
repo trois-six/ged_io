@@ -300,7 +300,6 @@ version = "0.17.0"
 dependencies = [
  "calendrical_calculations",
  "calendrier",
- "chrono",
  "criterion",
  "serde",
  "serde_json",

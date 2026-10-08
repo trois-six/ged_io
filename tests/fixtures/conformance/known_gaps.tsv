@@ -194,7 +194,6 @@ convert/atsign	output:escape	TS25	NONCONFORMANT	-	line 10: escape: @ one leading
 convert/date-all	convert	TS25	DIFF	-	8292 differences: - INDI#0/BIRT[10]/DATE = "NOV 1401 BCE"; - INDI#0/BIRT[10]/DATE/PHRASE = "NOV 1401/8 B.C."; - INDI#0/BIRT[11]/DATE = "8 MAR 1401 BCE"; - IN...
 convert/date-all	output:payload-date	TS25	NONCONFORMANT	-	line 1002: payload-date: DATE "AFT UNKNOWN _MONTH 11": not in the date grammar
 convert/date-dual-invalid	convert	TS25	DIFF	-	252 differences: - INDI#0/BIRT/DATE = "BET 1701 AND 1799"; - INDI#0/BIRT/DATE/PHRASE = "1701/99"; - INDI#0/BIRT[10]/DATE = "8 JAN 1703"; - INDI#0/BIRT[10]/DA...
-convert/date-dual-invalid	output:payload-date	TS25	NONCONFORMANT	-	line 100: payload-date: DATE "JAN 1751/9": not in the date grammar
 convert/enum-ext	convert	TS25	DIFF	-	15 differences: - <http://genealogy.net/GEDCOM#_LOC>#0 = ""; - <http://genealogy.net/GEDCOM#_LOC>#0/NAME = "New York"; - <http://genealogy.net/GEDCOM#_LOC>#0...
 convert/enum-ext	output:payload-enum	TS25	NONCONFORMANT	-	line 17: payload-enum: TYPE "Screen": not in enumset-NAME-TYPE
 convert/enum-ext	output:schma-missing	TS25	NONCONFORMANT	-	line 1: schma-missing: _LOC
@@ -462,7 +461,6 @@ feature/write-70/maximal551	output:cardinality-min	TS25	NONCONFORMANT	-	line 262
 feature/write-70/maximal551	output:conc	TS25	NONCONFORMANT	-	line 149: conc: 2 CONC continued
 feature/write-70/maximal551	output:escape	TS25	NONCONFORMANT	-	line 121: escape: @#DGREGORIAN@ 15 APR 1699/00
 feature/write-70/maximal551	output:misplaced	TS25	NONCONFORMANT	-	line 210: misplaced: TEXT under SOUR
-feature/write-70/maximal551	output:payload-date	TS25	NONCONFORMANT	-	line 121: payload-date: DATE "@#DGREGORIAN@ 15 APR 1699/00": not in the date grammar
 feature/write-70/maximal551	output:payload-enum	TS25	NONCONFORMANT	-	line 179: payload-enum: STAT "PRE-1970": not in enumset-ord-STAT
 feature/write-70/maximal551	output:payload-file-path	TS25	NONCONFORMANT	-	line 651: payload-file-path: FILE "Value FILE A": not a URI reference
 feature/write-70/maximal551	output:payload-media-type	TS25	NONCONFORMANT	-	line 640: payload-media-type: FORM "wav": not a media type
@@ -500,10 +498,8 @@ payload/*	output:v7-gedc-form	TS17	NONCONFORMANT	-	every output of the family
 payload/551/age/invalid10	output:payload-age	TS34	NONCONFORMANT	-	line 12: payload-age: AGE "1w": not in the age grammar
 payload/551/age/invalid11	output:payload-age	TS34	NONCONFORMANT	-	line 12: payload-age: AGE "about ten": not in the age grammar
 payload/551/date/invalid14	output:payload-date	TS34	NONCONFORMANT	-	line 12: payload-date: DATE "1 jan 1900": not in the date grammar
-payload/551/date/invalid15	output:payload-date	TS34	NONCONFORMANT	-	line 12: payload-date: DATE "1900 BCE": not in the date grammar
 payload/551/date/invalid16	output:payload-date	TS34	NONCONFORMANT	-	line 12: payload-date: DATE "BET 1900": not in the date grammar
 payload/551/date/invalid17	output:payload-date	TS34	NONCONFORMANT	-	line 12: payload-date: DATE "1699/2000": not in the date grammar
-payload/551/date/invalid18	output:payload-date	TS34	NONCONFORMANT	-	line 12: payload-date: DATE "JULIAN 1700": not in the date grammar
 payload/551/date/invalid19	output:payload-date	TS34	NONCONFORMANT	-	line 12: payload-date: DATE "25/3/1934": not in the date grammar
 payload/551/latitude/invalid2	output:payload-coordinate	TS34	NONCONFORMANT	-	line 14: payload-coordinate: LATI "18.15": not a coordinate
 payload/551/latitude/invalid3	output:payload-coordinate	TS34	NONCONFORMANT	-	line 14: payload-coordinate: LATI "N 18": not a coordinate
@@ -513,17 +509,12 @@ payload/551/time/invalid3	output:payload-time	TS34	NONCONFORMANT	-	line 13: payl
 payload/70/date-exact/invalid2	output:payload-date	TS34	NONCONFORMANT	-	line 7: payload-date: DATE "JAN 2000": not in the date grammar
 payload/70/date-exact/invalid3	output:payload-date	TS34	NONCONFORMANT	-	line 7: payload-date: DATE "2000": not in the date grammar
 payload/70/date-exact/invalid4	output:payload-date	TS34	NONCONFORMANT	-	line 7: payload-date: DATE "ABT 1 JAN 2000": not in the date grammar
-payload/70/date-exact/invalid5	output:payload-date	TS34	NONCONFORMANT	-	line 7: payload-date: DATE "1 Jan 2000": not in the date grammar
 payload/70/date-period/invalid3	output:payload-date	TS34	NONCONFORMANT	-	line 8: payload-date: DATE "1900": not in the date grammar
 payload/70/date-period/invalid4	output:payload-date	TS34	NONCONFORMANT	-	line 8: payload-date: DATE "BET 1900 AND 1910": not in the date grammar
 payload/70/date-period/invalid5	output:payload-date	TS34	NONCONFORMANT	-	line 8: payload-date: DATE "ABT 1900": not in the date grammar
-payload/70/date/invalid17	output:payload-date	TS34	NONCONFORMANT	-	line 7: payload-date: DATE "1 jan 2000": not in the date grammar
 payload/70/date/invalid18	output:payload-date	TS34	NONCONFORMANT	-	line 7: payload-date: DATE "BET 2000": not in the date grammar
-payload/70/date/invalid19	output:payload-date	TS34	NONCONFORMANT	-	line 7: payload-date: DATE "1999/00": not in the date grammar
 payload/70/date/invalid20	output:payload-date	TS34	NONCONFORMANT	-	line 7: payload-date: DATE "BET 1999 TO 2000": not in the date grammar
 payload/70/date/invalid21	output:payload-date	TS34	NONCONFORMANT	-	line 7: payload-date: DATE "JAN": not in the date grammar
-payload/70/date/invalid22	output:escape	TS34	NONCONFORMANT	-	line 7: escape: @#DJULIAN@ 1700
-payload/70/date/invalid22	output:payload-date	TS34	NONCONFORMANT	-	line 7: payload-date: DATE "@#DJULIAN@ 1700": not in the date grammar
 payload/70/date/invalid23	output:payload-date	TS34	NONCONFORMANT	-	line 7: payload-date: DATE "ABT ABT 2000": not in the date grammar
 payload/70/enum/invalid4	parse	TS3	FATAL	-	Parse error at line 5: Unknown gender value male
 payload/70/enum/invalid5	parse	TS3	FATAL	-	Parse error at line 5: Unknown gender value m
@@ -555,7 +546,6 @@ payload/70/media-type/invalid6	output:payload-media-type	TS34	NONCONFORMANT	-	li
 payload/70/name/invalid3	output:payload-name	TS34	NONCONFORMANT	-	line 6: payload-name: NAME "/": slashes must come in one pair
 payload/70/name/invalid4	output:payload-name	TS34	NONCONFORMANT	-	line 6: payload-name: NAME "a/b/c/d": slashes must come in one pair
 payload/70/time/invalid4	output:payload-time	TS34	NONCONFORMANT	-	line 8: payload-time: TIME "24:00:00": not in the time grammar
-payload/70/time/invalid5	output:payload-time	TS34	NONCONFORMANT	-	line 8: payload-time: TIME "2:5": not in the time grammar
 payload/70/time/invalid6	output:payload-time	TS34	NONCONFORMANT	-	line 8: payload-time: TIME "2:60": not in the time grammar
 payload/70/time/invalid7	output:payload-time	TS34	NONCONFORMANT	-	line 8: payload-time: TIME "2:50 PM": not in the time grammar
 payload/70/uri/invalid1	payload	TS13	LOST	-	tag TYPE (x1); text not a uri (x1)

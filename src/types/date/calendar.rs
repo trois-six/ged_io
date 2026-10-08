@@ -1,145 +1,176 @@
-//! Calendar conversion helpers for GEDCOM dates.
+//! Calendars, months and epochs of GEDCOM dates.
 //!
-//! This module provides types and functions for parsing GEDCOM date strings
-//! and converting between the four GEDCOM-supported calendars:
-//! - Gregorian (default)
-//! - Julian
-//! - Hebrew
-//! - French Republican
-//!
-//! # Example
-//!
-//! ```
-//! use ged_io::types::date::calendar::{Calendar, ParsedDateTime, CalendarConversionError};
-//!
-//! // Parse a GEDCOM date string
-//! let parsed = ParsedDateTime::from_gedcom_date("@#DJULIAN@ 15 MAR 1582").unwrap();
-//! assert_eq!(parsed.calendar, Calendar::Julian);
-//!
-//! // Convert to Gregorian
-//! let gregorian = parsed.convert_to(Calendar::Gregorian).unwrap();
-//! assert_eq!(gregorian.calendar, Calendar::Gregorian);
-//! ```
+//! GEDCOM 5.5.1 names a date's calendar with an escape (`@#DJULIAN@`), GEDCOM
+//! 7.0 with a keyword (`JULIAN`) or an extension tag (`_MYCAL`). Both name the
+//! months with the tags of the calendar (`JAN`, `VEND`, `TSH`, ...) and mark
+//! years before the common era with an epoch (`B.C.` in 5.5.1, `BCE` in
+//! 7.0). The types here are shared by both versions; each knows its spelling
+//! in either.
 
-use crate::GedcomError;
-use std::cmp::Ordering;
+use std::borrow::Cow;
 
 #[cfg(feature = "json")]
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "calendar")]
-use chrono::Weekday;
+use crate::types::value::{is_ext_tag, is_lenient_ext_tag, Grammar};
 
-/// The four calendar systems supported by GEDCOM.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+/// The calendar of a date.
+///
+/// The four calendars both versions define, the two 5.5.1 escapes whose
+/// calendars were never defined (`@#DROMAN@`, `@#DUNKNOWN@`), and extension
+/// calendars (`_MYCAL` in 7.0, or an escape this crate does not know).
+#[non_exhaustive]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "json", derive(Serialize, Deserialize))]
 pub enum Calendar {
-    /// Gregorian calendar (default, most common).
-    /// GEDCOM escape: `@#DGREGORIAN@`
+    /// The Gregorian calendar, the default (`@#DGREGORIAN@`, `GREGORIAN`).
     #[default]
     Gregorian,
-    /// Julian calendar (used before Gregorian adoption).
-    /// GEDCOM escape: `@#DJULIAN@`
+    /// The Julian calendar (`@#DJULIAN@`, `JULIAN`).
     Julian,
-    /// Hebrew (Jewish) calendar.
-    /// GEDCOM escape: `@#DHEBREW@`
+    /// The Hebrew calendar (`@#DHEBREW@`, `HEBREW`).
     Hebrew,
-    /// French Republican calendar (1793-1805).
-    /// GEDCOM escape: `@#DFRENCH R@`
+    /// The French Republican calendar (`@#DFRENCH R@`, `FRENCH_R`).
     FrenchRepublican,
+    /// The 5.5.1 Roman calendar (`@#DROMAN@`), "for future definition".
+    /// GEDCOM 7.0 has no such calendar; it is written as the extension
+    /// calendar `_ROMAN`.
+    Roman,
+    /// The 5.5.1 unknown calendar (`@#DUNKNOWN@`). GEDCOM 7.0 has no such
+    /// calendar; it is written as the extension calendar `_UNKNOWN`.
+    Unknown,
+    /// An extension calendar, named as written: a 7.0 extension tag such as
+    /// `_MYCAL`, or the name inside an unknown 5.5.1 escape (`@#DMYCAL@`
+    /// gives `MYCAL`).
+    Extension(String),
+}
+
+/// How a calendar marker was written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MarkerForm {
+    /// A 5.5.1 escape, `@#D...@`.
+    Escape,
+    /// A 7.0 keyword, `JULIAN`.
+    Keyword,
+    /// An extension tag, `_MYCAL`.
+    ExtTag,
 }
 
 impl Calendar {
-    /// Returns the GEDCOM calendar escape string for this calendar.
+    /// The calendar's name in a GEDCOM 7.0 date: its keyword, or an
+    /// extension tag (`_ROMAN`, `_UNKNOWN`, `_MYCAL`).
     #[must_use]
-    pub fn gedcom_escape(&self) -> &'static str {
+    pub fn gedcom7_tag(&self) -> Cow<'_, str> {
         match self {
-            Calendar::Gregorian => "@#DGREGORIAN@",
-            Calendar::Julian => "@#DJULIAN@",
-            Calendar::Hebrew => "@#DHEBREW@",
-            Calendar::FrenchRepublican => "@#DFRENCH R@",
+            Calendar::Gregorian => Cow::Borrowed("GREGORIAN"),
+            Calendar::Julian => Cow::Borrowed("JULIAN"),
+            Calendar::Hebrew => Cow::Borrowed("HEBREW"),
+            Calendar::FrenchRepublican => Cow::Borrowed("FRENCH_R"),
+            Calendar::Roman => Cow::Borrowed("_ROMAN"),
+            Calendar::Unknown => Cow::Borrowed("_UNKNOWN"),
+            Calendar::Extension(name) if name.starts_with('_') => Cow::Borrowed(name),
+            Calendar::Extension(name) => Cow::Owned(format!("_{name}")),
         }
     }
 
-    /// Returns the GEDCOM 7.0 calendar keyword for this calendar.
-    #[must_use]
-    pub fn gedcom7_keyword(&self) -> &'static str {
-        match self {
-            Calendar::Gregorian => "GREGORIAN",
-            Calendar::Julian => "JULIAN",
-            Calendar::Hebrew => "HEBREW",
-            Calendar::FrenchRepublican => "FRENCH_R",
-        }
-    }
-
-    /// Parse a GEDCOM 7.0 calendar keyword (`GREGORIAN`, `JULIAN`, `HEBREW`,
-    /// `FRENCH_R`).
-    #[must_use]
-    pub fn from_gedcom7_keyword(s: &str) -> Option<Calendar> {
-        match s.to_ascii_uppercase().as_str() {
-            "GREGORIAN" => Some(Calendar::Gregorian),
-            "JULIAN" => Some(Calendar::Julian),
-            "HEBREW" => Some(Calendar::Hebrew),
-            "FRENCH_R" => Some(Calendar::FrenchRepublican),
-            _ => None,
-        }
-    }
-
-    /// Splits a leading calendar marker off `s`: a GEDCOM 5.5.1 escape
-    /// (`@#DJULIAN@`) or a GEDCOM 7.0 keyword (`JULIAN`). Returns the calendar
-    /// and the rest, or `None` and `s` itself when there is no marker.
-    pub(crate) fn split_marker(s: &str) -> (Option<Calendar>, &str) {
-        let s = s.trim_start();
-        if s.starts_with("@#D") || s.starts_with("@#d") {
-            if let Some(end) = s[3..].find('@') {
-                let end = end + 4;
-                if let Some(calendar) = Calendar::from_gedcom_escape(&s[..end]) {
-                    return (Some(calendar), s[end..].trim_start());
-                }
-            }
-            return (None, s);
-        }
-        let (word, rest) = s.split_once(char::is_whitespace).unwrap_or((s, ""));
-        match Calendar::from_gedcom7_keyword(word) {
-            Some(calendar) => (Some(calendar), rest.trim_start()),
-            None => (None, s),
-        }
-    }
-
-    /// The calendar a GEDCOM date value is written in, wherever its marker
-    /// stands: first (`@#DJULIAN@ 1700`), after a qualifier or range keyword
-    /// as the 5.5.1 grammar has it (`ABT @#DJULIAN@ 1700`,
-    /// `BET @#DJULIAN@ 1700 AND …`), or as a 7.0 keyword (`JULIAN 1700`).
-    /// Gregorian when there is none.
-    #[must_use]
-    pub fn of_date_value(value: &str) -> Calendar {
-        let mut rest = value;
-        loop {
-            let (calendar, after) = Calendar::split_marker(rest);
-            if let Some(calendar) = calendar {
-                return calendar;
-            }
-            let after = after.trim_start();
-            let (word, tail) = after.split_once(char::is_whitespace).unwrap_or((after, ""));
-            if is_date_keyword(word) {
-                rest = tail;
-            } else {
-                return Calendar::Gregorian;
-            }
-        }
-    }
-
-    /// Parse a GEDCOM calendar escape string.
+    /// The calendar's escape in a GEDCOM 5.5.1 date (`@#DJULIAN@`).
     ///
-    /// Returns `None` if the string is not a valid calendar escape.
+    /// GEDCOM 5.5.1 has no extension calendars: an extension calendar gets
+    /// an escape of its own name (`@#D_MYCAL@`), which a 5.5.1 reader does
+    /// not know.
     #[must_use]
-    pub fn from_gedcom_escape(s: &str) -> Option<Calendar> {
-        match s.to_uppercase().as_str() {
-            "@#DGREGORIAN@" => Some(Calendar::Gregorian),
-            "@#DJULIAN@" => Some(Calendar::Julian),
-            "@#DHEBREW@" => Some(Calendar::Hebrew),
-            "@#DFRENCH R@" => Some(Calendar::FrenchRepublican),
-            _ => None,
+    pub fn gedcom551_escape(&self) -> Cow<'_, str> {
+        match self {
+            Calendar::Gregorian => Cow::Borrowed("@#DGREGORIAN@"),
+            Calendar::Julian => Cow::Borrowed("@#DJULIAN@"),
+            Calendar::Hebrew => Cow::Borrowed("@#DHEBREW@"),
+            Calendar::FrenchRepublican => Cow::Borrowed("@#DFRENCH R@"),
+            Calendar::Roman => Cow::Borrowed("@#DROMAN@"),
+            Calendar::Unknown => Cow::Borrowed("@#DUNKNOWN@"),
+            Calendar::Extension(name) => Cow::Owned(format!("@#D{name}@")),
+        }
+    }
+
+    /// The months this calendar defines, in order; empty for a calendar
+    /// whose months are not standard (Roman, unknown and extension
+    /// calendars, whose months are extension tags).
+    #[must_use]
+    pub fn months(&self) -> &'static [Month] {
+        match self {
+            Calendar::Gregorian | Calendar::Julian => &GREGORIAN_MONTHS,
+            Calendar::Hebrew => &HEBREW_MONTHS,
+            Calendar::FrenchRepublican => &FRENCH_REPUBLICAN_MONTHS,
+            _ => &[],
+        }
+    }
+
+    /// Whether this is one of the four calendars the specifications define.
+    #[must_use]
+    pub fn is_defined(&self) -> bool {
+        matches!(
+            self,
+            Calendar::Gregorian | Calendar::Julian | Calendar::Hebrew | Calendar::FrenchRepublican
+        )
+    }
+
+    /// Whether this calendar counts years before an epoch (`BCE`): only the
+    /// Gregorian and Julian calendars do.
+    #[must_use]
+    pub fn has_bce(&self) -> bool {
+        matches!(self, Calendar::Gregorian | Calendar::Julian)
+    }
+
+    /// Reads a calendar marker: an escape of any case, a 7.0 keyword of any
+    /// case, `ROMAN`/`UNKNOWN` as some 5.5.1 files write them, or an
+    /// extension tag. Returns the calendar and how it was written.
+    pub(crate) fn from_marker(word: &str) -> Option<(Calendar, MarkerForm)> {
+        if let Some(name) = escape_name(word) {
+            let calendar = match name.to_ascii_uppercase().as_str() {
+                "GREGORIAN" => Calendar::Gregorian,
+                "JULIAN" => Calendar::Julian,
+                "HEBREW" => Calendar::Hebrew,
+                "FRENCH R" | "FRENCH_R" => Calendar::FrenchRepublican,
+                "ROMAN" => Calendar::Roman,
+                "UNKNOWN" => Calendar::Unknown,
+                _ => Calendar::Extension(name.to_string()),
+            };
+            return Some((calendar, MarkerForm::Escape));
+        }
+        let calendar = match word.to_ascii_uppercase().as_str() {
+            "GREGORIAN" => Calendar::Gregorian,
+            "JULIAN" => Calendar::Julian,
+            "HEBREW" => Calendar::Hebrew,
+            "FRENCH_R" => Calendar::FrenchRepublican,
+            "ROMAN" | "_ROMAN" => Calendar::Roman,
+            "UNKNOWN" | "_UNKNOWN" => Calendar::Unknown,
+            _ if is_lenient_ext_tag(word) => {
+                return Some((Calendar::Extension(word.to_string()), MarkerForm::ExtTag));
+            }
+            _ => return None,
+        };
+        let form = if word.starts_with('_') {
+            MarkerForm::ExtTag
+        } else {
+            MarkerForm::Keyword
+        };
+        Some((calendar, form))
+    }
+
+    /// Whether a marker, written as `word` in `form`, is valid in `grammar`.
+    pub(crate) fn marker_is_valid(&self, word: &str, form: MarkerForm, grammar: Grammar) -> bool {
+        match grammar {
+            // 5.5.1: one of its six escapes, upper case as tags are.
+            Grammar::V551 => {
+                form == MarkerForm::Escape
+                    && !matches!(self, Calendar::Extension(_))
+                    && word == self.gedcom551_escape()
+            }
+            // 7.0: a keyword exactly, or an extension tag.
+            Grammar::V7 => match form {
+                MarkerForm::Escape => false,
+                MarkerForm::Keyword => self.is_defined() && word == self.gedcom7_tag(),
+                MarkerForm::ExtTag => is_ext_tag(word),
+            },
         }
     }
 }
@@ -151,999 +182,410 @@ impl std::fmt::Display for Calendar {
             Calendar::Julian => write!(f, "Julian"),
             Calendar::Hebrew => write!(f, "Hebrew"),
             Calendar::FrenchRepublican => write!(f, "French Republican"),
+            Calendar::Roman => write!(f, "Roman"),
+            Calendar::Unknown => write!(f, "unknown"),
+            Calendar::Extension(name) => write!(f, "{name}"),
         }
     }
 }
 
-/// Error type for calendar conversion operations.
-#[derive(Clone, Debug, PartialEq)]
-pub enum CalendarConversionError {
-    /// The date has a qualifier (BEF, AFT, ABT, etc.) that prevents exact conversion.
-    QualifiedDate { qualifier: String },
-    /// The date is a range (FROM/TO, BET/AND) that cannot be converted to a single date.
-    RangeDate {
-        from: Option<String>,
-        to: Option<String>,
-    },
-    /// The date is incomplete (missing day or month).
-    IncompleteDate {
-        year: Option<i32>,
-        month: Option<u8>,
-        day: Option<u8>,
-    },
-    /// The date string could not be parsed.
-    ParseError { message: String },
-    /// The date is invalid for the calendar (e.g., invalid Hebrew month).
-    InvalidDate { message: String },
-    /// Conversion between these calendars is not supported.
-    UnsupportedConversion { from: Calendar, to: Calendar },
+/// The name inside a 5.5.1 calendar escape: `JULIAN` for `@#DJULIAN@`.
+fn escape_name(word: &str) -> Option<&str> {
+    let inner = word.strip_suffix('@')?;
+    let prefix = inner.get(..3)?;
+    prefix
+        .eq_ignore_ascii_case("@#D")
+        .then(|| &inner[3..])
+        .filter(|name| !name.is_empty())
 }
 
-impl std::fmt::Display for CalendarConversionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CalendarConversionError::QualifiedDate { qualifier } => {
-                write!(f, "Cannot convert qualified date with '{qualifier}'")
-            }
-            CalendarConversionError::RangeDate { from, to } => {
-                write!(f, "Cannot convert date range: {from:?} to {to:?}")
-            }
-            CalendarConversionError::IncompleteDate { year, month, day } => {
-                write!(
-                    f,
-                    "Cannot convert incomplete date: year={year:?}, month={month:?}, day={day:?}"
-                )
-            }
-            CalendarConversionError::ParseError { message } => {
-                write!(f, "Failed to parse date: {message}")
-            }
-            CalendarConversionError::InvalidDate { message } => {
-                write!(f, "Invalid date: {message}")
-            }
-            CalendarConversionError::UnsupportedConversion { from, to } => {
-                write!(f, "Conversion from {from} to {to} is not supported")
-            }
-        }
-    }
-}
-
-impl std::error::Error for CalendarConversionError {}
-
-impl From<CalendarConversionError> for GedcomError {
-    fn from(err: CalendarConversionError) -> Self {
-        GedcomError::ParseError {
-            line: 0,
-            message: err.to_string(),
-        }
-    }
-}
-
-/// Whether `word` is a keyword that may precede a date in a date value:
-/// a qualifier, a range or period keyword, or `INT`.
-pub(crate) fn is_date_keyword(word: &str) -> bool {
-    matches!(
-        word.to_ascii_uppercase().as_str(),
-        "ABT" | "CAL" | "EST" | "BEF" | "AFT" | "BET" | "AND" | "FROM" | "TO" | "INT"
-    )
-}
-
-/// A date qualifier that indicates approximate or uncertain dates.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A month of a date.
+///
+/// GEDCOM names months with tags. The tags of the four defined calendars
+/// are all distinct, so a month is known from its tag alone; which calendar
+/// it belongs to constrains its validity, not its meaning. Months of other
+/// calendars are extension tags.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "json", derive(Serialize, Deserialize))]
-pub enum DateQualifier {
-    /// Exact date (no qualifier).
-    Exact,
-    /// About/approximately (ABT).
-    About,
-    /// Calculated (CAL).
-    Calculated,
-    /// Estimated (EST).
-    Estimated,
-    /// Before (BEF).
-    Before,
-    /// After (AFT).
-    After,
+pub enum Month {
+    /// January (`JAN`), Gregorian and Julian.
+    Jan,
+    /// February (`FEB`).
+    Feb,
+    /// March (`MAR`).
+    Mar,
+    /// April (`APR`).
+    Apr,
+    /// May (`MAY`).
+    May,
+    /// June (`JUN`).
+    Jun,
+    /// July (`JUL`).
+    Jul,
+    /// August (`AUG`).
+    Aug,
+    /// September (`SEP`).
+    Sep,
+    /// October (`OCT`).
+    Oct,
+    /// November (`NOV`).
+    Nov,
+    /// December (`DEC`).
+    Dec,
+    /// Vendémiaire (`VEND`), French Republican.
+    Vend,
+    /// Brumaire (`BRUM`).
+    Brum,
+    /// Frimaire (`FRIM`).
+    Frim,
+    /// Nivôse (`NIVO`).
+    Nivo,
+    /// Pluviôse (`PLUV`).
+    Pluv,
+    /// Ventôse (`VENT`).
+    Vent,
+    /// Germinal (`GERM`).
+    Germ,
+    /// Floréal (`FLOR`).
+    Flor,
+    /// Prairial (`PRAI`).
+    Prai,
+    /// Messidor (`MESS`).
+    Mess,
+    /// Thermidor (`THER`).
+    Ther,
+    /// Fructidor (`FRUC`).
+    Fruc,
+    /// The complementary days (`COMP`).
+    Comp,
+    /// Tishrei (`TSH`), Hebrew.
+    Tsh,
+    /// Cheshvan (`CSH`).
+    Csh,
+    /// Kislev (`KSL`).
+    Ksl,
+    /// Tevet (`TVT`).
+    Tvt,
+    /// Shevat (`SHV`).
+    Shv,
+    /// Adar I (`ADR`); the only Adar of a common year is `ADS`.
+    Adr,
+    /// Adar, or Adar II in a leap year (`ADS`).
+    Ads,
+    /// Nisan (`NSN`).
+    Nsn,
+    /// Iyar (`IYR`).
+    Iyr,
+    /// Sivan (`SVN`).
+    Svn,
+    /// Tammuz (`TMZ`).
+    Tmz,
+    /// Av (`AAV`).
+    Aav,
+    /// Elul (`ELL`).
+    Ell,
+    /// A month named by an extension tag (`_MONTH`), as written.
+    Extension(String),
 }
 
-impl DateQualifier {
-    /// Parse a GEDCOM date qualifier.
-    #[must_use]
-    pub fn parse(s: &str) -> Option<DateQualifier> {
-        match s.to_uppercase().as_str() {
-            "ABT" => Some(DateQualifier::About),
-            "CAL" => Some(DateQualifier::Calculated),
-            "EST" => Some(DateQualifier::Estimated),
-            "BEF" => Some(DateQualifier::Before),
-            "AFT" => Some(DateQualifier::After),
-            _ => None,
-        }
-    }
+/// The months of the Gregorian and Julian calendars.
+const GREGORIAN_MONTHS: [Month; 12] = [
+    Month::Jan,
+    Month::Feb,
+    Month::Mar,
+    Month::Apr,
+    Month::May,
+    Month::Jun,
+    Month::Jul,
+    Month::Aug,
+    Month::Sep,
+    Month::Oct,
+    Month::Nov,
+    Month::Dec,
+];
 
-    /// Returns the GEDCOM string for this qualifier.
+/// The months of the French Republican calendar.
+const FRENCH_REPUBLICAN_MONTHS: [Month; 13] = [
+    Month::Vend,
+    Month::Brum,
+    Month::Frim,
+    Month::Nivo,
+    Month::Pluv,
+    Month::Vent,
+    Month::Germ,
+    Month::Flor,
+    Month::Prai,
+    Month::Mess,
+    Month::Ther,
+    Month::Fruc,
+    Month::Comp,
+];
+
+/// The months of the Hebrew calendar, in GEDCOM's order, from Tishrei.
+const HEBREW_MONTHS: [Month; 13] = [
+    Month::Tsh,
+    Month::Csh,
+    Month::Ksl,
+    Month::Tvt,
+    Month::Shv,
+    Month::Adr,
+    Month::Ads,
+    Month::Nsn,
+    Month::Iyr,
+    Month::Svn,
+    Month::Tmz,
+    Month::Aav,
+    Month::Ell,
+];
+
+/// English month names read as Gregorian and Julian months.
+const ENGLISH_MONTH_NAMES: [&str; 12] = [
+    "JANUARY",
+    "FEBRUARY",
+    "MARCH",
+    "APRIL",
+    "MAY",
+    "JUNE",
+    "JULY",
+    "AUGUST",
+    "SEPTEMBER",
+    "OCTOBER",
+    "NOVEMBER",
+    "DECEMBER",
+];
+
+impl Month {
+    /// The month's tag, as both versions write it (`JAN`, `VEND`, `TSH`,
+    /// or the extension tag).
     #[must_use]
-    pub fn as_str(&self) -> &'static str {
+    pub fn tag(&self) -> &str {
         match self {
-            DateQualifier::Exact => "",
-            DateQualifier::About => "ABT",
-            DateQualifier::Calculated => "CAL",
-            DateQualifier::Estimated => "EST",
-            DateQualifier::Before => "BEF",
-            DateQualifier::After => "AFT",
+            Month::Jan => "JAN",
+            Month::Feb => "FEB",
+            Month::Mar => "MAR",
+            Month::Apr => "APR",
+            Month::May => "MAY",
+            Month::Jun => "JUN",
+            Month::Jul => "JUL",
+            Month::Aug => "AUG",
+            Month::Sep => "SEP",
+            Month::Oct => "OCT",
+            Month::Nov => "NOV",
+            Month::Dec => "DEC",
+            Month::Vend => "VEND",
+            Month::Brum => "BRUM",
+            Month::Frim => "FRIM",
+            Month::Nivo => "NIVO",
+            Month::Pluv => "PLUV",
+            Month::Vent => "VENT",
+            Month::Germ => "GERM",
+            Month::Flor => "FLOR",
+            Month::Prai => "PRAI",
+            Month::Mess => "MESS",
+            Month::Ther => "THER",
+            Month::Fruc => "FRUC",
+            Month::Comp => "COMP",
+            Month::Tsh => "TSH",
+            Month::Csh => "CSH",
+            Month::Ksl => "KSL",
+            Month::Tvt => "TVT",
+            Month::Shv => "SHV",
+            Month::Adr => "ADR",
+            Month::Ads => "ADS",
+            Month::Nsn => "NSN",
+            Month::Iyr => "IYR",
+            Month::Svn => "SVN",
+            Month::Tmz => "TMZ",
+            Month::Aav => "AAV",
+            Month::Ell => "ELL",
+            Month::Extension(tag) => tag,
+        }
+    }
+
+    /// The month a tag names: a standard month tag exactly as the
+    /// specifications spell it, or an extension tag.
+    #[must_use]
+    pub fn from_tag(tag: &str) -> Option<Month> {
+        if is_ext_tag(tag) {
+            return Some(Month::Extension(tag.to_string()));
+        }
+        [
+            &GREGORIAN_MONTHS[..],
+            &FRENCH_REPUBLICAN_MONTHS[..],
+            &HEBREW_MONTHS[..],
+        ]
+        .into_iter()
+        .flatten()
+        .find(|month| month.tag() == tag)
+        .cloned()
+    }
+
+    /// Reads a month leniently: a standard tag of any case, an English month
+    /// name (`March`), or an extension tag of any case.
+    pub(crate) fn from_word(word: &str) -> Option<Month> {
+        if is_lenient_ext_tag(word) {
+            return Some(Month::Extension(word.to_string()));
+        }
+        let upper = word.to_ascii_uppercase();
+        Month::from_tag(&upper).or_else(|| {
+            ENGLISH_MONTH_NAMES
+                .iter()
+                .position(|name| *name == upper)
+                .map(|index| GREGORIAN_MONTHS[index].clone())
+        })
+    }
+
+    /// The month's position in its calendar, from 1: `JAN` and `VEND` are 1,
+    /// and so is `TSH`, as GEDCOM orders Hebrew months from Tishrei. `None`
+    /// for an extension month.
+    #[must_use]
+    pub fn number(&self) -> Option<u8> {
+        [
+            &GREGORIAN_MONTHS[..],
+            &FRENCH_REPUBLICAN_MONTHS[..],
+            &HEBREW_MONTHS[..],
+        ]
+        .into_iter()
+        .find_map(|months| months.iter().position(|month| month == self))
+        .and_then(|index| u8::try_from(index + 1).ok())
+    }
+
+    /// The month at position `number` (from 1) of `calendar`.
+    #[must_use]
+    pub fn of(calendar: &Calendar, number: u8) -> Option<Month> {
+        calendar
+            .months()
+            .get(usize::from(number).checked_sub(1)?)
+            .cloned()
+    }
+
+    /// Whether this month belongs to `calendar`. Extension months belong to
+    /// the calendars whose months are not standard.
+    pub(crate) fn belongs_to(&self, calendar: &Calendar) -> bool {
+        match self {
+            Month::Extension(_) => calendar.months().is_empty(),
+            _ => calendar.months().contains(self),
         }
     }
 }
 
-/// A parsed date-time with calendar information.
-///
-/// This struct represents a fully parsed GEDCOM date with all components
-/// separated out for easy manipulation and conversion.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// The epoch of a year.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "json", derive(Serialize, Deserialize))]
-pub struct ParsedDateTime {
-    /// The calendar system for this date.
-    pub calendar: Calendar,
-    /// Year (can be negative for BCE).
-    pub year: Option<i32>,
-    /// Month (1-12 for Gregorian/Julian, 1-13 for Hebrew, 1-13 for French Republican).
-    pub month: Option<u8>,
-    /// Day of month (1-31 depending on calendar).
-    pub day: Option<u8>,
-    /// Hour (0-23).
-    pub hour: Option<u8>,
-    /// Minute (0-59).
-    pub minute: Option<u8>,
-    /// Second (0-59).
-    pub second: Option<u8>,
-    /// Subsecond as string (preserved from original).
-    pub subsecond: Option<String>,
-    /// Date qualifier (ABT, BEF, AFT, etc.).
-    pub qualifier: Option<DateQualifier>,
-    /// Whether this is a dual year (e.g., "1699/00" for Old Style/New Style).
-    pub dual_year: Option<i32>,
-    /// BCE indicator (year is before common era).
-    pub bce: bool,
+pub enum Epoch {
+    /// Before the common era (`BCE` in 7.0, `B.C.` in 5.5.1): year `y BCE`
+    /// is `y` years before year 1, so there is no year 0.
+    Bce,
+    /// An epoch of an extension calendar, as its extension tag.
+    Extension(String),
 }
 
-/// Gregorian/Julian month abbreviations used in GEDCOM.
-const GREGORIAN_MONTHS: [&str; 12] = [
-    "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
-];
-
-/// Hebrew month abbreviations used in GEDCOM (in civil calendar order, starting from Tishrei).
-/// Note: Hebrew calendar can have 12 or 13 months depending on leap year.
-/// The `calendrical_calculations` crate uses "Book Hebrew" ordering where Nisan is month 1.
-/// We need to convert between GEDCOM's civil order and Book Hebrew order.
-const HEBREW_MONTHS: [&str; 13] = [
-    "TSH", // Tishrei (civil 1, book 7)
-    "CSH", // Cheshvan (civil 2, book 8)
-    "KSL", // Kislev (civil 3, book 9)
-    "TVT", // Tevet (civil 4, book 10)
-    "SHV", // Shevat (civil 5, book 11)
-    "ADR", // Adar / Adar I (civil 6, book 12)
-    "ADS", // Adar Sheni / Adar II (civil 7, book 13) - only in leap years
-    "NSN", // Nisan (civil 8, book 1)
-    "IYR", // Iyar (civil 9, book 2)
-    "SVN", // Sivan (civil 10, book 3)
-    "TMZ", // Tammuz (civil 11, book 4)
-    "AAV", // Av (civil 12, book 5)
-    "ELL", // Elul (civil 13, book 6)
-];
-
-/// Convert GEDCOM Hebrew month (1-13, civil order from Tishrei) to Book Hebrew month (1-13, from Nisan).
-#[cfg(feature = "calendar")]
-fn gedcom_hebrew_month_to_book(gedcom_month: u8) -> u8 {
-    // GEDCOM: 1=TSH(Tishrei), 2=CSH, 3=KSL, 4=TVT, 5=SHV, 6=ADR, 7=ADS, 8=NSN, 9=IYR, 10=SVN, 11=TMZ, 12=AAV, 13=ELL
-    // Book:   1=Nisan, 2=Iyyar, 3=Sivan, 4=Tammuz, 5=Av, 6=Elul, 7=Tishrei, 8=Marheshvan, 9=Kislev, 10=Tevet, 11=Shevat, 12=Adar, 13=Adar II
-    match gedcom_month {
-        1 => 7,            // TSH -> Tishrei
-        2 => 8,            // CSH -> Marheshvan/Cheshvan
-        3 => 9,            // KSL -> Kislev
-        4 => 10,           // TVT -> Tevet
-        5 => 11,           // SHV -> Shevat
-        6 => 12,           // ADR -> Adar (or Adar I)
-        7 => 13,           // ADS -> Adar II
-        8 => 1,            // NSN -> Nisan
-        9 => 2,            // IYR -> Iyyar
-        10 => 3,           // SVN -> Sivan
-        11 => 4,           // TMZ -> Tammuz
-        12 => 5,           // AAV -> Av
-        13 => 6,           // ELL -> Elul
-        _ => gedcom_month, // fallback
-    }
-}
-
-/// Convert Book Hebrew month (1-13, from Nisan) to GEDCOM Hebrew month (1-13, civil order from Tishrei).
-#[cfg(feature = "calendar")]
-fn book_hebrew_month_to_gedcom(book_month: u8) -> u8 {
-    match book_month {
-        7 => 1,          // Tishrei -> TSH
-        8 => 2,          // Marheshvan -> CSH
-        9 => 3,          // Kislev -> KSL
-        10 => 4,         // Tevet -> TVT
-        11 => 5,         // Shevat -> SHV
-        12 => 6,         // Adar -> ADR
-        13 => 7,         // Adar II -> ADS
-        1 => 8,          // Nisan -> NSN
-        2 => 9,          // Iyyar -> IYR
-        3 => 10,         // Sivan -> SVN
-        4 => 11,         // Tammuz -> TMZ
-        5 => 12,         // Av -> AAV
-        6 => 13,         // Elul -> ELL
-        _ => book_month, // fallback
-    }
-}
-
-/// French Republican month abbreviations used in GEDCOM.
-const FRENCH_REPUBLICAN_MONTHS: [&str; 13] = [
-    "VEND", // Vendemiaire (1)
-    "BRUM", // Brumaire (2)
-    "FRIM", // Frimaire (3)
-    "NIVO", // Nivose (4)
-    "PLUV", // Pluviose (5)
-    "VENT", // Ventose (6)
-    "GERM", // Germinal (7)
-    "FLOR", // Floreal (8)
-    "PRAI", // Prairial (9)
-    "MESS", // Messidor (10)
-    "THER", // Thermidor (11)
-    "FRUC", // Fructidor (12)
-    "COMP", // Complementary days (13)
-];
-
-/// Offset to convert between Rata Die (RD) and Julian Day Number (JDN).
-///
-/// RD and JDN are both serial day numbering systems that assign a unique integer to each day,
-/// differing only in their epoch:
-/// - **Rata Die**: January 1, 1 CE (used internally by this library)
-/// - **JDN**: January 1, 4713 BCE Julian (November 25, 4714 BCE Gregorian)
-///
-/// For computation within this library, use `to_rata_die()`. For interoperability with
-/// external systems that use JDN, use `to_julian_day_number()` and `from_julian_day_number()`.
-const RATA_DIE_TO_JDN_OFFSET: i64 = 1_721_425;
-
-/// Rata Die of 1 Vendemiaire An I (22 September 1792 Gregorian), the epoch of the
-/// French Republican calendar.
-///
-/// The `calendrier` crate counts Republican days from this epoch, so a Republican
-/// timestamp becomes a Rata Die by adding this offset. Going through the crate's
-/// `chrono` conversions instead would drag in the Paris-versus-Greenwich clock
-/// offset it applies, which pushes the start of a Republican day 18 minutes into
-/// the previous Gregorian day and returns every date one day early.
-#[cfg(feature = "calendar")]
-const FRENCH_REPUBLICAN_EPOCH_RD: i64 = 654_415;
-
-/// Days in each of the twelve full months of a French Republican year.
-#[cfg(feature = "calendar")]
-const DAYS_PER_REPUBLICAN_MONTH: u8 = 30;
-
-/// Seconds in a French Republican day.
-///
-/// The Republican calendar used decimal time: 10 hours of 100 minutes of 100
-/// seconds. `calendrier` timestamps are counted in these seconds.
-#[cfg(feature = "calendar")]
-const REPUBLICAN_SECONDS_PER_DAY: i64 = 100_000;
-
-impl ParsedDateTime {
-    /// Parse a GEDCOM date string into a `ParsedDateTime`.
-    ///
-    /// This handles the various GEDCOM date formats:
-    /// - Calendar escapes: `@#DGREGORIAN@`, `@#DJULIAN@`, `@#DHEBREW@`, `@#DFRENCH R@`
-    /// - Qualifiers: `ABT`, `CAL`, `EST`, `BEF`, `AFT`
-    /// - Date formats: `DD MMM YYYY`, `MMM YYYY`, `YYYY`
-    /// - Dual years: `1699/00`
-    /// - BCE dates: `YYYY BCE` or `YYYY BC`
-    ///
-    /// Note: This does NOT handle range dates (FROM/TO, BET/AND) - those must be
-    /// parsed separately.
-    ///
-    /// # Errors
-    ///
-    /// Returns `CalendarConversionError` if the date cannot be parsed.
-    pub fn from_gedcom_date(date_str: &str) -> Result<ParsedDateTime, CalendarConversionError> {
-        let date_str = date_str.trim();
-        if date_str.is_empty() {
-            return Err(CalendarConversionError::ParseError {
-                message: "Empty date string".to_string(),
-            });
-        }
-
-        let mut result = ParsedDateTime::default();
-        let mut remaining = date_str;
-
-        // Calendar marker: a 5.5.1 escape or a 7.0 keyword, either first or,
-        // as the 5.5.1 grammar puts it, right after the qualifier.
-        let (calendar, rest) = Calendar::split_marker(remaining);
-        if let Some(calendar) = calendar {
-            result.calendar = calendar;
-        }
-        remaining = rest;
-
-        // Check for qualifier at the beginning
-        let (first_word, after_first) = remaining
-            .split_once(char::is_whitespace)
-            .unwrap_or((remaining, ""));
-        if let Some(qual) = DateQualifier::parse(first_word) {
-            result.qualifier = Some(qual);
-            let (calendar, rest) = Calendar::split_marker(after_first);
-            if let Some(calendar) = calendar {
-                result.calendar = calendar;
-            }
-            remaining = rest;
-        }
-
-        let tokens: Vec<&str> = remaining.split_whitespace().collect();
-        if tokens.is_empty() {
-            return Ok(result);
-        }
-        let mut idx = 0;
-
-        // Check for range keywords (not supported for conversion)
-        if idx < tokens.len() {
-            let upper = tokens[idx].to_uppercase();
-            if upper == "FROM" || upper == "BET" || upper == "TO" || upper == "AND" {
-                return Err(CalendarConversionError::RangeDate {
-                    from: None,
-                    to: None,
-                });
-            }
-        }
-
-        // Parse the date components
-        // Formats: DD MMM YYYY, MMM YYYY, YYYY, DD MMM YYYY/YY (dual year)
-        if idx >= tokens.len() {
-            return Ok(result);
-        }
-
-        // Try to determine what we have
-        let first = tokens[idx];
-
-        // Check if first token is a day (1-31)
-        if let Ok(day) = first.parse::<u8>() {
-            if (1..=31).contains(&day) && idx + 1 < tokens.len() {
-                // Likely DD MMM YYYY format
-                result.day = Some(day);
-                idx += 1;
-            }
-        }
-
-        // Try to parse month
-        if idx < tokens.len() {
-            let month_str = tokens[idx].to_uppercase();
-            let month = parse_month(&month_str, result.calendar);
-            if let Some(m) = month {
-                result.month = Some(m);
-                idx += 1;
-            }
-        }
-
-        // Parse year (possibly with dual year and/or BCE)
-        if idx < tokens.len() {
-            let year_str = tokens[idx];
-
-            // Check for dual year (e.g., "1699/00")
-            if let Some(slash_pos) = year_str.find('/') {
-                let main_year = &year_str[..slash_pos];
-                let dual_suffix = &year_str[slash_pos + 1..];
-
-                if let Ok(y) = main_year.parse::<i32>() {
-                    result.year = Some(y);
-
-                    // Parse dual year suffix (could be "00", "01", etc.)
-                    if let Ok(dual) = dual_suffix.parse::<i32>() {
-                        // Convert suffix to full year
-                        let century = (y / 100) * 100;
-                        let dual_full = if dual < (y % 100) {
-                            century + 100 + dual
-                        } else {
-                            century + dual
-                        };
-                        result.dual_year = Some(dual_full);
-                    }
-                }
-                idx += 1;
-            } else if let Ok(y) = year_str.parse::<i32>() {
-                result.year = Some(y);
-                idx += 1;
-            }
-        }
-
-        // Check for BCE/BC
-        if idx < tokens.len() {
-            let upper = tokens[idx].to_uppercase();
-            if upper == "BCE" || upper == "BC" || upper == "B.C." || upper == "B.C.E." {
-                result.bce = true;
-                if let Some(y) = result.year {
-                    result.year = Some(-y);
-                }
-            }
-        }
-
-        Ok(result)
-    }
-
-    /// Parse a GEDCOM time string (from TIME substructure).
-    ///
-    /// Format: `hh:mm:ss.fraction` where seconds and fraction are optional.
-    ///
-    /// # Errors
-    ///
-    /// This function currently does not return errors but the signature allows
-    /// for future validation.
-    pub fn parse_time(&mut self, time_str: &str) -> Result<(), CalendarConversionError> {
-        let time_str = time_str.trim();
-        if time_str.is_empty() {
-            return Ok(());
-        }
-
-        let parts: Vec<&str> = time_str.split(':').collect();
-        if parts.is_empty() {
-            return Ok(());
-        }
-
-        // Parse hour
-        if let Ok(h) = parts[0].parse::<u8>() {
-            if h <= 23 {
-                self.hour = Some(h);
-            }
-        }
-
-        // Parse minute
-        if parts.len() > 1 {
-            if let Ok(m) = parts[1].parse::<u8>() {
-                if m <= 59 {
-                    self.minute = Some(m);
-                }
-            }
-        }
-
-        // Parse second (may have fractional part)
-        if parts.len() > 2 {
-            let sec_str = parts[2];
-            if let Some(dot_pos) = sec_str.find('.') {
-                let sec_part = &sec_str[..dot_pos];
-                let frac_part = &sec_str[dot_pos + 1..];
-
-                if let Ok(s) = sec_part.parse::<u8>() {
-                    if s <= 59 {
-                        self.second = Some(s);
-                    }
-                }
-                if !frac_part.is_empty() {
-                    self.subsecond = Some(frac_part.to_string());
-                }
-            } else if let Ok(s) = sec_str.parse::<u8>() {
-                if s <= 59 {
-                    self.second = Some(s);
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Check if this date is complete enough for conversion.
-    ///
-    /// A date needs at least a year to be convertible. For full precision,
-    /// it also needs month and day.
-    #[must_use]
-    pub fn is_complete(&self) -> bool {
-        self.year.is_some() && self.month.is_some() && self.day.is_some()
-    }
-
-    /// Check if this date can be exactly converted (no qualifiers or ranges).
-    #[must_use]
-    pub fn is_exact(&self) -> bool {
-        self.qualifier.is_none() || self.qualifier == Some(DateQualifier::Exact)
-    }
-
-    /// Convert this date to a different calendar.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - The date is not complete (missing year, month, or day)
-    /// - The date has a qualifier that prevents exact conversion
-    /// - The conversion fails for calendar-specific reasons
-    #[cfg(feature = "calendar")]
-    pub fn convert_to(&self, target: Calendar) -> Result<ParsedDateTime, CalendarConversionError> {
-        if !self.is_complete() {
-            return Err(CalendarConversionError::IncompleteDate {
-                year: self.year,
-                month: self.month,
-                day: self.day,
-            });
-        }
-
-        if !self.is_exact() {
-            if let Some(qual) = &self.qualifier {
-                return Err(CalendarConversionError::QualifiedDate {
-                    qualifier: qual.as_str().to_string(),
-                });
-            }
-        }
-
-        if self.calendar == target {
-            return Ok(self.clone());
-        }
-
-        // Convert to RataDie (pivot format), then to target calendar
-        let rata_die = self.to_rata_die()?;
-        let mut result = ParsedDateTime::from_rata_die(rata_die, target)?;
-
-        // Preserve time components
-        result.hour = self.hour;
-        result.minute = self.minute;
-        result.second = self.second;
-        result.subsecond.clone_from(&self.subsecond);
-
-        Ok(result)
-    }
-
-    /// Returns the Rata Die (RD) day number for this date.
-    ///
-    /// Rata Die counts days from January 1, 1 CE. It serves as a calendar-neutral serial day
-    /// number, enabling date comparison, difference calculation, and chronological sorting across
-    /// all supported calendar systems.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the date is incomplete (missing year, month, or day).
-    #[cfg(feature = "calendar")]
-    pub fn to_rata_die(&self) -> Result<i64, CalendarConversionError> {
-        let year = self.year.ok_or(CalendarConversionError::IncompleteDate {
-            year: self.year,
-            month: self.month,
-            day: self.day,
-        })?;
-        let month = self.month.ok_or(CalendarConversionError::IncompleteDate {
-            year: self.year,
-            month: self.month,
-            day: self.day,
-        })?;
-        let day = self.day.ok_or(CalendarConversionError::IncompleteDate {
-            year: self.year,
-            month: self.month,
-            day: self.day,
-        })?;
-
-        match self.calendar {
-            Calendar::Gregorian => Ok(gregorian_to_rata_die(year, month, day)),
-            Calendar::Julian => {
-                let rd = calendrical_calculations::julian::fixed_from_julian(year, month, day);
-                Ok(rd.to_i64_date())
-            }
-            Calendar::Hebrew => {
-                use calendrical_calculations::hebrew::BookHebrew;
-                // Convert GEDCOM Hebrew month (civil order) to Book Hebrew month
-                let book_month = gedcom_hebrew_month_to_book(month);
-                let hebrew_date = BookHebrew {
-                    year,
-                    month: book_month,
-                    day,
-                };
-                let rd = BookHebrew::fixed_from_book_hebrew(hebrew_date);
-                Ok(rd.to_i64_date())
-            }
-            Calendar::FrenchRepublican => {
-                // Count Republican days straight off the calendrier timestamp. Its
-                // chrono conversions carry a clock offset that would lose a day; see
-                // `FRENCH_REPUBLICAN_EPOCH_RD`.
-                let fr_date = french_republican_date(year, month, day)?;
-                let days = fr_date
-                    .timestamp()
-                    .seconds
-                    .div_euclid(REPUBLICAN_SECONDS_PER_DAY);
-                FRENCH_REPUBLICAN_EPOCH_RD.checked_add(days).ok_or_else(|| {
-                    CalendarConversionError::InvalidDate {
-                        message: format!(
-                            "French Republican date out of range: year={year}, month={month}, day={day}"
-                        ),
-                    }
-                })
-            }
-        }
-    }
-
-    /// Returns the Julian Day Number (JDN) for this date.
-    ///
-    /// JDN counts days from January 1, 4713 BCE. This epoch is widely used in astronomy
-    /// and genealogy software for date comparison and arithmetic.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the date is incomplete (missing year, month, or day).
-    #[cfg(feature = "calendar")]
-    pub fn to_julian_day_number(&self) -> Result<i64, CalendarConversionError> {
-        self.to_rata_die().map(|rd| rd + RATA_DIE_TO_JDN_OFFSET)
-    }
-
-    /// Creates a `ParsedDateTime` from a Rata Die day number for the specified calendar.
-    ///
-    /// This is the inverse of `to_rata_die()`. The resulting `ParsedDateTime` will contain
-    /// only date components (year, month, day) for the specified calendar system.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the rata die value cannot be converted to a valid date in the specified
-    /// calendar.
-    #[cfg(feature = "calendar")]
-    pub fn from_rata_die(
-        rata_die: i64,
-        calendar: Calendar,
-    ) -> Result<ParsedDateTime, CalendarConversionError> {
-        use calendrical_calculations::rata_die::RataDie;
-
-        let rd = RataDie::new(rata_die);
-
-        let mut result = ParsedDateTime {
-            calendar,
-            ..Default::default()
-        };
-
-        match calendar {
-            Calendar::Gregorian => {
-                let (year, month, day) =
-                    calendrical_calculations::gregorian::gregorian_from_fixed(rd).map_err(|e| {
-                        CalendarConversionError::InvalidDate {
-                            message: format!("Failed to convert RataDie to Gregorian: {e:?}"),
-                        }
-                    })?;
-                result.year = Some(year);
-                result.month = Some(month);
-                result.day = Some(day);
-            }
-            Calendar::Julian => {
-                let (year, month, day) = calendrical_calculations::julian::julian_from_fixed(rd)
-                    .map_err(|e| CalendarConversionError::InvalidDate {
-                        message: format!("Failed to convert RataDie to Julian: {e:?}"),
-                    })?;
-                result.year = Some(year);
-                result.month = Some(month);
-                result.day = Some(day);
-            }
-            Calendar::Hebrew => {
-                use calendrical_calculations::hebrew::BookHebrew;
-                let hebrew = BookHebrew::book_hebrew_from_fixed(rd);
-                result.year = Some(hebrew.year);
-                // Convert Book Hebrew month back to GEDCOM Hebrew month (civil order)
-                result.month = Some(book_hebrew_month_to_gedcom(hebrew.month));
-                result.day = Some(hebrew.day);
-            }
-            Calendar::FrenchRepublican => {
-                // Inverse of `to_rata_die`: turn the day count back into a Republican
-                // timestamp rather than hopping through chrono.
-                let seconds = rata_die
-                    .checked_sub(FRENCH_REPUBLICAN_EPOCH_RD)
-                    .and_then(|days| days.checked_mul(REPUBLICAN_SECONDS_PER_DAY))
-                    .ok_or(CalendarConversionError::InvalidDate {
-                        message: format!(
-                            "RataDie {rata_die} is out of range for the French Republican calendar"
-                        ),
-                    })?;
-
-                let fr_date = calendrier::Date::from_timestamp(calendrier::Timestamp { seconds });
-                result.year = Some(i32::try_from(fr_date.year()).map_err(|_| {
-                    CalendarConversionError::InvalidDate {
-                        message: format!(
-                            "RataDie {rata_die} is out of range for the French Republican calendar"
-                        ),
-                    }
-                })?);
-                result.month = Some(u8::try_from(fr_date.month().num()).unwrap_or(1));
-                result.day = Some(u8::try_from(fr_date.day()).unwrap_or(1));
-            }
-        }
-
-        Ok(result)
-    }
-
-    /// Creates a `ParsedDateTime` from a Rata Die day number for the specified calendar.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the Julian Day Number cannot be converted to a valid date in the
-    /// specified calendar.
-    #[cfg(feature = "calendar")]
-    pub fn from_julian_day_number(
-        jdn: i64,
-        calendar: Calendar,
-    ) -> Result<ParsedDateTime, CalendarConversionError> {
-        Self::from_rata_die(jdn - RATA_DIE_TO_JDN_OFFSET, calendar)
-    }
-
-    /// Format this date as a GEDCOM date string.
-    #[must_use]
-    pub fn to_gedcom_date(&self) -> String {
-        let mut parts = Vec::new();
-
-        // Qualifier, then calendar escape: in the 5.5.1 grammar the escape
-        // belongs to the date the qualifier applies to (`ABT @#DJULIAN@ 1700`).
-        if let Some(qual) = &self.qualifier {
-            let s = qual.as_str();
-            if !s.is_empty() {
-                parts.push(s.to_string());
-            }
-        }
-
-        // Calendar escape (skipped for Gregorian, the default)
-        if self.calendar != Calendar::Gregorian {
-            parts.push(self.calendar.gedcom_escape().to_string());
-        }
-
-        // Add date components
-        if let Some(day) = self.day {
-            parts.push(day.to_string());
-        }
-
-        if let Some(month) = self.month {
-            let month_str = format_month(month, self.calendar);
-            if let Some(m) = month_str {
-                parts.push(m.to_string());
-            }
-        }
-
-        if let Some(year) = self.year {
-            let year_abs = year.abs();
-            if let Some(dual) = self.dual_year {
-                let dual_suffix = dual % 100;
-                parts.push(format!("{year_abs}/{dual_suffix:02}"));
+impl Epoch {
+    /// Reads an epoch marker leniently: `BCE`, `B.C.`, `BC` or `B.C.E.` in
+    /// any case, or an extension tag. Returns the epoch and whether it was
+    /// written exactly as `grammar` spells it.
+    pub(crate) fn from_word(word: &str) -> Option<(Epoch, Spelling)> {
+        if is_lenient_ext_tag(word) {
+            let spelling = if is_ext_tag(word) {
+                Spelling::V7
             } else {
-                parts.push(year_abs.to_string());
+                Spelling::Neither
+            };
+            return Some((Epoch::Extension(word.to_string()), spelling));
+        }
+        let spelling = match word {
+            "BCE" => Spelling::V7,
+            _ if word.eq_ignore_ascii_case("B.C.") => Spelling::V551,
+            _ if ["BCE", "BC", "B.C.E.", "B.C"]
+                .iter()
+                .any(|alias| word.eq_ignore_ascii_case(alias)) =>
+            {
+                Spelling::Neither
             }
-
-            if self.bce || year < 0 {
-                parts.push("BCE".to_string());
-            }
-        }
-
-        parts.join(" ")
-    }
-
-    /// Format this date's time as a GEDCOM time string.
-    #[must_use]
-    pub fn to_gedcom_time(&self) -> Option<String> {
-        use std::fmt::Write;
-
-        let hour = self.hour?;
-        let minute = self.minute.unwrap_or(0);
-
-        let mut time = format!("{hour}:{minute:02}");
-
-        if let Some(sec) = self.second {
-            let _ = write!(time, ":{sec:02}");
-            if let Some(subsec) = &self.subsecond {
-                time.push('.');
-                time.push_str(subsec);
-            }
-        }
-
-        Some(time)
-    }
-
-    /// Returns the year as a signed integer, negated for BCE dates.
-    #[must_use]
-    fn effective_year(&self) -> Option<i32> {
-        self.year.map(|y| if self.bce { -y } else { y })
-    }
-
-    /// Returns a number of days from self to other, positive if `other` is later, negative if
-    /// earlier. Both dates must be complete.
-    ///
-    /// # Errors
-    /// Returns an error if either date is incomplete (missing year, month, or day).
-    #[cfg(feature = "calendar")]
-    pub fn days_between(&self, other: &ParsedDateTime) -> Result<i64, CalendarConversionError> {
-        let rd_self = self.to_rata_die()?;
-        let rd_other = other.to_rata_die()?;
-        Ok(rd_other - rd_self)
-    }
-
-    /// Returns a new day offset by the given number of days, in the same calendar. Preserves time
-    /// components.
-    ///
-    /// # Errors
-    /// Returns an error if the date is incomplete (missing year, month, or day).
-    #[cfg(feature = "calendar")]
-    pub fn add_days(&self, days: i64) -> Result<ParsedDateTime, CalendarConversionError> {
-        let rd = self.to_rata_die()?;
-        let mut result = ParsedDateTime::from_rata_die(rd + days, self.calendar)?;
-        result.hour = self.hour;
-        result.minute = self.minute;
-        result.second = self.second;
-        result.subsecond.clone_from(&self.subsecond);
-        Ok(result)
-    }
-
-    /// Returns a sortable key for chronological ordering. For complete dates, this is the Rata Die
-    /// value. For incomplete dates, missing components default to the earliest possible value
-    /// (month to January, day to 1), producing a Rata Die on the same scale. Returns `None` if no
-    /// year is present. (Use `is_complete()` to distinguish exact keys from estimated ones when
-    /// sorting if required.)
-    #[cfg(feature = "calendar")]
-    #[must_use]
-    pub fn ordering_key(&self) -> Option<i64> {
-        if let Ok(rd) = self.to_rata_die() {
-            return Some(rd);
-        }
-
-        let synthetic = ParsedDateTime {
-            calendar: self.calendar,
-            year: Some(self.year?),
-            month: Some(self.month.unwrap_or(1)),
-            day: Some(self.day.unwrap_or(1)),
-            ..Default::default()
-        };
-
-        synthetic.to_rata_die().ok()
-    }
-
-    /// Returns the day of the week for this date
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the date is incomplete
-    #[cfg(feature = "calendar")]
-    #[must_use]
-    pub fn day_of_week(&self) -> Option<Weekday> {
-        let rd = self.to_rata_die().ok()?;
-
-        // Rata Die epoch (Jan 1, 1 CE) is a Monday. rd % 7: 0=Mon, 1=Tue, ...
-        match rd.rem_euclid(7) {
-            0 => Some(Weekday::Sun),
-            1 => Some(Weekday::Mon),
-            2 => Some(Weekday::Tue),
-            3 => Some(Weekday::Wed),
-            4 => Some(Weekday::Thu),
-            5 => Some(Weekday::Fri),
-            6 => Some(Weekday::Sat),
-            _ => None,
-        }
-    }
-}
-
-impl PartialOrd for ParsedDateTime {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        // Complete dates: cross-calendar comparison via rata die
-        if self.is_complete() && other.is_complete() {
-            let rd_self = self.to_rata_die().ok()?;
-            let rd_other = other.to_rata_die().ok()?;
-            return rd_self.partial_cmp(&rd_other);
-        }
-
-        // Incomplete + different calendars: incomparable
-        if self.calendar != other.calendar {
-            return None;
-        }
-
-        // Same calendar: hierarchical component comparison
-        let sy = self.effective_year()?;
-        let oy = other.effective_year()?;
-        match sy.cmp(&oy) {
-            Ordering::Equal => {}
-            ord => return Some(ord),
-        }
-
-        match (self.month, other.month) {
-            (Some(sm), Some(om)) => match sm.cmp(&om) {
-                Ordering::Equal => {}
-                ord => return Some(ord),
-            },
-            (None, None) => return Some(Ordering::Equal),
             _ => return None,
-        }
+        };
+        Some((Epoch::Bce, spelling))
+    }
 
-        match (self.day, other.day) {
-            (Some(sd), Some(od)) => Some(sd.cmp(&od)),
-            (None, None) => Some(Ordering::Equal),
-            _ => None,
+    /// The epoch's marker in `grammar`.
+    pub(crate) fn tag(&self, grammar: Grammar) -> &str {
+        match (self, grammar) {
+            (Epoch::Bce, Grammar::V7) => "BCE",
+            (Epoch::Bce, Grammar::V551) => "B.C.",
+            (Epoch::Extension(tag), _) => tag,
         }
     }
 }
 
-/// Parse a month string for the given calendar.
-#[allow(clippy::cast_possible_truncation)]
-fn parse_month(month_str: &str, calendar: Calendar) -> Option<u8> {
-    let months = match calendar {
-        Calendar::Gregorian | Calendar::Julian => &GREGORIAN_MONTHS[..],
-        Calendar::Hebrew => &HEBREW_MONTHS[..],
-        Calendar::FrenchRepublican => &FRENCH_REPUBLICAN_MONTHS[..],
-    };
-
-    for (idx, &m) in months.iter().enumerate() {
-        if month_str.eq_ignore_ascii_case(m) {
-            // Safe: months arrays have at most 13 elements, so idx+1 <= 13 fits in u8
-            return Some((idx + 1) as u8);
-        }
-    }
-
-    // Also try full month names for Gregorian/Julian
-    if matches!(calendar, Calendar::Gregorian | Calendar::Julian) {
-        let full_months = [
-            "JANUARY",
-            "FEBRUARY",
-            "MARCH",
-            "APRIL",
-            "MAY",
-            "JUNE",
-            "JULY",
-            "AUGUST",
-            "SEPTEMBER",
-            "OCTOBER",
-            "NOVEMBER",
-            "DECEMBER",
-        ];
-        for (idx, &m) in full_months.iter().enumerate() {
-            if month_str.eq_ignore_ascii_case(m) {
-                // Safe: full_months has 12 elements, so idx+1 <= 12 fits in u8
-                return Some((idx + 1) as u8);
-            }
-        }
-    }
-
-    None
+/// Which version spells a marker the way it was written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Spelling {
+    /// As GEDCOM 5.5.1 spells it.
+    V551,
+    /// As GEDCOM 7.0 spells it.
+    V7,
+    /// As neither does.
+    Neither,
 }
 
-/// Format a month number as a GEDCOM month string.
-fn format_month(month: u8, calendar: Calendar) -> Option<&'static str> {
-    if month == 0 {
+impl Spelling {
+    /// Whether the spelling is the one `grammar` uses.
+    pub(crate) fn is(self, grammar: Grammar) -> bool {
+        matches!(
+            (self, grammar),
+            (Spelling::V551, Grammar::V551) | (Spelling::V7, Grammar::V7)
+        )
+    }
+}
+
+/// The astronomical number of a year: year `y BCE` is `1 - y`, so 1 BCE is
+/// 0 and 2 BCE is -1.
+#[must_use]
+pub(crate) fn astronomical_year(year: u32, bce: bool) -> i64 {
+    if bce {
+        1 - i64::from(year)
+    } else {
+        i64::from(year)
+    }
+}
+
+/// The largest day a month can have in a defined calendar, in the year
+/// given (astronomical numbering) when its length depends on it. `None` for
+/// a month the calendar does not define, or a calendar without known months.
+pub(crate) fn max_day(calendar: &Calendar, month: &Month, year: Option<i64>) -> Option<u8> {
+    if !month.belongs_to(calendar) || !calendar.is_defined() {
         return None;
     }
-
-    let months: &[&str] = match calendar {
-        Calendar::Gregorian | Calendar::Julian => &GREGORIAN_MONTHS,
-        Calendar::Hebrew => &HEBREW_MONTHS,
-        Calendar::FrenchRepublican => &FRENCH_REPUBLICAN_MONTHS,
+    let leap = |gregorian: bool| {
+        year.is_none_or(|y| {
+            y.rem_euclid(4) == 0 && (!gregorian || y.rem_euclid(100) != 0 || y.rem_euclid(400) == 0)
+        })
     };
-
-    let idx = (month - 1) as usize;
-    if idx < months.len() {
-        Some(months[idx])
-    } else {
-        None
-    }
-}
-
-/// Helper function to convert Gregorian date to `RataDie`.
-#[cfg(feature = "calendar")]
-fn gregorian_to_rata_die(year: i32, month: u8, day: u8) -> i64 {
-    calendrical_calculations::gregorian::fixed_from_gregorian(year, month, day).to_i64_date()
-}
-
-/// Builds a `calendrier::Date`, rejecting components the crate would panic on.
-///
-/// `calendrier::Date::from_ymd` asserts its arguments, so a malformed GEDCOM date
-/// such as `@#DFRENCH R@ 31 VEND 1` has to be turned away here rather than reaching
-/// it. The Republican year has twelve months of thirty days plus a short thirteenth
-/// month (`COMP`) of five days, or six in a sextile year.
-#[cfg(feature = "calendar")]
-fn french_republican_date(
-    year: i32,
-    month: u8,
-    day: u8,
-) -> Result<calendrier::Date, CalendarConversionError> {
-    let invalid = || CalendarConversionError::InvalidDate {
-        message: format!("Invalid French Republican date: year={year}, month={month}, day={day}"),
-    };
-
-    if year == 0 || !(1..=13).contains(&month) || !(1..=30).contains(&day) {
-        return Err(invalid());
-    }
-
-    // The complementary days are the tail of the year, so their count is whatever
-    // the year has beyond its twelve full months.
-    if month == 13 {
-        let complementary_days =
-            calendrier::get_day_count(i64::from(year)) - 12 * i64::from(DAYS_PER_REPUBLICAN_MONTH);
-        if i64::from(day) > complementary_days {
-            return Err(invalid());
+    Some(match month {
+        Month::Feb => {
+            if leap(*calendar == Calendar::Gregorian) {
+                29
+            } else {
+                28
+            }
         }
-    }
-
-    Ok(calendrier::Date::from_ymd(
-        i64::from(year),
-        i64::from(month),
-        i64::from(day),
-    ))
+        Month::Jan
+        | Month::Mar
+        | Month::May
+        | Month::Jul
+        | Month::Aug
+        | Month::Oct
+        | Month::Dec => 31,
+        // Five complementary days, six in a sextile year.
+        Month::Comp => 6,
+        // Hebrew months of 29 days.
+        Month::Tvt | Month::Ads | Month::Iyr | Month::Tmz | Month::Ell => 29,
+        // April, June, September, November, the Republican months and the
+        // other Hebrew months: 30 days, at most.
+        _ => 30,
+    })
 }
 
 #[cfg(test)]
@@ -1151,610 +593,117 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_calendar_escape_roundtrip() {
-        for cal in [
-            Calendar::Gregorian,
-            Calendar::Julian,
-            Calendar::Hebrew,
-            Calendar::FrenchRepublican,
-        ] {
-            let escape = cal.gedcom_escape();
-            let parsed = Calendar::from_gedcom_escape(escape);
-            assert_eq!(parsed, Some(cal), "Failed roundtrip for {cal}");
-        }
+    fn test_markers() {
+        assert_eq!(
+            Calendar::from_marker("@#DJULIAN@"),
+            Some((Calendar::Julian, MarkerForm::Escape))
+        );
+        assert_eq!(
+            Calendar::from_marker("@#dfrench r@"),
+            Some((Calendar::FrenchRepublican, MarkerForm::Escape))
+        );
+        assert_eq!(
+            Calendar::from_marker("@#DROMAN@"),
+            Some((Calendar::Roman, MarkerForm::Escape))
+        );
+        assert_eq!(
+            Calendar::from_marker("@#DMYCAL@"),
+            Some((Calendar::Extension("MYCAL".into()), MarkerForm::Escape))
+        );
+        assert_eq!(
+            Calendar::from_marker("julian"),
+            Some((Calendar::Julian, MarkerForm::Keyword))
+        );
+        assert_eq!(
+            Calendar::from_marker("_ROMAN"),
+            Some((Calendar::Roman, MarkerForm::ExtTag))
+        );
+        assert_eq!(
+            Calendar::from_marker("_MYCAL"),
+            Some((Calendar::Extension("_MYCAL".into()), MarkerForm::ExtTag))
+        );
+        assert_eq!(Calendar::from_marker("JAN"), None);
+        assert_eq!(Calendar::from_marker("@#D@"), None);
     }
 
     #[test]
-    fn test_parse_simple_gregorian_date() {
-        let parsed = ParsedDateTime::from_gedcom_date("15 MAR 1820").unwrap();
-        assert_eq!(parsed.calendar, Calendar::Gregorian);
-        assert_eq!(parsed.day, Some(15));
-        assert_eq!(parsed.month, Some(3));
-        assert_eq!(parsed.year, Some(1820));
-        assert!(parsed.is_complete());
-        assert!(parsed.is_exact());
+    fn test_spellings_per_version() {
+        assert_eq!(Calendar::FrenchRepublican.gedcom7_tag(), "FRENCH_R");
+        assert_eq!(
+            Calendar::FrenchRepublican.gedcom551_escape(),
+            "@#DFRENCH R@"
+        );
+        assert_eq!(Calendar::Roman.gedcom7_tag(), "_ROMAN");
+        assert_eq!(Calendar::Extension("MYCAL".into()).gedcom7_tag(), "_MYCAL");
+        assert_eq!(Calendar::Extension("_MYCAL".into()).gedcom7_tag(), "_MYCAL");
+        assert!(Calendar::Julian.marker_is_valid("JULIAN", MarkerForm::Keyword, Grammar::V7));
+        assert!(!Calendar::Julian.marker_is_valid("julian", MarkerForm::Keyword, Grammar::V7));
+        assert!(!Calendar::Roman.marker_is_valid("ROMAN", MarkerForm::Keyword, Grammar::V7));
+        assert!(Calendar::Roman.marker_is_valid("_ROMAN", MarkerForm::ExtTag, Grammar::V7));
+        assert!(Calendar::Roman.marker_is_valid("@#DROMAN@", MarkerForm::Escape, Grammar::V551));
+        assert!(!Calendar::Julian.marker_is_valid("JULIAN", MarkerForm::Keyword, Grammar::V551));
     }
 
     #[test]
-    fn test_parse_gregorian_with_escape() {
-        let parsed = ParsedDateTime::from_gedcom_date("@#DGREGORIAN@ 31 DEC 1997").unwrap();
-        assert_eq!(parsed.calendar, Calendar::Gregorian);
-        assert_eq!(parsed.day, Some(31));
-        assert_eq!(parsed.month, Some(12));
-        assert_eq!(parsed.year, Some(1997));
+    fn test_months() {
+        assert_eq!(Month::from_tag("VEND"), Some(Month::Vend));
+        assert_eq!(Month::from_tag("vend"), None);
+        assert_eq!(Month::from_word("vend"), Some(Month::Vend));
+        assert_eq!(Month::from_word("September"), Some(Month::Sep));
+        assert_eq!(
+            Month::from_word("_mon"),
+            Some(Month::Extension("_mon".into()))
+        );
+        assert_eq!(Month::Tsh.number(), Some(1));
+        assert_eq!(Month::Ell.number(), Some(13));
+        assert_eq!(Month::Comp.number(), Some(13));
+        assert_eq!(Month::Extension("_X".into()).number(), None);
+        assert_eq!(Month::of(&Calendar::Hebrew, 7), Some(Month::Ads));
+        assert_eq!(Month::of(&Calendar::Julian, 13), None);
+        assert_eq!(Month::of(&Calendar::Julian, 0), None);
+        assert!(Month::Jan.belongs_to(&Calendar::Julian));
+        assert!(!Month::Jan.belongs_to(&Calendar::Hebrew));
+        assert!(Month::Extension("_M".into()).belongs_to(&Calendar::Roman));
     }
 
     #[test]
-    fn test_parse_julian_date() {
-        let parsed = ParsedDateTime::from_gedcom_date("@#DJULIAN@ 15 MAR 1582").unwrap();
-        assert_eq!(parsed.calendar, Calendar::Julian);
-        assert_eq!(parsed.day, Some(15));
-        assert_eq!(parsed.month, Some(3));
-        assert_eq!(parsed.year, Some(1582));
+    fn test_epochs() {
+        assert_eq!(Epoch::from_word("BCE"), Some((Epoch::Bce, Spelling::V7)));
+        assert_eq!(Epoch::from_word("b.c."), Some((Epoch::Bce, Spelling::V551)));
+        assert_eq!(
+            Epoch::from_word("bc"),
+            Some((Epoch::Bce, Spelling::Neither))
+        );
+        assert_eq!(Epoch::from_word("AD"), None);
     }
 
     #[test]
-    fn test_parse_hebrew_date() {
-        let parsed = ParsedDateTime::from_gedcom_date("@#DHEBREW@ 15 TSH 5784").unwrap();
-        assert_eq!(parsed.calendar, Calendar::Hebrew);
-        assert_eq!(parsed.day, Some(15));
-        assert_eq!(parsed.month, Some(1)); // TSH = Tishrei = month 1
-        assert_eq!(parsed.year, Some(5784));
-    }
-
-    #[test]
-    fn test_parse_french_republican_date() {
-        let parsed = ParsedDateTime::from_gedcom_date("@#DFRENCH R@ 1 VEND 1").unwrap();
-        assert_eq!(parsed.calendar, Calendar::FrenchRepublican);
-        assert_eq!(parsed.day, Some(1));
-        assert_eq!(parsed.month, Some(1)); // VEND = Vendemiaire = month 1
-        assert_eq!(parsed.year, Some(1));
-    }
-
-    #[test]
-    fn test_parse_date_with_qualifier() {
-        let parsed = ParsedDateTime::from_gedcom_date("ABT 1820").unwrap();
-        assert_eq!(parsed.qualifier, Some(DateQualifier::About));
-        assert_eq!(parsed.year, Some(1820));
-        assert!(!parsed.is_exact());
-
-        let parsed = ParsedDateTime::from_gedcom_date("BEF 15 MAR 1820").unwrap();
-        assert_eq!(parsed.qualifier, Some(DateQualifier::Before));
-        assert_eq!(parsed.day, Some(15));
-        assert_eq!(parsed.month, Some(3));
-        assert_eq!(parsed.year, Some(1820));
-    }
-
-    #[test]
-    fn test_parse_dual_year() {
-        let parsed = ParsedDateTime::from_gedcom_date("15 MAR 1699/00").unwrap();
-        assert_eq!(parsed.year, Some(1699));
-        assert_eq!(parsed.dual_year, Some(1700));
-    }
-
-    #[test]
-    fn test_parse_bce_date() {
-        let parsed = ParsedDateTime::from_gedcom_date("15 MAR 44 BCE").unwrap();
-        assert_eq!(parsed.year, Some(-44));
-        assert!(parsed.bce);
-    }
-
-    #[test]
-    fn test_parse_year_only() {
-        let parsed = ParsedDateTime::from_gedcom_date("1820").unwrap();
-        assert_eq!(parsed.year, Some(1820));
-        assert_eq!(parsed.month, None);
-        assert_eq!(parsed.day, None);
-        assert!(!parsed.is_complete());
-    }
-
-    #[test]
-    fn test_parse_month_year() {
-        let parsed = ParsedDateTime::from_gedcom_date("MAR 1820").unwrap();
-        assert_eq!(parsed.year, Some(1820));
-        assert_eq!(parsed.month, Some(3));
-        assert_eq!(parsed.day, None);
-        assert!(!parsed.is_complete());
-    }
-
-    #[test]
-    fn test_parse_time() {
-        let mut parsed = ParsedDateTime::from_gedcom_date("15 MAR 1820").unwrap();
-        parsed.parse_time("12:34:56.789").unwrap();
-        assert_eq!(parsed.hour, Some(12));
-        assert_eq!(parsed.minute, Some(34));
-        assert_eq!(parsed.second, Some(56));
-        assert_eq!(parsed.subsecond, Some("789".to_string()));
-    }
-
-    #[test]
-    fn test_to_gedcom_date() {
-        let parsed = ParsedDateTime {
-            calendar: Calendar::Gregorian,
-            year: Some(1820),
-            month: Some(3),
-            day: Some(15),
-            ..Default::default()
-        };
-        assert_eq!(parsed.to_gedcom_date(), "15 MAR 1820");
-
-        let parsed = ParsedDateTime {
-            calendar: Calendar::Julian,
-            year: Some(1582),
-            month: Some(3),
-            day: Some(15),
-            ..Default::default()
-        };
-        assert_eq!(parsed.to_gedcom_date(), "@#DJULIAN@ 15 MAR 1582");
-    }
-
-    #[test]
-    fn test_to_gedcom_time() {
-        let parsed = ParsedDateTime {
-            hour: Some(12),
-            minute: Some(34),
-            second: Some(56),
-            subsecond: Some("789".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(parsed.to_gedcom_time(), Some("12:34:56.789".to_string()));
-
-        let parsed = ParsedDateTime {
-            hour: Some(12),
-            minute: Some(34),
-            ..Default::default()
-        };
-        assert_eq!(parsed.to_gedcom_time(), Some("12:34".to_string()));
-    }
-
-    #[test]
-    fn test_range_date_error() {
-        let result = ParsedDateTime::from_gedcom_date("FROM 1820 TO 1825");
-        assert!(matches!(
-            result,
-            Err(CalendarConversionError::RangeDate { .. })
-        ));
-    }
-
-    // Calendar conversion tests (only run with calendar feature)
-    #[cfg(feature = "calendar")]
-    mod conversion_tests {
-        use super::*;
-
-        #[test]
-        fn test_gregorian_julian_conversion() {
-            // October 15, 1582 Gregorian = October 5, 1582 Julian
-            // (The day the Gregorian calendar was adopted)
-            let gregorian = ParsedDateTime {
-                calendar: Calendar::Gregorian,
-                year: Some(1582),
-                month: Some(10),
-                day: Some(15),
-                ..Default::default()
-            };
-
-            let julian = gregorian.convert_to(Calendar::Julian).unwrap();
-            assert_eq!(julian.calendar, Calendar::Julian);
-            assert_eq!(julian.year, Some(1582));
-            assert_eq!(julian.month, Some(10));
-            assert_eq!(julian.day, Some(5));
-
-            // And back
-            let back = julian.convert_to(Calendar::Gregorian).unwrap();
-            assert_eq!(back.year, Some(1582));
-            assert_eq!(back.month, Some(10));
-            assert_eq!(back.day, Some(15));
-        }
-
-        #[test]
-        fn test_hebrew_conversion() {
-            // 15 Tishrei 5784 = September 30, 2023 (Gregorian)
-            // (This is Sukkot)
-            let hebrew = ParsedDateTime {
-                calendar: Calendar::Hebrew,
-                year: Some(5784),
-                month: Some(1), // Tishrei
-                day: Some(15),
-                ..Default::default()
-            };
-
-            let gregorian = hebrew.convert_to(Calendar::Gregorian).unwrap();
-            assert_eq!(gregorian.calendar, Calendar::Gregorian);
-            assert_eq!(gregorian.year, Some(2023));
-            assert_eq!(gregorian.month, Some(9));
-            assert_eq!(gregorian.day, Some(30));
-        }
-
-        /// A year-month-day triple, in whichever calendar the context names.
-        #[cfg(feature = "calendar")]
-        type Ymd = (i32, u8, u8);
-
-        /// Dates the French Republican calendar is pinned to in the historical
-        /// record, as `(republican, gregorian)` pairs.
-        #[cfg(feature = "calendar")]
-        const REPUBLICAN_LANDMARKS: &[(Ymd, Ymd)] = &[
-            // 1 Vendemiaire An I: the autumn equinox the calendar was anchored to,
-            // and the day the Republic was proclaimed.
-            ((1, 1, 1), (1792, 9, 22)),
-            ((1, 1, 2), (1792, 9, 23)),
-            // 1 Vendemiaire An II, one full year on.
-            ((2, 1, 1), (1793, 9, 22)),
-            // 9 Thermidor An II: the fall of Robespierre.
-            ((2, 11, 9), (1794, 7, 27)),
-            // 18 Brumaire An VIII: Napoleon's coup.
-            ((8, 2, 18), (1799, 11, 9)),
-            // 11 Nivose An XIV: the last day before the calendar was abolished.
-            ((14, 4, 11), (1806, 1, 1)),
-        ];
-
-        #[cfg(feature = "calendar")]
-        fn ymd(calendar: Calendar, (year, month, day): Ymd) -> ParsedDateTime {
-            ParsedDateTime {
-                calendar,
-                year: Some(year),
-                month: Some(month),
-                day: Some(day),
-                ..Default::default()
-            }
-        }
-
-        #[test]
-        fn test_french_republican_conversion() {
-            for &(republican, gregorian) in REPUBLICAN_LANDMARKS {
-                let converted = ymd(Calendar::FrenchRepublican, republican)
-                    .convert_to(Calendar::Gregorian)
-                    .unwrap();
-                assert_eq!(converted.calendar, Calendar::Gregorian);
-                assert_eq!(
-                    (
-                        converted.year.unwrap(),
-                        converted.month.unwrap(),
-                        converted.day.unwrap()
-                    ),
-                    gregorian,
-                    "French Republican {republican:?} should be Gregorian {gregorian:?}"
-                );
-
-                let back = ymd(Calendar::Gregorian, gregorian)
-                    .convert_to(Calendar::FrenchRepublican)
-                    .unwrap();
-                assert_eq!(back.calendar, Calendar::FrenchRepublican);
-                assert_eq!(
-                    (back.year.unwrap(), back.month.unwrap(), back.day.unwrap()),
-                    republican,
-                    "Gregorian {gregorian:?} should be French Republican {republican:?}"
-                );
-            }
-        }
-
-        #[test]
-        fn test_french_republican_complementary_days() {
-            // The thirteenth month holds five complementary days, six in a sextile
-            // year. An III was sextile; An I was not.
-            let last_of_year_one = ymd(Calendar::FrenchRepublican, (1, 13, 5))
-                .convert_to(Calendar::Gregorian)
-                .unwrap();
-            assert_eq!(last_of_year_one.year, Some(1793));
-            assert_eq!(last_of_year_one.month, Some(9));
-            assert_eq!(last_of_year_one.day, Some(21));
-
-            let sextile_day = ymd(Calendar::FrenchRepublican, (3, 13, 6))
-                .convert_to(Calendar::Gregorian)
-                .unwrap();
-            assert_eq!(sextile_day.year, Some(1795));
-            assert_eq!(sextile_day.month, Some(9));
-            assert_eq!(sextile_day.day, Some(22));
-        }
-
-        #[test]
-        fn test_french_republican_rejects_invalid_dates() {
-            // These would panic inside `calendrier::Date::from_ymd` if they reached it.
-            for invalid in [
-                (1, 1, 31), // no month has a thirty-first day
-                (1, 14, 1), // there is no fourteenth month
-                (0, 1, 1),  // the calendar has no year zero
-                (1, 13, 6), // An I was not sextile, so it has no sixth complementary day
-            ] {
-                let result =
-                    ymd(Calendar::FrenchRepublican, invalid).convert_to(Calendar::Gregorian);
-                assert!(
-                    matches!(result, Err(CalendarConversionError::InvalidDate { .. })),
-                    "French Republican {invalid:?} should be rejected, got {result:?}"
-                );
-            }
-        }
-
-        #[test]
-        fn test_french_republican_rata_die_round_trip() {
-            // Every day the calendar was in official use, and then some.
-            let first = ymd(Calendar::FrenchRepublican, (1, 1, 1))
-                .to_rata_die()
-                .unwrap();
-            for rata_die in first..first + 6_000 {
-                let republican =
-                    ParsedDateTime::from_rata_die(rata_die, Calendar::FrenchRepublican).unwrap();
-                assert_eq!(
-                    republican.to_rata_die().unwrap(),
-                    rata_die,
-                    "round trip lost a day at rata die {rata_die}"
-                );
-            }
-        }
-
-        #[test]
-        fn test_time_preserved_in_conversion() {
-            let parsed = ParsedDateTime {
-                calendar: Calendar::Gregorian,
-                year: Some(2023),
-                month: Some(9),
-                day: Some(30),
-                hour: Some(12),
-                minute: Some(34),
-                second: Some(56),
-                subsecond: Some("789".to_string()),
-                ..Default::default()
-            };
-
-            let julian = parsed.convert_to(Calendar::Julian).unwrap();
-            assert_eq!(julian.hour, Some(12));
-            assert_eq!(julian.minute, Some(34));
-            assert_eq!(julian.second, Some(56));
-            assert_eq!(julian.subsecond, Some("789".to_string()));
-        }
-
-        #[test]
-        fn test_incomplete_date_conversion_error() {
-            let incomplete = ParsedDateTime {
-                calendar: Calendar::Gregorian,
-                year: Some(2023),
-                month: Some(9),
-                day: None,
-                ..Default::default()
-            };
-
-            let result = incomplete.convert_to(Calendar::Julian);
-            assert!(matches!(
-                result,
-                Err(CalendarConversionError::IncompleteDate { .. })
-            ));
-        }
-
-        #[test]
-        fn test_qualified_date_conversion_error() {
-            let qualified = ParsedDateTime {
-                calendar: Calendar::Gregorian,
-                year: Some(2023),
-                month: Some(9),
-                day: Some(30),
-                qualifier: Some(DateQualifier::About),
-                ..Default::default()
-            };
-
-            let result = qualified.convert_to(Calendar::Julian);
-            assert!(matches!(
-                result,
-                Err(CalendarConversionError::QualifiedDate { .. })
-            ));
-        }
-    }
-
-    #[cfg(feature = "calendar")]
-    mod sdn_tests {
-        use super::*;
-
-        #[test]
-        fn test_known_rd_values() {
-            let date = ParsedDateTime::from_gedcom_date("1 JAN 2000").unwrap();
-            assert_eq!(date.to_rata_die().unwrap(), 730_120);
-        }
-
-        #[test]
-        fn test_jdn_offset() {
-            let date = ParsedDateTime::from_gedcom_date("23 MAR 2026").unwrap();
-            assert_eq!(
-                date.to_julian_day_number().unwrap() - date.to_rata_die().unwrap(),
-                1_721_425
-            );
-        }
-
-        #[test]
-        fn test_cross_equivalence() {
-            let greg = ParsedDateTime::from_gedcom_date("15 OCT 1582").unwrap();
-            let julian = ParsedDateTime::from_gedcom_date("@#DJULIAN@ 5 OCT 1582").unwrap();
-            assert_eq!(
-                greg.to_rata_die().unwrap() - julian.to_rata_die().unwrap(),
-                0
-            );
-        }
-
-        #[test]
-        fn test_day_difference() {
-            let first = ParsedDateTime::from_gedcom_date("2 JAN 2000").unwrap();
-            let second = ParsedDateTime::from_gedcom_date("3 JAN 2000").unwrap();
-            assert_eq!(
-                second.to_rata_die().unwrap() - first.to_rata_die().unwrap(),
-                1
-            );
-        }
-
-        #[test]
-        fn test_jdn_roundtrip() {
-            let original = ParsedDateTime::from_gedcom_date("15 MAR 1900").unwrap();
-            let jdn = original.to_julian_day_number().unwrap();
-            let restored =
-                ParsedDateTime::from_julian_day_number(jdn, Calendar::Gregorian).unwrap();
-            assert_eq!(restored.year, original.year);
-            assert_eq!(restored.month, original.month);
-            assert_eq!(restored.day, original.day);
-        }
-
-        #[test]
-        fn test_incomplete_date_conversion_error() {
-            let incomplete = ParsedDateTime {
-                calendar: Calendar::Gregorian,
-                year: Some(2011),
-                month: Some(3),
-                day: None,
-                ..Default::default()
-            };
-
-            let result = incomplete.to_rata_die();
-            assert!(matches!(
-                result,
-                Err(CalendarConversionError::IncompleteDate { .. })
-            ));
-        }
-
-        #[test]
-        fn test_partial_cmp() {
-            let mut a = ParsedDateTime::from_gedcom_date("11 JAN 1900").unwrap();
-            let mut b = ParsedDateTime::from_gedcom_date("11 JAN 1901").unwrap();
-            assert_eq!(a.partial_cmp(&b), Some(Ordering::Less));
-
-            a = ParsedDateTime::from_gedcom_date("15 OCT 1582").unwrap();
-            b = ParsedDateTime::from_gedcom_date("@#DJULIAN@ 5 OCT 1582").unwrap();
-            assert_eq!(a.partial_cmp(&b), Some(Ordering::Equal));
-
-            a = ParsedDateTime {
-                calendar: Calendar::Gregorian,
-                year: Some(1984),
-                ..Default::default()
-            };
-
-            b = ParsedDateTime {
-                calendar: Calendar::Gregorian,
-                year: Some(1984),
-                ..Default::default()
-            };
-
-            assert_eq!(a.partial_cmp(&b), Some(Ordering::Equal));
-
-            b = ParsedDateTime {
-                calendar: Calendar::Gregorian,
-                year: Some(1985),
-                ..Default::default()
-            };
-
-            assert_eq!(a.partial_cmp(&b), Some(Ordering::Less));
-            assert_eq!(b.partial_cmp(&a), Some(Ordering::Greater));
-
-            b = ParsedDateTime {
-                calendar: Calendar::Hebrew,
-                year: Some(5740),
-                ..Default::default()
-            };
-
-            assert_eq!(a.partial_cmp(&b), None);
-
-            b = ParsedDateTime {
-                calendar: Calendar::Gregorian,
-                year: Some(1984),
-                month: Some(3),
-                day: Some(15),
-                ..Default::default()
-            };
-
-            assert_eq!(a.partial_cmp(&b), None);
-
-            a = ParsedDateTime::from_gedcom_date("ABT 15 MAR 1820").unwrap();
-            b = ParsedDateTime::from_gedcom_date("15 MAR 1820").unwrap();
-            assert_eq!(a.partial_cmp(&b), Some(Ordering::Equal));
-        }
-
-        #[test]
-        fn test_days_between() {
-            let a = ParsedDateTime::from_gedcom_date("8 MAY 1980").unwrap();
-            let mut b = ParsedDateTime::from_gedcom_date("9 MAY 1980").unwrap();
-
-            assert_eq!(a.days_between(&b), Ok(1));
-            assert_eq!(b.days_between(&a), Ok(-1));
-
-            b = ParsedDateTime::from_gedcom_date("8 MAY 1980").unwrap();
-
-            assert_eq!(a.days_between(&b), Ok(0));
-
-            b = ParsedDateTime::from_gedcom_date("@#DJULIAN@ 25 APR 1980").unwrap();
-            assert_eq!(a.days_between(&b), Ok(0));
-
-            b = ParsedDateTime {
-                calendar: Calendar::Gregorian,
-                year: Some(1980),
-                ..Default::default()
-            };
-
-            assert!(a.days_between(&b).is_err());
-        }
-
-        #[test]
-        fn test_add_days() {
-            let mut a = ParsedDateTime::from_gedcom_date("11 SEP 2001").unwrap();
-            a.parse_time("08:46").unwrap();
-            let mut b = a.add_days(1).unwrap();
-
-            assert_eq!(b.year, Some(2001));
-            assert_eq!(b.month, Some(9));
-            assert_eq!(b.day, Some(12));
-            assert_eq!(b.hour, Some(8));
-            assert_eq!(b.minute, Some(46));
-
-            b = a.add_days(-1).unwrap();
-            assert_eq!(b.day, Some(10));
-
-            b = a.add_days(20).unwrap();
-            assert_eq!(b.month, Some(10));
-            assert_eq!(b.day, Some(1));
-
-            a = ParsedDateTime {
-                calendar: Calendar::Gregorian,
-                year: Some(2001),
-                ..Default::default()
-            };
-
-            let result = a.add_days(1);
-            assert!(result.is_err());
-        }
-
-        #[test]
-        fn test_ordering_key() {
-            let mut a = ParsedDateTime::from_gedcom_date("27 JAN 1986").unwrap();
-            let mut b = ParsedDateTime::from_gedcom_date("28 JAN 1986").unwrap();
-            assert!(a.ordering_key() < b.ordering_key());
-
-            b = ParsedDateTime::from_gedcom_date("FEB 1986").unwrap();
-            assert!(a.ordering_key() < b.ordering_key());
-
-            a = ParsedDateTime::from_gedcom_date("1986").unwrap();
-            assert!(a.ordering_key() < b.ordering_key());
-
-            b = ParsedDateTime::from_gedcom_date("1 JAN 1986").unwrap();
-            assert_eq!(a.ordering_key(), b.ordering_key());
-            assert!(!a.is_complete());
-            assert!(b.is_complete());
-
-            b = ParsedDateTime {
-                calendar: Calendar::Gregorian,
-                ..Default::default()
-            };
-            assert_eq!(b.ordering_key(), None);
-        }
-
-        #[test]
-        fn test_day_of_weeks() {
-            let mut date = ParsedDateTime::from_gedcom_date("1 JAN 2000").unwrap();
-            assert_eq!(date.day_of_week(), Some(Weekday::Sat));
-
-            date = ParsedDateTime::from_gedcom_date("4 JUL 1776").unwrap();
-            assert_eq!(date.day_of_week(), Some(Weekday::Thu));
-
-            date = ParsedDateTime::from_gedcom_date("29 MAR 2026").unwrap();
-            assert_eq!(date.day_of_week(), Some(Weekday::Sun));
-
-            date = ParsedDateTime {
-                calendar: Calendar::Gregorian,
-                year: Some(1980),
-                ..Default::default()
-            };
-            assert_eq!(date.day_of_week(), None);
-        }
+    fn test_max_day() {
+        let g = Calendar::Gregorian;
+        assert_eq!(max_day(&g, &Month::Feb, Some(1900)), Some(28));
+        assert_eq!(max_day(&g, &Month::Feb, Some(2000)), Some(29));
+        assert_eq!(
+            max_day(&Calendar::Julian, &Month::Feb, Some(1900)),
+            Some(29)
+        );
+        // 1 BCE is astronomical year 0, a leap year.
+        assert_eq!(
+            max_day(&g, &Month::Feb, Some(astronomical_year(1, true))),
+            Some(29)
+        );
+        assert_eq!(max_day(&g, &Month::Feb, None), Some(29));
+        assert_eq!(max_day(&g, &Month::Vend, Some(1)), None);
+        assert_eq!(
+            max_day(&Calendar::FrenchRepublican, &Month::Comp, Some(3)),
+            Some(6)
+        );
+        assert_eq!(
+            max_day(&Calendar::Hebrew, &Month::Ell, Some(5784)),
+            Some(29)
+        );
+        assert_eq!(
+            max_day(&Calendar::Roman, &Month::Extension("_M".into()), None),
+            None
+        );
     }
 }

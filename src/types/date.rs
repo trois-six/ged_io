@@ -1,42 +1,52 @@
-pub mod change_date;
+//! Dates: the `DATE` structure and the date, time and calendar payloads.
+//!
+//! [`Date`] is the `DATE` structure as read: its payload, `TIME` and
+//! `PHRASE`, kept verbatim. Its payload is interpreted on demand by
+//! [`DateValue`], whose grammar reads both versions; [`Time`] reads the
+//! `TIME`. [`Date::to_version`] rewrites a date into the grammar of GEDCOM
+//! 5.5.1 or 7.0. With the `calendar` feature, dates convert between calendars
+//! and compare chronologically.
 
-#[cfg(feature = "calendar")]
 pub mod calendar;
+pub mod change_date;
+#[cfg(feature = "calendar")]
+pub mod conversion;
+pub mod time;
+pub mod value;
 
 use crate::{
     parser::{parse_subset, Parser},
     tokenizer::Tokenizer,
-    GedcomError,
+    types::value::Grammar,
+    GedcomError, GedcomVersion,
 };
 
 #[cfg(feature = "json")]
 use serde::{Deserialize, Serialize};
 
+pub use calendar::{Calendar, Epoch, Month};
 #[cfg(feature = "calendar")]
-pub mod value;
+pub use conversion::{CalendarError, Weekday, MAX_RATA_DIE, MAX_YEAR};
+pub use time::Time;
+pub use value::{Approximation, CalendarDate, DateExact, DatePeriod, DateValue};
 
-#[cfg(feature = "calendar")]
-pub use calendar::{Calendar, CalendarConversionError, DateQualifier, ParsedDateTime};
-#[cfg(feature = "calendar")]
-pub use value::DateValue;
-
-/// Date encompasses a number of date formats, e.g. approximated, period, phrase and range.
+/// The `DATE` structure: a date payload, with its `TIME` and `PHRASE`.
 ///
-/// # GEDCOM 7.0 Additions
+/// The three strings are kept exactly as read, so that a date the grammar
+/// does not understand loses nothing. [`date_value`](Self::date_value) and
+/// [`time_value`](Self::time_value) interpret them.
 ///
-/// In GEDCOM 7.0, dates can have additional substructures:
-/// - `PHRASE` - A free-text representation of the date
-///
-/// See <https://gedcom.io/specifications/FamilySearchGEDCOMv7.html#DATE>
+/// See <https://gedcom.io/specifications/FamilySearchGEDCOMv7.html#DATE>.
 #[derive(Clone, Debug, Default, PartialEq)]
 #[cfg_attr(feature = "json", derive(Serialize, Deserialize))]
 pub struct Date {
+    /// The payload: a `DateValue`, `DateExact` or `DatePeriod` depending on
+    /// where the date stands, as written.
     pub value: Option<String>,
+    /// The `TIME` substructure, as written.
     pub time: Option<String>,
-    /// A free-text phrase representing the date (GEDCOM 7.0).
-    ///
-    /// This is used when the structured date value doesn't capture
-    /// the original wording of the date.
+    /// The `PHRASE` substructure (GEDCOM 7.0): the date in the words of the
+    /// source, when the payload cannot say it.
     pub phrase: Option<String>,
 }
 
@@ -52,258 +62,262 @@ impl Date {
         Ok(date)
     }
 
-    /// datetime returns Date and Date.time in a single string.
+    /// The payload, interpreted by the date grammar of both versions; an
+    /// absent payload is [`DateValue::Empty`]. Never fails: what the
+    /// grammar does not understand is kept in [`CalendarDate::text`].
     ///
-    /// # Panics
+    /// ```
+    /// use ged_io::types::date::{Approximation, Calendar, Date, DateValue};
     ///
-    /// Panics when encountering a None value
+    /// let date = Date { value: Some("ABT @#DJULIAN@ 1700".into()), ..Date::default() };
+    /// let DateValue::Approximated(Approximation::About, year) = date.date_value() else { panic!() };
+    /// assert_eq!((year.calendar, year.year), (Calendar::Julian, Some(1700)));
+    /// ```
+    #[must_use]
+    pub fn date_value(&self) -> DateValue {
+        self.value
+            .as_deref()
+            .map_or(DateValue::Empty, DateValue::parse)
+    }
+
+    /// The `TIME`, interpreted; `None` without one or when it is not a time.
+    #[must_use]
+    pub fn time_value(&self) -> Option<Time> {
+        self.time.as_deref().and_then(Time::parse)
+    }
+
+    /// The payload and the time in one string (`2 OCT 2019 12:00`), or the
+    /// time alone without a payload; `None` without a time.
     #[must_use]
     pub fn datetime(&self) -> Option<String> {
-        match &self.time {
-            Some(time) => {
-                let mut dt = String::new();
-                dt.push_str(self.value.as_ref().unwrap().as_str());
-                dt.push(' ');
-                dt.push_str(time);
-                Some(dt)
+        let time = self.time.as_deref()?;
+        Some(match self.value.as_deref().filter(|v| !v.is_empty()) {
+            Some(value) => format!("{value} {time}"),
+            None => time.to_string(),
+        })
+    }
+
+    /// The date rewritten in the grammar of `version`, keeping everything it
+    /// says.
+    ///
+    /// A payload that already follows the version's grammar is kept as
+    /// written. Otherwise the payload is read and written back in the
+    /// version's grammar:
+    ///
+    /// - to GEDCOM 7.0, calendar escapes become keywords (`@#DROMAN@` the
+    ///   extension calendar `_ROMAN`), `B.C.` becomes `BCE`, `INT date
+    ///   (phrase)` the date with the phrase as `PHRASE`, and `(phrase)` an
+    ///   empty payload with the `PHRASE`. A dual year becomes one year (the
+    ///   later one when it is the year that follows, as in `1648/49`, the
+    ///   year written otherwise), or a `BET … AND …` range for a year alone,
+    ///   and the original wording becomes the `PHRASE`;
+    /// - to GEDCOM 5.5.1, keywords become escapes, `BCE` becomes `B.C.`, and
+    ///   the `PHRASE` moves into the payload, as `INT date (phrase)` after a
+    ///   single date or `(phrase)` alone. Next to a range or a period it
+    ///   stays in [`phrase`](Self::phrase), which 5.5.1 cannot write.
+    ///
+    /// A payload the grammar cannot fully read, or that the version cannot
+    /// express, is left as written, to be repaired by the writer. The time
+    /// is rewritten likewise; GEDCOM 5.5.1 has no `Z` for UTC.
+    #[must_use]
+    pub fn to_version(&self, version: GedcomVersion) -> Date {
+        self.convert(Grammar::from(version))
+    }
+
+    /// [`to_version`](Self::to_version) in `grammar`.
+    fn convert(&self, grammar: Grammar) -> Date {
+        let time = self.time.as_ref().map(|raw| convert_time(raw, grammar));
+        let unchanged = || Date {
+            value: self.value.clone(),
+            time: time.clone(),
+            phrase: self.phrase.clone(),
+        };
+        let raw = self
+            .value
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+        let phrase = self.phrase.as_deref().filter(|p| !p.is_empty());
+        match grammar {
+            Grammar::V7 => {
+                let Some(raw) = raw else {
+                    return unchanged();
+                };
+                if DateValue::strict(raw, grammar).is_ok() {
+                    return unchanged();
+                }
+                let value = DateValue::parse(raw);
+                if value.has_unrecognised_text() {
+                    return unchanged();
+                }
+                let has_dual_year = value.dates().any(|d| d.dual_year.is_some());
+                let single = matches!(value, DateValue::Date(_));
+                let (mut value, mut carried) = match value {
+                    DateValue::Phrase(text) => (DateValue::Empty, Some(text)),
+                    DateValue::Interpreted { date, phrase } => (DateValue::Date(date), phrase),
+                    value => (value, None),
+                };
+                if has_dual_year {
+                    carried = Some(raw.to_string());
+                    value = resolve_dual_years(value, single);
+                }
+                let payload = value.format(grammar);
+                if DateValue::strict(&payload, grammar).is_err() {
+                    return unchanged();
+                }
+                let phrase = match (phrase, carried) {
+                    (Some(own), Some(carried)) if own != carried => return unchanged(),
+                    (Some(own), _) => Some(own.to_string()),
+                    (None, carried) => carried,
+                };
+                Date {
+                    value: (!payload.is_empty()).then_some(payload),
+                    time,
+                    phrase,
+                }
             }
-            None => None,
+            Grammar::V551 => {
+                let value = match raw {
+                    None => DateValue::Empty,
+                    Some(raw) => {
+                        if phrase.is_none() && DateValue::strict(raw, grammar).is_ok() {
+                            return unchanged();
+                        }
+                        let value = DateValue::parse(raw);
+                        if value.has_unrecognised_text() {
+                            return unchanged();
+                        }
+                        value
+                    }
+                };
+                let (value, leftover) = match (value, phrase) {
+                    (DateValue::Empty, None) => return unchanged(),
+                    (DateValue::Empty, Some(text)) => (DateValue::Phrase(text.to_string()), None),
+                    (
+                        DateValue::Date(date) | DateValue::Interpreted { date, phrase: None },
+                        Some(text),
+                    ) => (
+                        DateValue::Interpreted {
+                            date,
+                            phrase: Some(text.to_string()),
+                        },
+                        None,
+                    ),
+                    (value, phrase) => (value, phrase.map(str::to_string)),
+                };
+                let payload = value.format(grammar);
+                if DateValue::strict(&payload, grammar).is_err() {
+                    return unchanged();
+                }
+                Date {
+                    value: Some(payload),
+                    time,
+                    phrase: leftover,
+                }
+            }
         }
     }
 
-    /// Returns the calendar system used in this date, if one can be determined.
-    ///
-    /// The calendar is found wherever its marker stands: first
-    /// (`@#DJULIAN@ 1700`), after a qualifier or range keyword as the 5.5.1
-    /// grammar puts it (`ABT @#DJULIAN@ 1700`), or as a GEDCOM 7.0 keyword
-    /// (`JULIAN 1700`). Returns `None` if no value is present or the escape
-    /// names a calendar this crate does not know.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// # use ged_io::types::date::Date;
-    /// # #[cfg(feature = "calendar")]
-    /// # fn example() {
-    /// use ged_io::types::date::Calendar;
-    /// let date = Date {
-    ///     value: Some("@#DJULIAN@ 15 MAR 1582".to_string()),
-    ///     time: None,
-    ///     phrase: None,
-    /// };
-    /// assert_eq!(date.calendar(), Some(Calendar::Julian));
-    /// # }
-    /// ```
-    #[cfg(feature = "calendar")]
+    /// The date in the canonical spelling of `version`: converted as by
+    /// [`to_version`](Self::to_version), then written back from its
+    /// interpretation, upper case and single-spaced. Wording the grammar
+    /// does not understand is kept as written.
     #[must_use]
-    pub fn calendar(&self) -> Option<Calendar> {
-        let value = self.value.as_ref()?;
-        let calendar = Calendar::of_date_value(value);
-        let upper = value.to_ascii_uppercase();
-        if calendar == Calendar::Gregorian
-            && upper.contains("@#D")
-            && !upper.contains("@#DGREGORIAN@")
-        {
-            // An escape for a calendar not modelled here (e.g. `@#DROMAN@`).
-            return None;
+    pub fn normalize(&self, version: GedcomVersion) -> Date {
+        let grammar = Grammar::from(version);
+        let converted = self.convert(grammar);
+        let v7 = grammar == Grammar::V7;
+        let value = converted.value.as_deref().map(|raw| {
+            let value = DateValue::parse(raw);
+            // A 7.0 payload has no room for a phrase that could not move.
+            if v7 && value.phrase().is_some() {
+                raw.to_string()
+            } else {
+                value.format(grammar)
+            }
+        });
+        let time = converted
+            .time
+            .map(|raw| Time::parse(&raw).map_or(raw, |time| time.format(grammar)));
+        Date {
+            value,
+            time,
+            phrase: converted.phrase,
         }
-        Some(calendar)
     }
 
-    /// Parses this date's value into its structure: a single date, a range,
-    /// a period, an interpreted date or a phrase, with a calendar per bound.
+    /// The date with every date of its payload converted to `calendar`,
+    /// written in the grammar of `version`; qualifiers, ranges, periods,
+    /// the time and the phrase are kept.
+    ///
+    /// ```
+    /// use ged_io::types::date::{Calendar, Date};
+    /// use ged_io::GedcomVersion;
+    ///
+    /// let date = Date { value: Some("@#DJULIAN@ 15 MAR 1582".into()), ..Date::default() };
+    /// let gregorian = date.convert_to(&Calendar::Gregorian, GedcomVersion::V5_5_1).unwrap();
+    /// assert_eq!(gregorian.value.as_deref(), Some("25 MAR 1582"));
+    /// ```
     ///
     /// # Errors
     ///
-    /// Returns an error if there is no value or it cannot be parsed.
+    /// Returns a [`CalendarError`] when a date of the payload cannot be
+    /// converted: it is incomplete, holds unrecognised words, is invalid or
+    /// out of range, or its calendar has no arithmetic.
     #[cfg(feature = "calendar")]
-    pub fn parse_value(&self) -> Result<DateValue, CalendarConversionError> {
-        let value = self
-            .value
-            .as_ref()
-            .ok_or(CalendarConversionError::ParseError {
-                message: "No date value".to_string(),
-            })?;
-        DateValue::parse(value)
-    }
-
-    /// Returns the date value without the calendar escape sequence.
-    ///
-    /// This strips every calendar marker from the date value: `@#DCALENDAR@`
-    /// escapes wherever they stand, and GEDCOM 7.0 calendar keywords.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// # use ged_io::types::date::Date;
-    /// let date = Date {
-    ///     value: Some("@#DJULIAN@ 15 MAR 1582".to_string()),
-    ///     time: None,
-    ///     phrase: None,
-    /// };
-    /// assert_eq!(date.value_without_calendar(), Some("15 MAR 1582".to_string()));
-    /// ```
-    #[must_use]
-    pub fn value_without_calendar(&self) -> Option<String> {
-        let value = self.value.as_ref()?;
-        Some(strip_calendar_markers(value))
-    }
-
-    /// Parse this date into a `ParsedDateTime` structure.
-    ///
-    /// This extracts the calendar, date components, time, and any qualifiers
-    /// from the date value and time strings.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the date cannot be parsed.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// # use ged_io::types::date::Date;
-    /// # #[cfg(feature = "calendar")]
-    /// # fn example() -> Result<(), ged_io::types::date::CalendarConversionError> {
-    /// let date = Date {
-    ///     value: Some("15 MAR 1820".to_string()),
-    ///     time: Some("12:34:56".to_string()),
-    ///     phrase: None,
-    /// };
-    /// let parsed = date.parse_datetime()?;
-    /// assert_eq!(parsed.year, Some(1820));
-    /// assert_eq!(parsed.month, Some(3));
-    /// assert_eq!(parsed.day, Some(15));
-    /// assert_eq!(parsed.hour, Some(12));
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[cfg(feature = "calendar")]
-    pub fn parse_datetime(&self) -> Result<ParsedDateTime, CalendarConversionError> {
-        let value = self
-            .value
-            .as_ref()
-            .ok_or(CalendarConversionError::ParseError {
-                message: "No date value".to_string(),
-            })?;
-
-        let mut parsed = ParsedDateTime::from_gedcom_date(value)?;
-
-        if let Some(time) = &self.time {
-            parsed.parse_time(time)?;
-        }
-
-        Ok(parsed)
-    }
-
-    /// Convert this date to a different calendar system.
-    ///
-    /// This parses the date, converts it to the target calendar, and returns
-    /// a new `Date` with the converted value.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - The date cannot be parsed
-    /// - The date is incomplete (missing year, month, or day)
-    /// - The date has a qualifier that prevents exact conversion (ABT, BEF, AFT, etc.)
-    /// - The date is a range (FROM/TO, BET/AND)
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// # use ged_io::types::date::Date;
-    /// # #[cfg(feature = "calendar")]
-    /// # fn example() -> Result<(), ged_io::types::date::CalendarConversionError> {
-    /// use ged_io::types::date::Calendar;
-    /// let date = Date {
-    ///     value: Some("@#DJULIAN@ 15 MAR 1582".to_string()),
-    ///     time: None,
-    ///     phrase: None,
-    /// };
-    /// let gregorian = date.convert_to(Calendar::Gregorian)?;
-    /// assert_eq!(gregorian.value, Some("25 MAR 1582".to_string()));
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[cfg(feature = "calendar")]
-    pub fn convert_to(&self, target: Calendar) -> Result<Date, CalendarConversionError> {
-        let parsed = self.parse_datetime()?;
-        let converted = parsed.convert_to(target)?;
-
-        Ok(Date {
-            value: Some(converted.to_gedcom_date()),
-            time: converted.to_gedcom_time(),
-            phrase: self.phrase.clone(),
-        })
-    }
-
-    /// Compare two dates chronologically by parsing both into `ParsedDateTime`
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if either date cannot be parsed.
-    #[cfg(feature = "calendar")]
-    pub fn partial_cmp_parsed(
+    pub fn convert_to(
         &self,
-        other: &Date,
-    ) -> Result<Option<std::cmp::Ordering>, CalendarConversionError> {
-        let self_parsed = self.parse_datetime()?;
-        let other_parsed = other.parse_datetime()?;
-        Ok(self_parsed.partial_cmp(&other_parsed))
-    }
-
-    /// Normalize the date value — uppercase month abbreviations, normalize whitespace, well-formed
-    /// calendar escapes.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the date value cannot be parsed.
-    #[cfg(feature = "calendar")]
-    pub fn normalize(&self) -> Result<Date, CalendarConversionError> {
-        let parsed = self.parse_datetime()?;
-        Ok(Date {
-            value: Some(parsed.to_gedcom_date()),
-            time: parsed.to_gedcom_time().or(self.time.clone()),
+        calendar: &Calendar,
+        version: GedcomVersion,
+    ) -> Result<Date, CalendarError> {
+        let value = self.date_value().convert_to(calendar)?;
+        let payload = value.format(Grammar::V551);
+        let converted = Date {
+            value: (!payload.is_empty()).then_some(payload),
+            time: self.time.clone(),
             phrase: self.phrase.clone(),
-        })
+        };
+        Ok(converted.to_version(version))
     }
 }
 
-/// Removes calendar escapes (anywhere) and GEDCOM 7.0 calendar keywords from
-/// a date value, leaving a trailing `(phrase)` untouched. A value without any
-/// marker is returned unchanged.
-fn strip_calendar_markers(value: &str) -> String {
-    const KEYWORDS: [&str; 4] = ["GREGORIAN", "JULIAN", "HEBREW", "FRENCH_R"];
-    let (date, phrase) = value.split_at(value.find('(').unwrap_or(value.len()));
-    let is_keyword = |w: &str| KEYWORDS.contains(&w.to_ascii_uppercase().as_str());
-    if !date.to_ascii_uppercase().contains("@#D") && !date.split_whitespace().any(is_keyword) {
-        return value.to_string();
+/// The time in `grammar`: kept when it follows it, rewritten when it is a
+/// time, left as written otherwise.
+fn convert_time(raw: &str, grammar: Grammar) -> String {
+    if Time::strict(raw, grammar).is_ok() {
+        return raw.to_string();
     }
+    Time::parse(raw).map_or_else(|| raw.to_string(), |time| time.format(grammar))
+}
 
-    let mut out = String::with_capacity(date.len());
-    let mut rest = date;
-    while let Some(start) = rest.to_ascii_uppercase().find("@#D") {
-        out.push_str(&rest[..start]);
-        if let Some(end) = rest[start + 3..].find('@') {
-            rest = &rest[start + 3 + end + 1..];
-        } else {
-            out.push_str(&rest[start..]);
-            rest = "";
+/// Replaces dual years, which GEDCOM 7.0 does not have: a `single` date
+/// that is a year alone becomes the range of its two years; otherwise the
+/// later year is kept when it is the year that follows (`1648/49`, the
+/// change of new year), and the year written when it is not.
+fn resolve_dual_years(value: DateValue, single: bool) -> DateValue {
+    if let (DateValue::Date(date), true) = (&value, single) {
+        if let (None, None, None, Some(dual)) = (date.day, &date.month, &date.epoch, date.dual_year)
+        {
+            let first = CalendarDate {
+                dual_year: None,
+                ..date.clone()
+            };
+            let second = CalendarDate {
+                year: Some(dual),
+                ..first.clone()
+            };
+            return DateValue::Between(first, second);
         }
     }
-    out.push_str(rest);
-    let mut stripped = out
-        .split_whitespace()
-        .filter(|w| !is_keyword(w))
-        .collect::<Vec<_>>()
-        .join(" ");
-    if !phrase.is_empty() {
-        if !stripped.is_empty() {
-            stripped.push(' ');
+    let mut value = value;
+    for date in value.dates_mut() {
+        if let Some(dual) = date.dual_year.take() {
+            if date.year.and_then(|year| year.checked_add(1)) == Some(dual) {
+                date.year = Some(dual);
+            }
         }
-        stripped.push_str(phrase);
     }
-    stripped
+    value
 }
 
 impl Parser for Date {
@@ -448,177 +462,203 @@ mod tests {
             );
         }
     }
-    #[cfg(feature = "calendar")]
+    use super::{Date, DateValue};
+    use crate::GedcomVersion;
+
+    const V551: GedcomVersion = GedcomVersion::V5_5_1;
+    const V7: GedcomVersion = GedcomVersion::V7_0;
+
+    fn date(value: &str) -> Date {
+        Date {
+            value: Some(value.to_string()),
+            ..Date::default()
+        }
+    }
+
+    fn with_phrase(value: Option<&str>, phrase: &str) -> Date {
+        Date {
+            value: value.map(str::to_string),
+            time: None,
+            phrase: Some(phrase.to_string()),
+        }
+    }
+
     #[test]
     fn test_calendar_after_qualifier_and_gedcom_7_keyword() {
-        use crate::types::date::{Calendar, DateQualifier, ParsedDateTime};
-
-        let date = |value: &str| super::Date {
-            value: Some(value.to_string()),
-            time: None,
-            phrase: None,
-        };
-
-        // The 5.5.1 grammar puts the escape after the qualifier.
+        use super::Calendar;
+        for (value, calendar) in [
+            ("ABT @#DJULIAN@ 1700", Calendar::Julian),
+            ("BET @#DJULIAN@ 1700 AND @#DJULIAN@ 1710", Calendar::Julian),
+            ("JULIAN 10 MAY 1700", Calendar::Julian),
+            ("FRENCH_R 1 VEND 2", Calendar::FrenchRepublican),
+            ("@#DJULIAN@ ABT 1700", Calendar::Julian),
+            ("ABT 1700", Calendar::Gregorian),
+            ("@#DROMAN@ 1700", Calendar::Roman),
+        ] {
+            assert_eq!(date(value).date_value().calendar(), calendar, "{value}");
+        }
+        // The 5.5.1 escape is written after the qualifier.
         assert_eq!(
-            date("ABT @#DJULIAN@ 1700").calendar(),
-            Some(Calendar::Julian)
+            date("@#DJULIAN@ ABT 1700").normalize(V551).value.as_deref(),
+            Some("ABT @#DJULIAN@ 1700")
         );
-        assert_eq!(
-            date("BET @#DJULIAN@ 1700 AND @#DJULIAN@ 1710").calendar(),
-            Some(Calendar::Julian)
-        );
-        assert_eq!(
-            date("JULIAN 10 MAY 1700").calendar(),
-            Some(Calendar::Julian)
-        );
-        assert_eq!(
-            date("FRENCH_R 1 VEND 2").calendar(),
-            Some(Calendar::FrenchRepublican)
-        );
-        assert_eq!(date("ABT 1700").calendar(), Some(Calendar::Gregorian));
-        assert_eq!(date("@#DROMAN@ 1700").calendar(), None);
-
-        let parsed = ParsedDateTime::from_gedcom_date("ABT @#DJULIAN@ 1700").unwrap();
-        assert_eq!(parsed.calendar, Calendar::Julian);
-        assert_eq!(parsed.qualifier, Some(DateQualifier::About));
-        assert_eq!(parsed.year, Some(1700));
-        // ... and is written back in that order.
-        assert_eq!(parsed.to_gedcom_date(), "ABT @#DJULIAN@ 1700");
-
-        let parsed = ParsedDateTime::from_gedcom_date("JULIAN 10 MAY 1700").unwrap();
-        assert_eq!(parsed.calendar, Calendar::Julian);
-        assert_eq!((parsed.day, parsed.month), (Some(10), Some(5)));
-
-        // The legacy escape-first order is still read.
-        let parsed = ParsedDateTime::from_gedcom_date("@#DJULIAN@ ABT 1700").unwrap();
-        assert_eq!(parsed.calendar, Calendar::Julian);
-        assert_eq!(parsed.qualifier, Some(DateQualifier::About));
     }
 
     #[test]
-    fn test_value_without_calendar_strips_every_marker() {
-        let date = |value: &str| super::Date {
-            value: Some(value.to_string()),
-            time: None,
+    fn test_datetime_never_panics() {
+        assert_eq!(date("2 OCT 2019").datetime(), None);
+        let with_time = Date {
+            value: Some("2 OCT 2019".into()),
+            time: Some("12:00".into()),
             phrase: None,
         };
+        assert_eq!(with_time.datetime().as_deref(), Some("2 OCT 2019 12:00"));
+        let time_only = Date {
+            time: Some("12:00".into()),
+            ..Date::default()
+        };
+        assert_eq!(time_only.datetime().as_deref(), Some("12:00"));
+    }
+
+    #[test]
+    fn test_to_gedcom_7() {
+        for (value, expected, phrase) in [
+            ("2 OCT 2019", Some("2 OCT 2019"), None),
+            ("@#DJULIAN@ 15 MAR 1582", Some("JULIAN 15 MAR 1582"), None),
+            (
+                "ABT @#DHEBREW@ 1 TSH 5600",
+                Some("ABT HEBREW 1 TSH 5600"),
+                None,
+            ),
+            ("44 B.C.", Some("44 BCE"), None),
+            ("@#DROMAN@ 1860", Some("_ROMAN 1860"), None),
+            ("from 1900 to 1905", Some("FROM 1900 TO 1905"), None),
+            (
+                "(the year of the flood)",
+                None,
+                Some("the year of the flood"),
+            ),
+            ("INT 1850 (about 1850)", Some("1850"), Some("about 1850")),
+            (
+                "30 JAN 1648/49",
+                Some("30 JAN 1649"),
+                Some("30 JAN 1648/49"),
+            ),
+            ("8 MAR 1401/8", Some("8 MAR 1401"), Some("8 MAR 1401/8")),
+            ("1699/00", Some("BET 1699 AND 1700"), Some("1699/00")),
+            ("1401/8 B.C.", Some("1401 BCE"), Some("1401/8 B.C.")),
+            (
+                "INT 799/81 (some text)",
+                Some("799"),
+                Some("INT 799/81 (some text)"),
+            ),
+            // Not convertible: left as written.
+            ("vers 1850", Some("vers 1850"), None),
+        ] {
+            let converted = date(value).to_version(V7);
+            assert_eq!(converted.value.as_deref(), expected, "{value}");
+            assert_eq!(converted.phrase.as_deref(), phrase, "{value}");
+        }
+        // An own PHRASE wins over an equal one; two different ones cannot
+        // both be kept.
+        let both = with_phrase(Some("(flood)"), "flood").to_version(V7);
+        assert_eq!((both.value, both.phrase.as_deref()), (None, Some("flood")));
+        let clash = with_phrase(Some("(flood)"), "storm").to_version(V7);
+        assert_eq!(clash.value.as_deref(), Some("(flood)"));
+    }
+
+    #[test]
+    fn test_to_gedcom_551() {
+        for (value, expected) in [
+            ("2 OCT 2019", "2 OCT 2019"),
+            ("JULIAN 15 MAR 1582", "@#DJULIAN@ 15 MAR 1582"),
+            (
+                "BET GREGORIAN 20 BCE AND JULIAN 12 BCE",
+                "BET 20 B.C. AND @#DJULIAN@ 12 B.C.",
+            ),
+            ("_ROMAN 1860", "@#DROMAN@ 1860"),
+            ("2 oct 2019", "2 oct 2019"),
+            ("< 1900", "< 1900"),
+            ("_MYCAL 12 _MON 1500", "_MYCAL 12 _MON 1500"),
+        ] {
+            assert_eq!(
+                date(value).to_version(V551).value.as_deref(),
+                Some(expected),
+                "{value}"
+            );
+        }
+        let interpreted = with_phrase(Some("15 MAR 1820"), "The Ides of March").to_version(V551);
         assert_eq!(
-            date("ABT @#DJULIAN@ 1700")
-                .value_without_calendar()
-                .as_deref(),
-            Some("ABT 1700")
+            interpreted.value.as_deref(),
+            Some("INT 15 MAR 1820 (The Ides of March)")
         );
+        assert_eq!(interpreted.phrase, None);
+        let phrase_only = with_phrase(None, "the year of the flood").to_version(V551);
         assert_eq!(
-            date("BET @#DFRENCH R@ 1 VEND 2 AND @#DFRENCH R@ 3 BRUM 2")
-                .value_without_calendar()
-                .as_deref(),
-            Some("BET 1 VEND 2 AND 3 BRUM 2")
+            phrase_only.value.as_deref(),
+            Some("(the year of the flood)")
         );
-        assert_eq!(
-            date("JULIAN 10 MAY 1700")
-                .value_without_calendar()
-                .as_deref(),
-            Some("10 MAY 1700")
-        );
-        // A phrase is text, not a marker.
-        assert_eq!(
-            date("INT JULIAN 1700 (in the JULIAN year 1700)")
-                .value_without_calendar()
-                .as_deref(),
-            Some("INT 1700 (in the JULIAN year 1700)")
-        );
-        assert_eq!(
-            date("15  MAR 1582").value_without_calendar().as_deref(),
-            Some("15  MAR 1582")
-        );
+        let range = with_phrase(Some("BET 1820 AND 1825"), "in his youth").to_version(V551);
+        assert_eq!(range.value.as_deref(), Some("BET 1820 AND 1825"));
+        assert_eq!(range.phrase.as_deref(), Some("in his youth"));
+    }
+
+    #[test]
+    fn test_time_per_version() {
+        let date = Date {
+            value: Some("1 DEC 2023".into()),
+            time: Some("2:50:00.00Z".into()),
+            phrase: None,
+        };
+        assert_eq!(date.to_version(V7).time.as_deref(), Some("2:50:00.00Z"));
+        assert_eq!(date.to_version(V551).time.as_deref(), Some("02:50:00.00"));
+        let noon = Date {
+            time: Some("noon".into()),
+            ..Date::default()
+        };
+        assert_eq!(noon.to_version(V7).time.as_deref(), Some("noon"));
+        assert_eq!(noon.time_value(), None);
+    }
+
+    #[test]
+    fn test_normalize() {
+        for (input, expected) in [
+            ("15 mar 1820", "15 MAR 1820"),
+            ("@#djulian@ 15 mar 1582", "@#DJULIAN@ 15 MAR 1582"),
+            ("15  MAR   1820", "15 MAR 1820"),
+            ("abt vers 1850", "ABT vers 1850"),
+        ] {
+            assert_eq!(
+                date(input).normalize(V551).value.as_deref(),
+                Some(expected),
+                "{input}"
+            );
+        }
+        let date = Date {
+            value: Some("15 mar 1820".to_string()),
+            time: Some("12:34:56".to_string()),
+            phrase: Some("The Ides of March".to_string()),
+        };
+        let normalized = date.normalize(V7);
+        assert_eq!(normalized.value.as_deref(), Some("15 MAR 1820"));
+        assert_eq!(normalized.time.as_deref(), Some("12:34:56"));
+        assert_eq!(normalized.phrase.as_deref(), Some("The Ides of March"));
+        assert_eq!(Date::default().normalize(V7), Date::default());
+        assert_eq!(Date::default().date_value(), DateValue::Empty);
     }
 
     #[cfg(feature = "calendar")]
-    mod comparison_tests {
-        use crate::types::date::Date;
-        use std::cmp::Ordering;
-
-        #[test]
-        fn test_partial_cmp_parsed() {
-            let a = Date {
-                value: Some("26 JUL 1981".to_string()),
-                time: None,
-                phrase: None,
-            };
-
-            let mut b = Date {
-                value: Some("27 JUL 1981".to_string()),
-                time: None,
-                phrase: None,
-            };
-
-            assert_eq!(a.partial_cmp_parsed(&b).unwrap(), Some(Ordering::Less));
-            assert_eq!(b.partial_cmp_parsed(&a).unwrap(), Some(Ordering::Greater));
-
-            b = Date {
-                value: Some("26 JUL 1981".to_string()),
-                time: None,
-                phrase: None,
-            };
-
-            assert_eq!(a.partial_cmp_parsed(&b).unwrap(), Some(Ordering::Equal));
-
-            b = Date {
-                value: Some("@#DJULIAN@ 13 JUL 1981".to_string()),
-                time: None,
-                phrase: None,
-            };
-            assert_eq!(a.partial_cmp_parsed(&b).unwrap(), Some(Ordering::Equal));
-
-            b = Date {
-                value: Some("1981".to_string()),
-                time: None,
-                phrase: None,
-            };
-            assert_eq!(a.partial_cmp_parsed(&b).unwrap(), None);
-        }
-
-        #[test]
-        fn test_normalize() {
-            let cases = vec![
-                ("15 mar 1820", "15 MAR 1820"),
-                ("@#djulian@ 15 mar 1582", "@#DJULIAN@ 15 MAR 1582"),
-                ("15  MAR   1820", "15 MAR 1820"),
-                ("15 MAR 1820", "15 MAR 1820"),
-            ];
-
-            for (input, expected) in cases {
-                let date = Date {
-                    value: Some(input.to_string()),
-                    time: None,
-                    phrase: None,
-                };
-
-                assert_eq!(
-                    date.normalize().unwrap().value.unwrap(),
-                    expected,
-                    "failed for input: {input}"
-                );
-            }
-
-            let date = Date {
-                value: Some("15 mar 1820".to_string()),
-                time: Some("12:34:56".to_string()),
-                phrase: Some("The Ides of March".to_string()),
-            };
-            let normalized = date.normalize().unwrap();
-            assert_eq!(normalized.value.unwrap(), "15 MAR 1820");
-            assert_eq!(normalized.time.unwrap(), "12:34:56");
-            assert_eq!(normalized.phrase.unwrap(), "The Ides of March");
-
-            // No value → Err
-            let date = Date {
-                value: None,
-                time: None,
-                phrase: None,
-            };
-            assert!(date.normalize().is_err());
-        }
+    #[test]
+    fn test_convert_to() {
+        use super::{Calendar, CalendarError};
+        let julian = date("ABT @#DJULIAN@ 15 MAR 1582");
+        let converted = julian.convert_to(&Calendar::Gregorian, V7).unwrap();
+        assert_eq!(converted.value.as_deref(), Some("ABT 25 MAR 1582"));
+        let back = converted.convert_to(&Calendar::Julian, V551).unwrap();
+        assert_eq!(back.value.as_deref(), Some("ABT @#DJULIAN@ 15 MAR 1582"));
+        assert_eq!(
+            date("1582").convert_to(&Calendar::Julian, V7),
+            Err(CalendarError::Incomplete)
+        );
     }
 }
