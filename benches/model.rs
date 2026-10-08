@@ -7,6 +7,7 @@
 //! individuals, 330 000 by default, about 80 MB, when unset) once with that
 //! pipeline and prints the input size, the time and the peak resident set
 //! (Linux `VmHWM`): run it once per pipeline, each in its own process.
+//! `MODEL_WRITE=0` leaves the writing out.
 
 use criterion::{criterion_group, BenchmarkId, Criterion, Throughput};
 use ged_io::tree::Tree;
@@ -190,6 +191,10 @@ fn measure(pipeline: &str) {
             "{pipeline}: of which the store (input, pieces, identifiers) {:.0} MB",
             data.store.heap_size() as f64 / 1e6
         );
+    }
+    // `MODEL_WRITE=0` measures the reading alone (for a heap profiler).
+    if std::env::var("MODEL_WRITE").is_ok_and(|w| w == "0") {
+        return;
     }
     let writer = GedcomWriter::new();
     let start = Instant::now();

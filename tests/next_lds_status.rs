@@ -3,7 +3,7 @@
 //! and both are written back with their `DATE` (upstream #107, ported to
 //! the typed model `ged_io::next`).
 
-use ged_io::next::{read_str, write_string, LdsStatus, OrdinanceStatus};
+use ged_io::next::{read_str, write_string, OrdinanceKind, OrdinanceStatus};
 use ged_io::GedcomWriter;
 
 #[test]
@@ -25,11 +25,11 @@ fn test_round_trip_lds_status_outside_the_enumeration_gedcom_5() {
 0 TRLR";
     let data = read_str(source);
 
-    let indi = data.find("@I1@").unwrap();
-    let bapl = indi.generic("BAPL", &data.store).unwrap();
-    let endl = indi.generic("ENDL", &data.store).unwrap();
-    let excluded: &LdsStatus = bapl.typed().next().unwrap();
-    let completed: &LdsStatus = endl.typed().next().unwrap();
+    let ordinances = &data.individual("@I1@").unwrap().detail().ordinances;
+    assert_eq!(ordinances[0].kind, OrdinanceKind::Baptism);
+    assert_eq!(ordinances[1].kind, OrdinanceKind::Endowment);
+    let excluded = ordinances[0].status.as_ref().unwrap();
+    let completed = ordinances[1].status.as_ref().unwrap();
     assert_eq!(excluded.value, OrdinanceStatus::Excluded);
     assert_eq!(
         excluded.date.as_ref().unwrap().value.to_str(&data),
@@ -46,12 +46,10 @@ fn test_round_trip_lds_status_outside_the_enumeration_gedcom_5() {
     // keeps it as an extension structure, value included.
     assert!(written.contains("1 ENDL\n2 _STAT COMPLETED\n"), "{written}");
     let read = read_str(&written);
-    let bapl = read
-        .find("@I1@")
-        .unwrap()
-        .generic("BAPL", &read.store)
+    let back = read.individual("@I1@").unwrap().detail().ordinances[0]
+        .status
+        .as_ref()
         .unwrap();
-    let back: &LdsStatus = bapl.typed().next().unwrap();
     assert_eq!(back.value, excluded.value);
 }
 
@@ -68,12 +66,9 @@ fn test_round_trip_lds_extension_status_gedcom_7() {
 0 TRLR";
     let data = read_str(source);
 
-    let slgs = data
-        .find("@F1@")
-        .unwrap()
-        .generic("SLGS", &data.store)
-        .unwrap();
-    let sealing: &LdsStatus = slgs.typed().next().unwrap();
+    let slgs = &data.family("@F1@").unwrap().detail().ordinances[0];
+    assert_eq!(slgs.kind, OrdinanceKind::SpouseSealing);
+    let sealing = slgs.status.as_ref().unwrap();
     assert!(matches!(&sealing.value, OrdinanceStatus::Unknown(t) if t.to_str(&data) == "_PENDING"));
 
     let written = write_string(&data, &GedcomWriter::new()).unwrap();
@@ -82,11 +77,9 @@ fn test_round_trip_lds_extension_status_gedcom_7() {
         "{written}"
     );
     let read = read_str(&written);
-    let slgs = read
-        .find("@F1@")
-        .unwrap()
-        .generic("SLGS", &read.store)
+    let back = read.family("@F1@").unwrap().detail().ordinances[0]
+        .status
+        .as_ref()
         .unwrap();
-    let back: &LdsStatus = slgs.typed().next().unwrap();
     assert!(matches!(&back.value, OrdinanceStatus::Unknown(t) if t.to_str(&read) == "_PENDING"));
 }

@@ -3,15 +3,27 @@
 //! conformant. Every name and value is fictitious.
 
 use ged_io::next::{
-    read_str, write_string, Adoption, Certainty, Child, ChildStatus, Citation, CitationSource,
-    Dataset, Exid, FileForm, Generic, LdsStatus, Medium, MultimediaLink, NameType, Note,
-    NoteContent, OrdinanceStatus, Pedigree, Phrased, Place, Refn, RepositoryCitation, Role, Sex,
-    Text,
+    read_str, write_string, Adoption, Certainty, CitationSource, Dataset, Event, EventKind,
+    FileForm, Individual, Medium, NameType, Note, NoteContent, OrdinanceStatus, Pedigree, Role,
+    Sex, Source, Text,
 };
 use ged_io::{GedcomVersion, GedcomWriter};
 
-fn record<'a>(data: &'a Dataset, xref: &str) -> &'a Generic {
-    data.find(xref).expect("record")
+fn indi<'a>(data: &'a Dataset, xref: &str) -> &'a Individual {
+    data.individual(xref).expect("individual")
+}
+
+fn source<'a>(data: &'a Dataset, xref: &str) -> &'a Source {
+    let id = data.store.find_xref(xref).expect("xref");
+    data.sources
+        .iter()
+        .find(|s| s.xref == Some(id))
+        .expect("source")
+}
+
+/// The first event of a kind.
+fn event(indi: &Individual, kind: EventKind) -> &Event {
+    indi.events.iter().find(|e| e.kind == kind).expect("event")
 }
 
 fn text(data: &Dataset, t: &Text) -> String {
@@ -43,8 +55,7 @@ fn extensions_are_kept_where_they_are() {
     let data = read_str(&v551(
         "0 @I1@ INDI\n1 BIRT\n2 DATE 1 JAN 1900\n3 _DX date extension\n1 NOTE A note\n2 _NX under a note\n2 FOO unknown standard-looking tag\n1 CHAN\n2 DATE 1 JAN 2000\n3 _CX change extension\n",
     ));
-    let indi = record(&data, "@I1@");
-    let note: &Note = indi.typed().next().expect("note");
+    let note = &indi(&data, "@I1@").notes[0];
     assert_eq!(note.extra.len(), 2);
     assert_eq!(data.store.tag(note.extra[0].tag), "_NX");
     let out = write(&data);
@@ -69,12 +80,13 @@ fn identifiers_are_repeatable_and_keep_their_type() {
     let data = read_str(&v7(
         "0 @I1@ INDI\n1 REFN a\n2 TYPE user\n1 REFN b\n1 UID 0b0f2b0a-0000-4000-8000-000000000001\n1 UID 0b0f2b0a-0000-4000-8000-000000000002\n1 EXID 123\n2 TYPE http://example.com\n",
     ));
-    let indi = record(&data, "@I1@");
-    let refns: Vec<&Refn> = indi.typed().collect();
+    let detail = indi(&data, "@I1@").detail();
+    let refns = &detail.refns;
     assert_eq!(refns.len(), 2);
     assert_eq!(text(&data, &refns[0].value), "a");
     assert_eq!(text(&data, refns[0].kind.as_ref().unwrap()), "user");
-    let exid: &Exid = indi.typed().next().unwrap();
+    assert_eq!(detail.uids.len(), 2);
+    let exid = &detail.exids[0];
     assert_eq!(
         text(&data, exid.kind.as_ref().unwrap()),
         "http://example.com"
@@ -96,12 +108,12 @@ fn notes() {
     let data = read_str(&v7(
         "0 @I1@ INDI\n1 NOTE <p>Bonjour</p>\n2 MIME text/html\n2 LANG fr\n2 TRAN Hello\n3 LANG en\n2 SOUR @S1@\n3 PAGE 4\n1 SNOTE @N1@\n1 NOTE @@N1@ is an address\n0 @N1@ SNOTE Shared\n0 @S1@ SOUR\n1 TITL Register\n",
     ));
-    let indi = record(&data, "@I1@");
-    let notes: Vec<&Note> = indi.typed().collect();
+    let notes = &indi(&data, "@I1@").notes;
     assert_eq!(notes.len(), 3);
-    assert_eq!(text(&data, notes[0].mime.as_ref().unwrap()), "text/html");
-    assert_eq!(text(&data, &notes[0].translations[0].text), "Hello");
-    assert_eq!(notes[0].citations.len(), 1);
+    let detail = notes[0].detail();
+    assert_eq!(text(&data, detail.mime.as_ref().unwrap()), "text/html");
+    assert_eq!(text(&data, &detail.translations[0].text), "Hello");
+    assert_eq!(detail.citations.len(), 1);
     assert!(matches!(notes[1].content, NoteContent::Shared(id) if data.store.xref(id) == "@N1@"));
     assert!(
         matches!(&notes[2].content, NoteContent::Text(t) if t.to_str(&data) == "@N1@ is an address")
@@ -114,13 +126,15 @@ fn notes() {
     );
     // 5.5.1 points to a note record with NOTE.
     let data = read_str(&v551("0 @I1@ INDI\n1 NOTE @N1@\n0 @N1@ NOTE Shared\n"));
-    let note: &Note = record(&data, "@I1@").typed().next().unwrap();
+    let note = &indi(&data, "@I1@").notes[0];
     assert!(matches!(note.content, NoteContent::Shared(_)));
     assert!(write(&data).contains("1 NOTE @N1@\n"));
     // 7.x points to a shared note with SNOTE (the record itself becomes a
     // shared note record with the 5.5.1 to 7.x conversion).
-    let indi = &data.to_structures_for(GedcomVersion::V7_0)[1];
-    assert_eq!(indi.substructures[0].tag, "SNOTE");
+    let records = data.to_structures_for(GedcomVersion::V7_0);
+    let record = records.iter().find(|r| r.tag == "INDI").unwrap();
+    assert_eq!(record.substructures[0].tag, "SNOTE");
+    assert!(records.iter().any(|r| r.tag == "SNOTE"));
 }
 
 /// A citation: pointer or description, page, data, event and role with
@@ -130,13 +144,12 @@ fn citations() {
     let data = read_str(&v7(
         "0 @I1@ INDI\n1 BIRT\n2 SOUR @S1@\n3 PAGE 12\n3 PAGE 13\n3 DATA\n4 DATE 1 JAN 1900\n4 TEXT Born at home\n5 LANG en\n3 EVEN BIRT\n4 PHRASE Birth\n4 ROLE OTHER\n5 PHRASE Midwife\n3 QUAY 3\n0 @S1@ SOUR\n1 TITL Register\n",
     ));
-    let birt = record(&data, "@I1@").generic("BIRT", &data.store).unwrap();
-    let citation: &Citation = birt.typed().next().unwrap();
+    let citation = &event(indi(&data, "@I1@"), EventKind::Birth).citations[0];
     assert!(matches!(citation.source, CitationSource::Pointer(_)));
     assert_eq!(text(&data, citation.page.as_ref().unwrap()), "12");
     assert_eq!(citation.extra.len(), 1, "the second PAGE");
-    assert_eq!(citation.quality, Some(Certainty::Primary));
-    let event = citation.event.as_ref().unwrap();
+    assert_eq!(citation.detail().quality, Some(Certainty::Primary));
+    let event = citation.detail().event.as_ref().unwrap();
     let role = event.role.as_ref().unwrap();
     assert_eq!(role.value, Role::Other);
     assert_eq!(text(&data, role.phrase.as_ref().unwrap()), "Midwife");
@@ -149,11 +162,14 @@ fn citations() {
     let data = read_str(&v551(
         "0 @I1@ INDI\n1 SOUR Parish register\n2 TEXT Born on a Sunday\n2 QUAY 2\n",
     ));
-    let citation: &Citation = record(&data, "@I1@").typed().next().unwrap();
+    let citation = &indi(&data, "@I1@").citations[0];
     assert!(
         matches!(&citation.source, CitationSource::Description(t) if t.to_str(&data) == "Parish register")
     );
-    assert_eq!(text(&data, &citation.texts[0].text), "Born on a Sunday");
+    assert_eq!(
+        text(&data, &citation.detail().texts[0].text),
+        "Born on a Sunday"
+    );
     let out = write(&data);
     assert!(
         out.contains("1 SOUR Parish register\n2 QUAY 2\n2 TEXT Born on a Sunday\n"),
@@ -168,7 +184,7 @@ fn repository_citations() {
     let data = read_str(&v7(
         "0 @S1@ SOUR\n1 REPO @R1@\n2 CALN 123\n3 MEDI _MYMEDIUM\n2 CALN 456\n3 MEDI OTHER\n4 PHRASE Glass plate\n0 @R1@ REPO\n1 NAME Archive\n",
     ));
-    let repo: &RepositoryCitation = record(&data, "@S1@").typed().next().unwrap();
+    let repo = &source(&data, "@S1@").repositories[0];
     assert_eq!(repo.call_numbers.len(), 2);
     let medium = repo.call_numbers[0].medium.as_ref().unwrap();
     assert!(matches!(&medium.value, Medium::Unknown(t) if t.to_str(&data) == "_MYMEDIUM"));
@@ -193,7 +209,7 @@ fn multimedia_links() {
     let data = read_str(&v7(
         "0 @I1@ INDI\n1 OBJE @O1@\n2 CROP\n3 TOP 10\n3 LEFT 20\n3 HEIGHT 300\n3 WIDTH 50%\n2 TITL party\n0 @O1@ OBJE\n1 FILE media/a.jpg\n2 FORM image/jpeg\n",
     ));
-    let link: &MultimediaLink = record(&data, "@I1@").typed().next().unwrap();
+    let link = &indi(&data, "@I1@").detail().multimedia[0];
     let crop = link.crop.as_ref().unwrap();
     assert_eq!(
         (crop.top, crop.left, crop.height, crop.width),
@@ -216,7 +232,7 @@ fn multimedia_links() {
     let data = read_str(&v551(
         "0 @I1@ INDI\n1 OBJE\n2 FILE photo.jpg\n3 FORM jpg\n4 MEDI photo\n2 TITL Portrait\n",
     ));
-    let link: &MultimediaLink = record(&data, "@I1@").typed().next().unwrap();
+    let link = &indi(&data, "@I1@").detail().multimedia[0];
     let form: &FileForm = link.files[0].form.as_ref().unwrap();
     assert_eq!(form.medium.as_ref().unwrap().value, Medium::Photo);
     let out = write(&data);
@@ -233,8 +249,11 @@ fn places() {
     let data = read_str(&v7(
         "0 @I1@ INDI\n1 BIRT\n2 PLAC Sampleton, Example County\n3 FORM City, County\n3 LANG en\n3 TRAN Sampleville, Exemple\n4 LANG fr\n3 MAP\n4 LATI N18.150944\n4 LONG E168.150944\n3 EXID 77\n4 TYPE http://example.com/places\n3 NOTE Near the river\n",
     ));
-    let birt = record(&data, "@I1@").generic("BIRT", &data.store).unwrap();
-    let place: &Place = birt.typed().next().unwrap();
+    let place = event(indi(&data, "@I1@"), EventKind::Birth)
+        .place
+        .as_ref()
+        .unwrap()
+        .detail();
     assert_eq!(text(&data, place.form.as_ref().unwrap()), "City, County");
     assert_eq!(
         text(&data, &place.translations[0].name),
@@ -248,8 +267,11 @@ fn places() {
     let data = read_str(&v551(
         "0 @I1@ INDI\n1 BIRT\n2 PLAC Sample City\n3 FONE Sanpuru\n4 TYPE kana\n3 ROMN Sanpuru Shi\n4 TYPE romaji\n3 MAP\n4 LATI N35.0\n4 LONG E135.0\n",
     ));
-    let birt = record(&data, "@I1@").generic("BIRT", &data.store).unwrap();
-    let place: &Place = birt.typed().next().unwrap();
+    let place = event(indi(&data, "@I1@"), EventKind::Birth)
+        .place
+        .as_ref()
+        .unwrap()
+        .detail();
     assert_eq!(place.phonetic.len(), 1);
     assert_eq!(place.romanized.len(), 1);
     let out = write(&data);
@@ -262,12 +284,12 @@ fn associations() {
     let data = read_str(&v7(
         "0 @I1@ INDI\n1 ASSO @I2@\n2 PHRASE The neighbour\n2 ROLE NGHBR\n0 @I2@ INDI\n",
     ));
-    let asso: &ged_io::next::Association = record(&data, "@I1@").typed().next().unwrap();
+    let asso = &indi(&data, "@I1@").detail().associations[0];
     assert_eq!(asso.role.as_ref().unwrap().value, Role::Neighbor);
     let data = read_str(&v551(
         "0 @I1@ INDI\n1 ASSO @I2@\n2 RELA Godfather\n0 @I2@ INDI\n",
     ));
-    let asso: &ged_io::next::Association = record(&data, "@I1@").typed().next().unwrap();
+    let asso = &indi(&data, "@I1@").detail().associations[0];
     assert_eq!(text(&data, asso.relation.as_ref().unwrap()), "Godfather");
     assert!(write(&data).contains("1 ASSO @I2@\n2 RELA Godfather\n"));
 }
@@ -279,14 +301,13 @@ fn enumeration_values_are_never_fatal() {
     let data = read_str(&v7(
         "0 @I1@ INDI\n1 SEX _I\n1 FAMC @F1@\n2 PEDI OTHER\n3 PHRASE Guardianship\n2 STAT _DOUBTED\n1 FAMC @F2@\n2 PEDI _ENUMVAL\n0 @F1@ FAM\n0 @F2@ FAM\n",
     ));
-    let indi = record(&data, "@I1@");
-    let sex: &Sex = indi.typed().next().unwrap();
-    assert!(matches!(sex, Sex::Unknown(t) if t.to_str(&data) == "_I"));
-    let famc = indi.generic("FAMC", &data.store).unwrap();
-    let pedi: &Phrased<Pedigree> = famc.typed().next().unwrap();
+    let person = indi(&data, "@I1@");
+    assert!(matches!(&person.sex, Some(Sex::Unknown(t)) if t.to_str(&data) == "_I"));
+    let famc = person.child_of[0].detail();
+    let pedi = famc.pedigree.as_ref().unwrap();
     assert_eq!(pedi.value, Pedigree::Other);
     assert_eq!(text(&data, pedi.phrase.as_ref().unwrap()), "Guardianship");
-    let stat: &Phrased<ChildStatus> = famc.typed().next().unwrap();
+    let stat = famc.status.as_ref().unwrap();
     assert!(!stat.value.is_known());
     let out = write(&data);
     for line in [
@@ -302,13 +323,14 @@ fn enumeration_values_are_never_fatal() {
     let data = read_str(&v551(
         "0 @I1@ INDI\n1 SEX m\n1 FAMC @F1@\n2 PEDI stepchild\n1 SOUR @S1@\n2 QUAY 5\n0 @F1@ FAM\n0 @S1@ SOUR\n",
     ));
-    let indi = record(&data, "@I1@");
-    assert_eq!(indi.typed::<Sex>().next(), Some(&Sex::Male));
-    let famc = indi.generic("FAMC", &data.store).unwrap();
-    let pedi: &Pedigree = famc.typed().next().unwrap();
+    let person = indi(&data, "@I1@");
+    assert_eq!(person.sex, Some(Sex::Male));
+    let pedi = &person.child_of[0].detail().pedigree.as_ref().unwrap().value;
     assert!(matches!(pedi, Pedigree::Unknown(t) if t.to_str(&data) == "stepchild"));
-    let citation: &Citation = indi.typed().next().unwrap();
-    assert!(matches!(&citation.quality, Some(Certainty::Unknown(t)) if t.to_str(&data) == "5"));
+    let citation = &person.citations[0];
+    assert!(
+        matches!(&citation.detail().quality, Some(Certainty::Unknown(t)) if t.to_str(&data) == "5")
+    );
     let out = write(&data);
     assert!(out.contains("1 SEX M\n"), "{out}");
     // Written conformant, with nothing lost: as extensions.
@@ -323,8 +345,11 @@ fn enumeration_spellings_per_version() {
     let data = read_str(&v551(
         "0 @I1@ INDI\n1 NAME Ann /Sample/\n2 TYPE birth\n1 FAMC @F1@\n2 PEDI adopted\n2 STAT challenged\n0 @F1@ FAM\n1 CHIL @I1@\n2 ADOP BOTH\n",
     ));
-    let name = record(&data, "@I1@").generic("NAME", &data.store).unwrap();
-    assert_eq!(name.typed::<NameType>().next(), Some(&NameType::Birth));
+    let name = &indi(&data, "@I1@").names[0];
+    assert_eq!(
+        name.detail().kind.as_ref().map(|k| &k.value),
+        Some(&NameType::Birth)
+    );
     let out = write(&data);
     assert!(out.contains("2 TYPE birth\n"), "{out}");
     assert!(out.contains("2 PEDI adopted\n2 STAT challenged\n"), "{out}");
@@ -343,8 +368,10 @@ fn ordinance_statuses() {
     let data = read_str(&v7(
         "0 @I1@ INDI\n1 BAPL\n2 STAT PRE_1970\n3 DATE 27 MAR 2022\n1 INIL\n2 STAT EXCLUDED\n3 DATE 27 MAR 2022\n0 @F1@ FAM\n1 SLGS\n2 STAT DNS_CAN\n3 DATE 1 JAN 2000\n",
     ));
-    let bapl = record(&data, "@I1@").generic("BAPL", &data.store).unwrap();
-    let stat: &LdsStatus = bapl.typed().next().unwrap();
+    let stat = indi(&data, "@I1@").detail().ordinances[0]
+        .status
+        .as_ref()
+        .unwrap();
     assert_eq!(stat.value, OrdinanceStatus::Pre1970);
     assert_eq!(
         text(&data, &stat.date.as_ref().unwrap().value),
@@ -376,23 +403,17 @@ fn dates_and_ages() {
     let data = read_str(&v551(
         "0 @I1@ INDI\n1 BIRT\n2 DATE @#DJULIAN@ 1 JAN 1700\n1 DEAT\n2 DATE 2 FEB 1750\n2 AGE 50y\n1 CHAN\n2 DATE 1 JAN 2000\n3 TIME 12:00:00\n",
     ));
-    let indi = record(&data, "@I1@");
-    let date: &ged_io::next::Date = indi
-        .generic("BIRT", &data.store)
-        .unwrap()
-        .typed()
-        .next()
-        .unwrap();
+    let person = indi(&data, "@I1@");
+    let date = event(person, EventKind::Birth).date.as_ref().unwrap();
     assert_eq!(text(&data, &date.value), "@#DJULIAN@ 1 JAN 1700");
     assert!(matches!(
         date.parse(&data),
         ged_io::types::date::value::DateValue::Date(_)
     ));
-    let age: &ged_io::next::Age = indi
-        .generic("DEAT", &data.store)
-        .unwrap()
-        .typed()
-        .next()
+    let age = event(person, EventKind::Death)
+        .detail()
+        .age
+        .as_ref()
         .unwrap();
     assert_eq!(text(&data, &age.value), "50y");
     let out = write(&data);
@@ -405,20 +426,34 @@ fn dates_and_ages() {
     );
 }
 
-/// A structure whose shape its type cannot hold stays whole and untyped:
-/// text where a pointer belongs, an identifier on a substructure.
+/// A payload or an identifier a structure's type has no place for (text
+/// where a pointer belongs, an identifier on a substructure) is kept aside
+/// and written back: the structure and its substructures stay typed.
 #[test]
-fn structures_that_do_not_fit_stay_untyped() {
+fn payloads_that_do_not_fit_are_kept_aside() {
     let data = read_str(&v7(
-        "0 @I1@ INDI\n1 ASSO a neighbour\n2 ROLE NGHBR\n1 @X1@ NOTE A note with an identifier\n",
+        "0 @I1@ INDI\n1 ASSO a neighbour\n2 ROLE NGHBR\n1 @X1@ NOTE A note with an identifier\n0 @F1@ FAM stray text\n1 MARR\n2 DATE 1 JAN 1900\n",
     ));
-    let indi = record(&data, "@I1@");
-    assert!(indi.children.iter().all(|c| matches!(c, Child::Generic(_))));
+    let person = indi(&data, "@I1@");
+    let asso = &person.detail().associations[0];
+    assert_eq!(asso.individual, None);
+    assert_eq!(asso.role.as_ref().unwrap().value, Role::Neighbor);
+    assert_eq!(asso.extra[0].tag, ged_io::next::TagId::ASIDE);
+    assert!(person.notes[0].extra[0].xref.is_some());
+    assert_eq!(
+        data.families[0].events.len(),
+        1,
+        "a record with a payload is typed"
+    );
     let untyped = ged_io::next::ledger::untyped(&data);
-    assert_eq!(untyped, ["INDI/ASSO", "INDI/NOTE"]);
+    assert_eq!(untyped, ["INDI/NOTE", "INDI/ASSO", "FAM"]);
+    let structures = data.to_structures();
+    let indi = structures.iter().find(|r| r.tag == "INDI").unwrap();
+    assert_eq!(indi.substructures[1].payload.as_str(), Some("a neighbour"));
     let out = write(&data);
     assert!(out.contains("a neighbour"), "{out}");
     assert!(out.contains("A note with an identifier"), "{out}");
+    assert!(out.contains("stray text"), "{out}");
 }
 
 /// Reading never fails, whatever the input.
@@ -443,12 +478,11 @@ fn reading_is_total() {
 #[test]
 fn building_a_note() {
     let mut data = read_str(&v7("0 @I1@ INDI\n"));
-    let note = Note::text("Written by a program");
-    let typed_note = ged_io::next::Note {
-        language: Some("en".into()),
-        ..note
-    };
-    assert_eq!(typed_note.language.as_ref().unwrap().to_str(&data), "en");
+    let mut note = Note::text("Written by a program");
+    note.detail_mut().language = Some("en".into());
+    assert_eq!(note.detail().language.as_ref().unwrap().to_str(&data), "en");
+    data.individuals[0].notes.push(note);
+    assert!(write(&data).contains("1 NOTE Written by a program\n2 LANG en\n"));
     let id = data.store.intern_xref("@N9@").unwrap();
     assert_eq!(data.store.xref(id), "@N9@");
 }
@@ -531,8 +565,9 @@ fn generated_inputs(n: usize) -> Vec<String> {
         .collect()
 }
 
-/// A written text's structures, siblings of different tags in tag order
-/// (their relative order carries no meaning; the order within a tag does).
+/// A written text's structures, records and siblings of different tags in
+/// tag order (their relative order carries no meaning; the order within a
+/// tag does).
 fn canonical(text: &str) -> Vec<ged_io::tree::Structure> {
     fn sort(s: &mut ged_io::tree::Structure) {
         s.substructures.iter_mut().for_each(sort);
@@ -541,6 +576,7 @@ fn canonical(text: &str) -> Vec<ged_io::tree::Structure> {
     }
     let mut records = ged_io::tree::parse_tree(text).to_structures();
     records.iter_mut().for_each(sort);
+    records.sort_by(|a, b| a.tag.as_str().cmp(b.tag.as_str()));
     records
 }
 
@@ -570,6 +606,39 @@ fn written_output_reads_typed_and_is_stable() {
     }
 }
 
+/// Inputs the `model` fuzz target found unstable or untyped once written:
+/// each written output reads back typed and writes again the same.
+#[test]
+fn fuzz_findings_are_stable() {
+    for input in [
+        "0 HEAD\n1 SCHMA\n2 TAG \n3 TAG _C t:",
+        "0 INDI\n1 EVEN\n2 AGE t\n2 AGE > 0m",
+        "0 INDI\nE\n1 NAME\n2 TYPE AKA",
+        "0 INDI\nh\n1 EVEN\n2 AGE > 9y",
+        "0 SOUR\n1 DATA\n2 EVEN",
+        "0 SOUR\n1 DATA\n2 EVEN \u{0}\n@",
+        "0 SOUR\n1 DATA\n2 EVEN \u{0} J",
+        "0 @S1 SOUR\n0 INDI\n2 SOUR @S1@\n3 EVEN",
+    ] {
+        let data = read_str(input);
+        for version in [
+            GedcomVersion::V5_5_1,
+            GedcomVersion::V7_0,
+            GedcomVersion::V7_1,
+        ] {
+            let out = write_as(&data, version);
+            let again = read_str(&out);
+            let untyped = ged_io::next::ledger::untyped(&again);
+            assert!(
+                untyped.is_empty(),
+                "{input:?} {version}: {untyped:?}\n{out}"
+            );
+            let twice = write_as(&again, version);
+            assert_eq!(canonical(&twice), canonical(&out), "{input:?} {version}");
+        }
+    }
+}
+
 /// A value only the other version names is kept as written: a 5.5.1
 /// `OTHER` medium (7.x only) is not read as 7.x's `OTHER`, which 5.5.1
 /// could not write back.
@@ -578,7 +647,7 @@ fn values_of_the_other_version_keep_their_spelling() {
     let data = read_str(&v551(
         "0 @S1@ SOUR\n1 REPO @R1@\n2 CALN 1\n3 MEDI Other\n2 CALN 2\n3 MEDI Photo\n0 @R1@ REPO\n1 NAME Archive\n",
     ));
-    let repo: &RepositoryCitation = record(&data, "@S1@").typed().next().unwrap();
+    let repo = &source(&data, "@S1@").repositories[0];
     assert!(matches!(
         &repo.call_numbers[0].medium.as_ref().unwrap().value,
         Medium::Unknown(t) if t.to_str(&data) == "Other"
