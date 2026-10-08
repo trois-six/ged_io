@@ -264,7 +264,7 @@ fn owned_structures_and_dump() {
     assert_eq!(indi.first("NAME").unwrap().text(), Some("A@B /C/"));
     assert_eq!(indi.first("NOTE").unwrap().text(), Some("l1\n l2\n"));
     assert_eq!(
-        indi.to_gedcom(0, &GedcomVersion::V5_5_1),
+        indi.to_gedcom(0, GedcomVersion::V5_5_1),
         "0 @I1@ INDI\n1 NAME A@@B /C/\n2 _X\n1 NOTE l1\n2 CONT  l2\n2 CONT\n"
     );
     assert_eq!(parse_tree(&tree.to_gedcom()).to_structures(), owned);

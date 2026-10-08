@@ -198,10 +198,9 @@ impl<R: BufRead> TreeReader<R> {
     /// [`Tree::version`]: super::Tree::version
     #[must_use]
     pub fn version(&self) -> GedcomVersion {
-        match self.escaping {
-            Some(Escaping::V70) => GedcomVersion::V7_0,
-            _ => GedcomVersion::V5_5_1,
-        }
+        self.vers
+            .as_deref()
+            .map_or(GedcomVersion::V5_5_1, GedcomVersion::from_version_str)
     }
 
     /// The `HEAD.GEDC.VERS` payload as written, once read.

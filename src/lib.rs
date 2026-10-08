@@ -255,7 +255,7 @@ pub use encoding::{detect_encoding, GedcomEncoding};
 pub use error::GedcomError;
 pub use stream::{GedcomRecord, GedcomStreamParser};
 pub use types::SourceCitationStats;
-pub use version::{detect_version, GedcomVersion, VersionFeatures};
+pub use version::{detect_version, GedcomVersion, VersionRules};
 pub use writer::{GedcomWriter, WriterConfig};
 
 use crate::{
