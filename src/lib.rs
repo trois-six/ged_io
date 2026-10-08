@@ -183,6 +183,8 @@ pub mod gedzip;
 
 /// Indexed GEDCOM data structure for O(1) lookups.
 pub mod indexed;
+#[doc(hidden)]
+pub mod next;
 pub mod parser;
 pub mod spec;
 /// Streaming parser for large GEDCOM files.
