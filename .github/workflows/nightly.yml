@@ -12,7 +12,7 @@ env:
 
 jobs:
   fuzz:
-    name: Fuzz every entry point
+    name: Fuzz every entry point, the decoder and the lexer
     runs-on: ubuntu-latest
 
     steps:
@@ -26,13 +26,18 @@ jobs:
     - name: Install cargo-fuzz
       uses: taiki-e/install-action@cargo-fuzz
 
-    - name: Seed the corpus with the test fixtures
+    - name: Seed the corpora with the test fixtures
       run: |
-        mkdir -p fuzz/corpus/entry_points
-        find tests/fixtures -name '*.ged' -size -64k -exec cp {} fuzz/corpus/entry_points/ \;
+        for target in entry_points tree; do
+          mkdir -p fuzz/corpus/$target
+          find tests/fixtures -name '*.ged' -size -64k -exec cp {} fuzz/corpus/$target/ \;
+        done
 
-    - name: Fuzz for five minutes
+    - name: Fuzz the entry points for five minutes
       run: cargo fuzz run entry_points -- -max_total_time=300 -max_len=65536
+
+    - name: Fuzz the decoder and the lexer for five minutes
+      run: cargo fuzz run tree -- -max_total_time=300 -max_len=65536
 
     - name: Keep the crashing inputs
       if: failure()

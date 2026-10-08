@@ -212,6 +212,7 @@ pub mod parser;
 /// ```
 pub mod stream;
 pub mod tokenizer;
+pub mod tree;
 pub mod types;
 /// GEDCOM version detection and handling.
 ///
