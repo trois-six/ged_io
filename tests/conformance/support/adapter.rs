@@ -242,3 +242,12 @@ pub fn read_gedzip(bytes: &[u8]) -> Result<Model, String> {
             .map_err(|e| e.to_string())
     })
 }
+
+/// The crate's validator on a written or input stream: each deviation as
+/// (rule, line, detail), the rule being the `DeviationKind` name.
+pub fn validate(text: &str) -> Vec<(String, u32, String)> {
+    ged_io::spec::validate_text(text)
+        .into_iter()
+        .map(|d| (format!("{:?}", d.kind), d.line, d.detail.to_string()))
+        .collect()
+}

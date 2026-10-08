@@ -61,6 +61,7 @@
 
 mod arena;
 mod lexer;
+mod node;
 mod reader;
 mod tag;
 mod write;
@@ -71,8 +72,10 @@ pub use tag::Tag;
 pub use xref::{Xref, XrefForm};
 
 pub(crate) use lexer::{
-    head_version, lex_line, normalize_eol, unescape_into, Escaping, Line, Lines,
+    find_eol, head_version, lex_line, normalize_eol, pointer, terminator_len, unescape_into,
+    Escaping, Line, Lines,
 };
+pub(crate) use node::Node;
 pub(crate) use reader::RecordSplitter;
 
 use std::fmt;

@@ -1,10 +1,10 @@
 ged_io
 Copyright (c) 2020 Robert Pirtle and the ged_io contributors. MIT License (license.md).
 
-This repository includes tables generated from third-party material:
+This crate and its repository include tables generated from third-party material:
 
-* GEDCOM 7.0 and 7.1 specification tables (tests/conformance/support/spec_tables.rs) are
-  generated from FamilySearch/GEDCOM `extracted-files/` (commits 512e38d and c451779),
+* GEDCOM 7.0 and 7.1 specification tables (src/spec/tables.rs) are generated from
+  FamilySearch/GEDCOM `extracted-files/` (commits 512e38d and c451779),
   licensed under the Apache License, Version 2.0, whose NOTICE reads:
 
     This work comprises, is based on, or is derived from the FAMILYSEARCH GEDCOM™
@@ -15,8 +15,9 @@ This repository includes tables generated from third-party material:
     that governs this work or as expressly authorized in writing and in advance by
     Intellectual Reserve, Inc.
 
-* GEDCOM 5.5.1 specification tables are generated from cacack/gedcom-go
-  `testdata/spec/gedcom-5.5.1/` (commit 3c6d42d), Copyright (c) 2025 Chris Clonch,
-  MIT License.
+* GEDCOM 5.5.1 specification tables (src/spec/tables.rs) are generated from
+  cacack/gedcom-go `testdata/spec/gedcom-5.5.1/` (commit 3c6d42d), Copyright (c) 2025
+  Chris Clonch, MIT License, corrected against the specification by
+  tools/spec-tables/551-errata.tsv.
 
 See tests/fixtures/conformance/LICENSES.md for every vendored or derived test input.

@@ -13,6 +13,11 @@ enum-open	NAME_TYPE	aka|birth|immigrant|maiden|married		56	<user defined> is per
 enum-open	PHONETIC_TYPE	hangul|kana		57	<user defined> is permitted
 enum-open	ROMANIZED_TYPE	pinyin|romaji|wadegiles		61	<user defined> is permitted
 enum-open	ROLE_IN_EVENT	CHIL|HUSB|WIFE|MOTH|FATH|SPOU		61	(<ROLE_DESCRIPTOR>) is permitted
+enum	CHARACTER_SET	ANSEL|UTF-8|UNICODE|ASCII		44	transcription has no values
+enum	GEDCOM_FORM	LINEAGE-LINKED		50	transcription has no values
+enum	LANGUAGE_ID	Afrikaans|Albanian|Anglo-Saxon|Catalan|Catalan_Spn|Czech|Danish|Dutch|English|Esperanto|Estonian|Faroese|Finnish|French|German|Hawaiian|Hungarian|Icelandic|Indonesian|Italian|Latvian|Lithuanian|Navaho|Norwegian|Polish|Portuguese|Romanian|Serbo_Croa|Slovak|Slovene|Spanish|Swedish|Turkish|Wendic|Amharic|Arabic|Armenian|Assamese|Belorusian|Bengali|Braj|Bulgarian|Burmese|Cantonese|Church-Slavic|Dogri|Georgian|Greek|Gujarati|Hebrew|Hindi|Japanese|Kannada|Khmer|Konkani|Korean|Lahnda|Lao|Macedonian|Maithili|Malayalam|Mandrin|Manipuri|Marathi|Mewari|Nepali|Oriya|Pahari|Pali|Panjabi|Persian|Prakrit|Pusto|Rajasthani|Russian|Sanskrit|Serb|Tagalog|Tamil|Telugu|Thai|Tibetan|Ukrainian|Urdu|Vietnamese|Yiddish		50-51	transcription has no values; both lists of the table
+primitive-alias	LANGUAGE_OF_TEXT	LANGUAGE_ID		51	defined as [ <LANGUAGE_ID> ]
+primitive-alias	LANGUAGE_PREFERENCE	LANGUAGE_ID		51	defined as [ <LANGUAGE_ID> ]
 primitive-alias	MULTIMEDIA_FILE_REFN	MULTIMEDIA_FILE_REFERENCE		26, 37, 54	structures use the short name, the primitive is defined under the long one
 calendar	GREGORIAN	JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC	B.C.	45, 46, 52	@#DGREGORIAN@; YEAR_GREG admits a dual year
 calendar	JULIAN	JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC	B.C.	45, 46, 52	@#DJULIAN@

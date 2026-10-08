@@ -184,6 +184,7 @@ pub mod gedzip;
 /// Indexed GEDCOM data structure for O(1) lookups.
 pub mod indexed;
 pub mod parser;
+pub mod spec;
 /// Streaming parser for large GEDCOM files.
 ///
 /// This module provides an iterator-based streaming parser that reads GEDCOM files
