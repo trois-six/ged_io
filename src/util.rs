@@ -607,8 +607,32 @@ pub(crate) fn is_xref_pointer(value: &str) -> bool {
             .all(|b| b != b'@' && !b.is_ascii_whitespace())
 }
 
+/// The longest prefix of `s` that is at most `max` bytes and ends on a
+/// character boundary. (`str::floor_char_boundary` is not stable at the
+/// crate's minimum Rust version.)
+pub(crate) fn truncate_to_char_boundary(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let end = s
+        .char_indices()
+        .map(|(i, _)| i)
+        .take_while(|&i| i <= max)
+        .last()
+        .unwrap_or(0);
+    s.get(..end).unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn truncation_keeps_whole_characters() {
+        assert_eq!(super::truncate_to_char_boundary("abc", 5), "abc");
+        assert_eq!(super::truncate_to_char_boundary("aé", 2), "a");
+        assert_eq!(super::truncate_to_char_boundary("aéb", 3), "aé");
+        assert_eq!(super::truncate_to_char_boundary("é", 0), "");
+    }
+
     use super::*;
 
     #[test]

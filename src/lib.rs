@@ -289,7 +289,7 @@ use std::str::Chars;
 /// assert_eq!(data.individuals.len(), 1);
 /// ```
 pub struct Gedcom<'a> {
-    tokenizer: Tokenizer<'a>,
+    chars: Chars<'a>,
 }
 
 impl<'a> Gedcom<'a> {
@@ -297,11 +297,10 @@ impl<'a> Gedcom<'a> {
     ///
     /// # Errors
     ///
-    /// Returns an error if the GEDCOM data is malformed.
+    /// None: reading starts in [`parse_data`](Self::parse_data). The
+    /// `Result` remains until this type is replaced by the builder.
     pub fn new(chars: Chars<'a>) -> Result<Gedcom<'a>, GedcomError> {
-        let mut tokenizer = Tokenizer::new(chars);
-        tokenizer.next_token()?;
-        Ok(Gedcom { tokenizer })
+        Ok(Gedcom { chars })
     }
 
     /// Processes the character data to produce a [`GedcomData`] object containing the parsed
@@ -311,11 +310,16 @@ impl<'a> Gedcom<'a> {
     ///
     /// Returns an error if the GEDCOM data is malformed.
     pub fn parse_data(&mut self) -> Result<GedcomData, GedcomError> {
+        // Every line terminator becomes LF and blank lines go, so that the
+        // token-based parser reads CR-only, mixed and spaced-out files.
+        let text = crate::tree::normalize_eol(self.chars.as_str());
+        let mut tokenizer = Tokenizer::new(text.chars());
+        tokenizer.next_token()?;
         // Accept EOF-terminated files (missing TRLR).
-        if self.tokenizer.current_token == Token::EOF {
+        if tokenizer.current_token == Token::EOF {
             return Ok(GedcomData::default());
         }
-        GedcomData::new(&mut self.tokenizer, 0)
+        GedcomData::new(&mut tokenizer, 0)
     }
 }
 

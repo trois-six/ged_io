@@ -67,12 +67,13 @@ pub use reader::TreeReader;
 pub use tag::Tag;
 pub use xref::{Xref, XrefForm};
 
-pub(crate) use lexer::head_version;
+pub(crate) use lexer::{head_version, lex_line, normalize_eol, Line, Lines};
+pub(crate) use reader::RecordSplitter;
 
 use std::fmt;
 
 use crate::version::GedcomVersion;
-use lexer::{lex_line, Builder, Escaping, Line, Lines, RawNode, Span, TagInterner};
+use lexer::{Builder, Escaping, RawNode, Span, TagInterner};
 
 /// The largest segment of text one arena indexes: offsets are 32-bit, and the
 /// side buffer of a segment can grow to twice its text.
