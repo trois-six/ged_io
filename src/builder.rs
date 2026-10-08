@@ -22,7 +22,7 @@
 //! ```
 
 use crate::{
-    encoding::{decode_gedcom_bytes, GedcomEncoding},
+    encoding::{decode, decode_as, GedcomEncoding},
     tokenizer::Tokenizer,
     types::GedcomData,
     GedcomError,
@@ -366,13 +366,10 @@ impl GedcomBuilder {
 
     /// Builds the parser and parses the GEDCOM data from raw bytes.
     ///
-    /// This method automatically detects the character encoding of the input
-    /// and converts it to UTF-8 before parsing. Supported encodings include:
-    /// - UTF-8 (with or without BOM)
-    /// - UTF-16 LE/BE (with BOM)
-    /// - ISO-8859-1 (Latin-1)
-    /// - ISO-8859-15 (Latin-9)
-    /// - ASCII
+    /// The bytes may use any encoding a GEDCOM file is found in: UTF-8 or
+    /// UTF-16 (with or without a byte order mark), ANSEL, ASCII, Windows-1252
+    /// (`CHAR ANSI`), ISO-8859-1, ISO-8859-15, IBM PC or Macintosh. Decoding
+    /// never fails; see [`crate::encoding`] for how the encoding is chosen.
     ///
     /// # Arguments
     ///
@@ -381,7 +378,7 @@ impl GedcomBuilder {
     /// # Errors
     ///
     /// Returns a `GedcomError` if:
-    /// - The encoding cannot be detected or decoded
+    /// - The input exceeds `max_file_size`
     /// - The GEDCOM data is malformed
     /// - Validation fails (when strict mode or validation options are enabled)
     ///
@@ -407,16 +404,14 @@ impl GedcomBuilder {
             }
         }
 
-        // Decode bytes to UTF-8 string
-        let (content, _encoding) = decode_gedcom_bytes(bytes)?;
-
+        let content = decode(bytes).text;
         self.build(content.chars())
     }
 
     /// Builds the parser and parses the GEDCOM data from raw bytes with a specific encoding.
     ///
     /// Use this method when you know the encoding of the file and want to skip
-    /// auto-detection.
+    /// auto-detection. Decoding never fails (see [`crate::encoding::decode_as`]).
     ///
     /// # Arguments
     ///
@@ -426,7 +421,7 @@ impl GedcomBuilder {
     /// # Errors
     ///
     /// Returns a `GedcomError` if:
-    /// - The bytes cannot be decoded with the specified encoding
+    /// - The input exceeds `max_file_size`
     /// - The GEDCOM data is malformed
     /// - Validation fails (when strict mode or validation options are enabled)
     ///
@@ -455,9 +450,7 @@ impl GedcomBuilder {
             }
         }
 
-        // Decode bytes with specified encoding
-        let (content, _) = crate::encoding::decode_with_encoding(bytes, encoding)?;
-
+        let content = decode_as(bytes, encoding);
         self.build(content.chars())
     }
 

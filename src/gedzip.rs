@@ -52,7 +52,6 @@ use zip::read::ZipArchive;
 use zip::write::ZipWriter;
 use zip::CompressionMethod;
 
-use crate::encoding::decode_gedcom_bytes;
 use crate::types::GedcomData;
 use crate::writer::GedcomWriter;
 use crate::GedcomError;
@@ -257,9 +256,7 @@ impl<R: Read + Seek> GedzipReader<R> {
     /// Returns an error if the GEDCOM data cannot be read or parsed.
     pub fn parse_gedcom(&mut self) -> Result<GedcomData, GedzipError> {
         let bytes = self.read_gedcom_bytes()?;
-        let (content, _encoding) = decode_gedcom_bytes(&bytes)?;
-        let data = crate::GedcomBuilder::new().build(content.chars())?;
-        Ok(data)
+        Ok(crate::GedcomBuilder::new().build_from_bytes(&bytes)?)
     }
 
     /// Reads the raw bytes of the `gedcom.ged` file.
