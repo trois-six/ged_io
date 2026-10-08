@@ -47,8 +47,11 @@ ged_io = { version = "0.11", features = ["json"] }
 # GEDZIP archive support (.gdz files)
 ged_io = { version = "0.11", features = ["gedzip"] }
 
+# Calendar arithmetic: conversions between calendars, day numbers
+ged_io = { version = "0.11", features = ["calendar"] }
+
 # Enable all features
-ged_io = { version = "0.11", features = ["json", "gedzip"] }
+ged_io = { version = "0.11", features = ["json", "gedzip", "calendar"] }
 ```
 
 ---
@@ -587,19 +590,32 @@ The library provides full support for GEDCOM 5.5.1 and 7.0 specifications. Tags 
 
 ### Date Formats
 
-All standard GEDCOM date formats are preserved:
+Dates, ages and times are kept exactly as written, and read on demand by
+the grammars of both versions (`Date::date_value`, `Age::age_value`,
+`Date::time_value`), which never fail: wording they do not understand is
+kept verbatim. `parse_strict` checks a payload against one version's
+grammar, and `to_version` rewrites a date or an age into the other
+version's syntax (`@#DJULIAN@` and `JULIAN`, `B.C.` and `BCE`, `INT … (…)`
+and `PHRASE`, `CHILD` and `< 8y`).
 
 - **Exact**: `15 MAR 1950`
 - **Range**: `BET 1900 AND 1910`, `BEF 1900`, `AFT 1900`
 - **Period**: `FROM 1900 TO 1910`
 - **Approximate**: `ABT 1900`, `CAL 1900`, `EST 1900`
+- **Interpreted and phrases** (5.5.1): `INT 1900 (about 1900)`, `(unknown)`
+- **Dual years** (5.5.1): `15 APR 1699/00`; **before the common era**: `44 B.C.`, `44 BCE`
+- **Ages**: `25y 3m`, `< 8y`, `> 1y 400d`, `CHILD`; **times**: `12:34:56.789`, `02:50Z`
 
 ### Calendars
 
-- Gregorian (`@#DGREGORIAN@`)
-- Julian (`@#DJULIAN@`)
-- Hebrew (`@#DHEBREW@`)
-- French Republican (`@#DFRENCH R@`)
+| Calendar | 5.5.1 | 7.0 | Arithmetic (`calendar` feature) |
+|----------|-------|-----|:-------------------------------:|
+| Gregorian | `@#DGREGORIAN@` | `GREGORIAN` | ✅ |
+| Julian | `@#DJULIAN@` | `JULIAN` | ✅ |
+| Hebrew | `@#DHEBREW@` | `HEBREW` | ✅ |
+| French Republican | `@#DFRENCH R@` | `FRENCH_R` | ✅ |
+| Roman, unknown | `@#DROMAN@`, `@#DUNKNOWN@` | `_ROMAN`, `_UNKNOWN` | - |
+| Extension calendars | - | `_MYCAL` | - |
 
 ### Character Encodings
 
