@@ -73,15 +73,17 @@ pub use xref::{Xref, XrefForm};
 
 pub(crate) use lexer::{
     find_eol, head_version, lex_line, normalize_eol, pointer, terminator_len, unescape_into,
-    Escaping, Line, Lines,
+    Builder, Escaping, Kind as RawKind, Line, Lines, RawNode, Span as RawSpan, TagHasher,
+    TagInterner,
 };
 pub(crate) use node::Node;
 pub(crate) use reader::RecordSplitter;
+pub(crate) use tag::{standard_index, standard_index_const, STANDARD_TAGS};
 
 use std::fmt;
 
 use crate::version::GedcomVersion;
-use lexer::{Builder, RawNode, Span, TagInterner};
+use lexer::Span;
 
 /// The largest segment of text one arena indexes: offsets are 32-bit, and the
 /// side buffer of a segment can grow to twice its text.
@@ -271,7 +273,7 @@ impl fmt::Display for Tree {
 /// The byte ranges and first line numbers of the segments of a text: whole
 /// records, cut before a record that would take a segment past `limit`
 /// (or, for a single record larger than that, before the line that would).
-fn segment_bounds(text: &str, limit: usize) -> Vec<(usize, usize, u32)> {
+pub(crate) fn segment_bounds(text: &str, limit: usize) -> Vec<(usize, usize, u32)> {
     if text.len() <= limit {
         return vec![(0, text.len(), 1)];
     }

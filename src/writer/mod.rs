@@ -577,14 +577,53 @@ impl GedcomWriter {
         mut writer: W,
         records: &[Structure],
     ) -> Result<WriteReport, WriteError> {
+        let rules = self.rules_for_records(records);
+        self.write_conformed(&mut writer, rules, records.to_vec())
+    }
+
+    /// The version owned records are written in: the configured one, else
+    /// the one their `HEAD.GEDC.VERS` declares.
+    fn rules_for_records(&self, records: &[Structure]) -> &'static VersionRules {
         let declared = records
             .iter()
             .find(|r| r.tag == "HEAD")
             .and_then(|h| h.first("GEDC"))
             .and_then(|g| g.first("VERS"))
             .and_then(Structure::text);
-        let rules = self.rules_for(declared);
-        self.write_conformed(&mut writer, rules, records.to_vec())
+        self.rules_for(declared)
+    }
+
+    /// [`write_structures`](Self::write_structures), taking the records.
+    pub(crate) fn write_owned<W: io::Write>(
+        &self,
+        mut writer: W,
+        records: Vec<Structure>,
+    ) -> Result<WriteReport, WriteError> {
+        let rules = self.rules_for_records(&records);
+        self.write_conformed(&mut writer, rules, records)
+    }
+
+    /// Writes owned records as text, as
+    /// [`write_to_string`](Self::write_to_string) writes a dataset.
+    pub(crate) fn write_owned_to_string(
+        &self,
+        mut records: Vec<Structure>,
+    ) -> Result<(String, WriteReport), WriteError> {
+        let rules = self.rules_for_records(&records);
+        let mut repairs = crate::spec::conform(&mut records, rules.version);
+        if self.config.on_nonconformant == RepairPolicy::Error {
+            if let Some(first) = repairs.into_iter().next() {
+                return Err(WriteError::NonConformant(Box::new(first)));
+            }
+            repairs = Vec::new();
+        }
+        let mut sink = self.sink(None, rules, OutputEncoding::Utf8);
+        if self.wants_bom(rules, OutputEncoding::Utf8, true) {
+            sink.bom();
+        }
+        write_records(rules, &mut sink, records.iter())?;
+        repairs.append(&mut sink.repairs);
+        Ok((sink.into_string(), WriteReport { repairs }))
     }
 
     /// Repairs `records` for `rules` ([`crate::spec::conform`]), then writes

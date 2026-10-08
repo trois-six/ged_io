@@ -5,23 +5,24 @@ use std::cmp::Ordering;
 use std::fmt;
 
 /// Every tag defined by GEDCOM 5.5.1 (Appendix A, including the 5.5 tags it
-/// still lists) or GEDCOM 7.0 (`FamilySearch` `extracted-files/substructures.tsv`),
-/// sorted. A tag's index in this table is its identifier.
-pub(crate) static STANDARD_TAGS: [&str; 156] = [
+/// still lists), GEDCOM 7.0 or GEDCOM 7.1 (`FamilySearch`
+/// `extracted-files/substructures.tsv`), sorted. A tag's index in this table
+/// is its identifier.
+pub(crate) static STANDARD_TAGS: [&str; 157] = [
     "ABBR", "ADDR", "ADOP", "ADR1", "ADR2", "ADR3", "AFN", "AGE", "AGNC", "ALIA", "ANCE", "ANCI",
     "ANUL", "ASSO", "AUTH", "BAPL", "BAPM", "BARM", "BASM", "BIRT", "BLES", "BLOB", "BURI", "CALN",
     "CAST", "CAUS", "CENS", "CHAN", "CHAR", "CHIL", "CHR", "CHRA", "CITY", "CONC", "CONF", "CONL",
     "CONT", "COPR", "CORP", "CREA", "CREM", "CROP", "CTRY", "DATA", "DATE", "DEAT", "DESC", "DESI",
     "DEST", "DIV", "DIVF", "DSCR", "EDUC", "EMAI", "EMAIL", "EMIG", "ENDL", "ENGA", "EVEN", "EXID",
     "FACT", "FAM", "FAMC", "FAMF", "FAMS", "FAX", "FCOM", "FILE", "FONE", "FORM", "GEDC", "GIVN",
-    "GRAD", "HEAD", "HEIGHT", "HUSB", "IDNO", "IMMI", "INDI", "INIL", "LANG", "LATI", "LEFT",
-    "LONG", "MAP", "MARB", "MARC", "MARL", "MARR", "MARS", "MEDI", "MIME", "NAME", "NATI", "NATU",
-    "NCHI", "NICK", "NMR", "NO", "NOTE", "NPFX", "NSFX", "OBJE", "OCCU", "ORDI", "ORDN", "PAGE",
-    "PEDI", "PHON", "PHRASE", "PLAC", "POST", "PROB", "PROP", "PUBL", "QUAY", "REFN", "RELA",
-    "RELI", "REPO", "RESI", "RESN", "RETI", "RFN", "RIN", "ROLE", "ROMN", "SCHMA", "SDATE", "SEX",
-    "SLGC", "SLGS", "SNOTE", "SOUR", "SPFX", "SSN", "STAE", "STAT", "SUBM", "SUBN", "SURN", "TAG",
-    "TEMP", "TEXT", "TIME", "TITL", "TOP", "TRAN", "TRLR", "TYPE", "UID", "VERS", "WIDTH", "WIFE",
-    "WILL", "WWW",
+    "GRAD", "HEAD", "HEIGHT", "HUSB", "IDNO", "IMMI", "INDI", "INIL", "KIND", "LANG", "LATI",
+    "LEFT", "LONG", "MAP", "MARB", "MARC", "MARL", "MARR", "MARS", "MEDI", "MIME", "NAME", "NATI",
+    "NATU", "NCHI", "NICK", "NMR", "NO", "NOTE", "NPFX", "NSFX", "OBJE", "OCCU", "ORDI", "ORDN",
+    "PAGE", "PEDI", "PHON", "PHRASE", "PLAC", "POST", "PROB", "PROP", "PUBL", "QUAY", "REFN",
+    "RELA", "RELI", "REPO", "RESI", "RESN", "RETI", "RFN", "RIN", "ROLE", "ROMN", "SCHMA", "SDATE",
+    "SEX", "SLGC", "SLGS", "SNOTE", "SOUR", "SPFX", "SSN", "STAE", "STAT", "SUBM", "SUBN", "SURN",
+    "TAG", "TEMP", "TEXT", "TIME", "TITL", "TOP", "TRAN", "TRLR", "TYPE", "UID", "VERS", "WIDTH",
+    "WIFE", "WILL", "WWW",
 ];
 
 /// A tag of at most seven bytes as an integer: its bytes, big-endian and
@@ -67,7 +68,7 @@ const fn slot(key: u64) -> usize {
 
 /// `(key, index + 1)` of each standard tag, by hash with linear probing; a
 /// zero key is an empty slot (a real key has its length in the low byte).
-// `as` is the only conversion a constant can use; the index is below 156.
+// `as` is the only conversion a constant can use; the index is below 157.
 #[allow(clippy::cast_possible_truncation)]
 static STANDARD_SLOTS: [(u64, u16); SLOTS] = {
     let mut table = [(0_u64, 0_u16); SLOTS];
@@ -82,6 +83,30 @@ static STANDARD_SLOTS: [(u64, u16); SLOTS] = {
     }
     table
 };
+
+/// The index of a standard tag, in a constant: a binary search of the
+/// sorted keys. Runtime lookups use [`standard_index`], which hashes.
+// The index is below the table length, 157, and `as` is the only
+// conversion a constant function can use.
+#[allow(clippy::cast_possible_truncation)]
+pub(crate) const fn standard_index_const(tag: &str) -> Option<u16> {
+    let Some(key) = key(tag.as_bytes()) else {
+        return None;
+    };
+    let (mut lo, mut hi) = (0, STANDARD_KEYS.len());
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if STANDARD_KEYS[mid] == key {
+            return Some(mid as u16);
+        }
+        if STANDARD_KEYS[mid] < key {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    None
+}
 
 /// The index of a standard tag.
 #[inline]
@@ -102,7 +127,7 @@ pub(crate) fn standard_index(tag: &str) -> Option<u16> {
 
 /// A GEDCOM tag.
 ///
-/// Standard tags (those of GEDCOM 5.5.1 or 7.0) are stored as a two-byte
+/// Standard tags (those of GEDCOM 5.5.1, 7.0 or 7.1) are stored as a two-byte
 /// index into a static table; any other tag, such as an extension tag (`_FOO`)
 /// or a misspelt one, keeps its text. Tags are case-sensitive, as both
 /// specifications define them: `Name` is not `NAME`.
@@ -148,7 +173,7 @@ impl Tag {
         }
     }
 
-    /// Whether GEDCOM 5.5.1 or 7.0 defines this tag. It may still be
+    /// Whether GEDCOM 5.5.1, 7.0 or 7.1 defines this tag. It may still be
     /// misplaced: that is a question for the structure that holds it.
     #[must_use]
     pub fn is_standard(&self) -> bool {
@@ -250,6 +275,11 @@ mod tests {
         assert_eq!(standard_index("NAME\0"), None);
         assert_eq!(standard_index("NAMES"), None);
         assert_eq!(standard_index("A_VERY_LONG_TAG"), None);
+        for (i, tag) in STANDARD_TAGS.iter().enumerate() {
+            assert_eq!(standard_index_const(tag), u16::try_from(i).ok());
+        }
+        assert_eq!(standard_index_const("_FOO"), None);
+        assert_eq!(standard_index_const("A_VERY_LONG_TAG"), None);
     }
 
     #[test]

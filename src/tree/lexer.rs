@@ -122,7 +122,7 @@ impl Hasher for TagHasher {
 }
 
 impl TagInterner {
-    fn intern(&mut self, tag: &str) -> u32 {
+    pub(crate) fn intern(&mut self, tag: &str) -> u32 {
         if let Some(i) = standard_index(tag) {
             return u32::from(i);
         }
@@ -266,6 +266,33 @@ pub(crate) enum Line {
 #[inline]
 const fn is_blank(b: u8) -> bool {
     b == b' ' || b == b'\t'
+}
+
+/// Whether a line is a structure at level 0, as [`lex_line`] would read it:
+/// leading blanks and byte order marks, a level whose digits are all zeros,
+/// then a blank and something that is not blank.
+#[inline]
+fn starts_at_level_zero(b: &[u8]) -> bool {
+    let mut i = 0;
+    loop {
+        match b.get(i..) {
+            Some([c, ..]) if is_blank(*c) => i += 1,
+            Some([0xEF, 0xBB, 0xBF, ..]) => i += 3,
+            _ => break,
+        }
+    }
+    let digits = i;
+    while b.get(i) == Some(&b'0') {
+        i += 1;
+    }
+    if i == digits || b.get(i).is_some_and(u8::is_ascii_digit) {
+        return false;
+    }
+    if !b.get(i).is_some_and(|&c| is_blank(c)) {
+        return false;
+    }
+    b.get(i..)
+        .is_some_and(|rest| rest.iter().any(|&c| !is_blank(c)))
 }
 
 /// Splits one line (without its terminator).
@@ -612,6 +639,44 @@ impl Builder {
         self.close_record(text);
     }
 
+    /// Reads every line of `text` one record at a time: once a record is
+    /// complete, `record` sees the arena holding it alone, which is then
+    /// cleared for the next one. Memory is bounded by the largest record,
+    /// and offsets stay relative to `text`.
+    pub(crate) fn read_records(
+        &mut self,
+        text: &str,
+        tags: &mut TagInterner,
+        mut record: impl FnMut(&Self, &TagInterner),
+    ) {
+        let mut lines = Lines::new(text);
+        while let Some((start, end)) = lines.next() {
+            let bytes = text.as_bytes().get(start..end).unwrap_or_default();
+            if !self.nodes.is_empty() && starts_at_level_zero(bytes) {
+                self.close_record(text);
+                record(self, tags);
+                self.clear_record();
+            }
+            self.push_line(text, start, end, lines.has_at(), tags);
+        }
+        self.close_record(text);
+        if !self.nodes.is_empty() {
+            record(self, tags);
+            self.clear_record();
+        }
+    }
+
+    /// Clears the arena of a record read by [`read_records`](Self::read_records),
+    /// keeping the allocations and the line count.
+    fn clear_record(&mut self) {
+        self.nodes.clear();
+        self.xrefs.clear();
+        self.side.clear();
+        self.stack.clear();
+        self.pieces.clear();
+        self.previous = None;
+    }
+
     fn push_line(
         &mut self,
         text: &str,
@@ -922,6 +987,59 @@ mod tests {
             let plain = text.split(['\n', '\r']).next().unwrap().contains('@');
             assert_eq!(find_eol_and_at(text.as_bytes()).1, plain, "{text:?}");
         }
+    }
+
+    #[test]
+    fn level_zero_lines_as_the_lexer_reads_them() {
+        for line in [
+            "0 HEAD",
+            "00 HEAD",
+            " \t0\t@I1@ INDI",
+            "\u{feff}0 TRLR",
+            "0",
+            "0 ",
+            "01 X",
+            "10 X",
+            "1 X",
+            "x",
+            "",
+            "0x",
+            "0 \t ",
+            "000 @X@",
+        ] {
+            let lexed = matches!(lex_line(line), Line::Structure { level: 0, .. });
+            assert_eq!(starts_at_level_zero(line.as_bytes()), lexed, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn records_one_at_a_time_match_the_whole_read() {
+        let text = "stray\n1 X\n0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @N1@ NOTE a@@b\n1 CONC c\n\n0 @I1@ INDI\n3 NOTE deep\n0 TRLR";
+        let mut tags = TagInterner::default();
+        let mut whole = Builder::new(Escaping::V551, 1);
+        whole.read(text, &mut tags);
+        let mut seen = Vec::new();
+        let mut split = Builder::new(Escaping::V551, 1);
+        split.read_records(text, &mut tags, |b, _| {
+            let first = b.nodes[0];
+            let payload = if first.kind == Kind::Side {
+                first.payload.get(&b.side).to_string()
+            } else {
+                String::new()
+            };
+            seen.push((b.nodes.len(), b.nodes[0].line, payload));
+        });
+        let roots: Vec<usize> = (0..whole.nodes.len())
+            .filter(|&i| whole.nodes[i].depth == 0)
+            .collect();
+        assert_eq!(seen.len(), roots.len());
+        for (k, &root) in roots.iter().enumerate() {
+            let end = whole.nodes[root].end as usize;
+            assert_eq!(seen[k].0, end - root, "record {k}");
+            assert_eq!(seen[k].1, whole.nodes[root].line);
+        }
+        // The note record's text, unescaped and joined, in its side buffer.
+        assert_eq!(seen[2].2, "a@bc");
     }
 
     #[test]
