@@ -985,7 +985,11 @@ pub fn age_ok(s: &str, v7: bool) -> bool {
             rest.strip_prefix(' ').unwrap_or(rest)
         };
     }
-    if !v7 && matches!(s, "CHILD" | "INFANT" | "STILLBORN") {
+    // 5.5.1 controlled values ignore case (p. 21): its keywords and units
+    // (test-files `5/age-valid.ged`: `child`, `0Y`, `<0D`).
+    let lower = s.to_ascii_lowercase();
+    let s = if v7 { s } else { lower.as_str() };
+    if !v7 && matches!(s, "child" | "infant" | "stillborn") {
         return true;
     }
     let units: &[char] = if v7 {

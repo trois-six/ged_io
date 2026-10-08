@@ -727,7 +727,6 @@ place71/record-SUBM/UID	place	TS12	CARD	-	1/2 kept
 references/G7-PHRASE-PTRS	validate	TS26	FATAL	-	Invalid GEDCOM format: Family references non-existent individual: @VOID@
 references/G7-VOIDPTR	validate	TS26	FATAL	-	Invalid GEDCOM format: Individual references non-existent family: @VOID@
 vendored/5/age-invalid	output:payload-unexpected	TS34	NONCONFORMANT	-	line 101: payload-unexpected: EVEN "when > 0 M": this structure takes no payload
-vendored/5/age-valid	output:payload-age	TS34	NONCONFORMANT	NONCONFORMANT	line 13: payload-age: AGE "child": not in the age grammar
 vendored/5/age-valid	output:payload-unexpected	TS34	NONCONFORMANT	-	line 101: payload-unexpected: EVEN "when 11m": this structure takes no payload
 vendored/5/date-all	output:payload-date	TS34	NONCONFORMANT	-	line 1026: payload-date: DATE "BET 1950 AND GREGORIAN 302": not in the date grammar
 vendored/5/date-all	output:record-size	TS27	NONCONFORMANT	NONCONFORMANT	line 4877: record-size: 131517 bytes
