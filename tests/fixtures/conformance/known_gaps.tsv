@@ -102,8 +102,6 @@ case/G7-COORD-INVALID	output:payload-coordinate	TS34	NONCONFORMANT	-	line 10: pa
 case/G7-CORP-CONTACTS	keep	TS13	LOST	-	missing line `3 PHON +1 555 0100`; missing line `3 EMAIL a@example.com`; missing line `3 WWW https://example.com`
 case/G7-DANGLING	keep	TS35	-	LOST	missing line `1 FAMS @F9@`
 case/G7-DANGLING	output:pointer-dangling	TS34	NONCONFORMANT	-	line 6: pointer-dangling: @F9@
-case/G7-DATE-EXT-CAL	keep	TS35	-	LOST	missing line `2 DATE _MAYAN 1 POP 1`
-case/G7-DATE-EXT-CAL	roundtrip	TS35	-	DIFF	- INDI#0/BIRT/DATE = "_MAYAN 1 POP 1"; + INDI#0/BIRT/DATE = ""; + INDI#0/BIRT/DATE/PHRASE = "_MAYAN 1 POP 1"
 case/G7-DATE-INVALID	output:payload-date	TS34	NONCONFORMANT	-	line 9: payload-date: DATE "BET 2000": not in the date grammar
 case/G7-ENUM-EXT	parse	TS3	FATAL	-	Parse error at line 5: Unknown gender value _EXTVAL
 case/G7-ENUM-UPPER	keep	TS19	LOST	-	missing line `2 PEDI ADOPTED`; missing line `2 STAT CHALLENGED`
