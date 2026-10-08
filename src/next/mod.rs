@@ -8,11 +8,14 @@
 //! # Layout
 //!
 //! - A [`Dataset`] keeps the decoded text it was read from in its
-//!   [`Source`]. Every text of the model is a [`Text`]: a span of that
-//!   buffer (or of a side buffer for payloads reading rewrote), 16 bytes
-//!   and no allocation; text a program sets owns its characters.
+//!   [`Store`]. Every text of the model is a [`Text`]: a span of that
+//!   buffer, or, for a payload reading rewrote (continuations joined, `@@`
+//!   unescaped), a run of the store's 8-byte pieces of it — 16 bytes and no
+//!   allocation either way, and no copy of the characters; text a program
+//!   sets owns its characters.
 //! - Identifiers and pointers are interned [`XrefId`]s (4 bytes); the
-//!   source maps them to their text and back.
+//!   store maps them to their text and back (8 bytes each, and an index of
+//!   8 bytes a slot).
 //! - Enumeration values are enums ([`Pedigree`], [`Role`], …) whose
 //!   unknown values keep their text; tags of untyped [`Node`]s are
 //!   [`TagId`]s.
@@ -47,8 +50,8 @@
 //! let indi = &data.records[1];
 //! let Child::Typed(note) = &indi.children[0] else { panic!() };
 //! let note: &Note = note.get().unwrap();
-//! assert!(matches!(&note.content, NoteContent::Text(t) if t.as_str(&data) == "Hello"));
-//! assert_eq!(note.language.as_ref().unwrap().as_str(&data), "en");
+//! assert!(matches!(&note.content, NoteContent::Text(t) if t.to_str(&data) == "Hello"));
+//! assert_eq!(note.language.as_ref().unwrap().to_str(&data), "en");
 //!
 //! let Child::Generic(famc) = &indi.children[1] else { panic!() };
 //! let Child::Typed(pedi) = &famc.children[0] else { panic!() };
@@ -96,16 +99,16 @@ pub use multimedia::{Crop, File, FileForm, FileTranslation, MultimediaLink};
 pub use node::{Extra, Node, Value};
 pub use note::{Note, NoteContent, NoteTranslation, SourceText, TextTranslation};
 pub use place::{Association, Map, PhoneticVariation, Place, PlaceTranslation, RomanizedVariation};
-pub use text::{Source, TagId, Text, XrefId};
+pub use text::{Store, TagId, Text, XrefId};
 
 use driver::{Arena, NodeRef, ReadCx, WriteCx};
 
-/// A GEDCOM dataset: its records, and the source their texts and
+/// A GEDCOM dataset: its records, and the store their texts and
 /// identifiers resolve against.
 #[derive(Debug, Default)]
 pub struct Dataset {
     /// The text the dataset was read from, and its tables.
-    pub source: Source,
+    pub store: Store,
     /// The records, the header first when the file has one, in file
     /// order.
     pub records: Vec<Generic>,
@@ -113,9 +116,9 @@ pub struct Dataset {
     declared_version: Option<Box<str>>,
 }
 
-impl AsRef<Source> for Dataset {
-    fn as_ref(&self) -> &Source {
-        &self.source
+impl AsRef<Store> for Dataset {
+    fn as_ref(&self) -> &Store {
+        &self.store
     }
 }
 
@@ -137,7 +140,7 @@ impl Dataset {
     /// several have it.
     #[must_use]
     pub fn find(&self, xref: &str) -> Option<&Generic> {
-        let id = self.source.find_xref(xref)?;
+        let id = self.store.find_xref(xref)?;
         self.records.iter().find(|r| r.xref == Some(id))
     }
 
@@ -157,7 +160,7 @@ impl Dataset {
 
     fn structures(&self, version: GedcomVersion, convert: bool) -> Vec<Structure> {
         let cx = WriteCx {
-            source: &self.source,
+            store: &self.store,
             version,
             convert,
         };
@@ -166,7 +169,7 @@ impl Dataset {
 }
 
 /// The largest text one pass of the lexer indexes: offsets are 32-bit, and
-/// the side buffer of a record can grow to twice its text.
+/// a piece's length takes 31 bits.
 const SEGMENT_LIMIT: usize = (u32::MAX / 2) as usize;
 
 /// Reads a dataset from decoded text. Never fails.
@@ -183,7 +186,7 @@ pub fn read_bytes(bytes: impl Into<Vec<u8>>) -> Dataset {
     read_string(crate::encoding::decode_owned(bytes.into()).text)
 }
 
-/// Reads a dataset from decoded text, keeping the text as its source.
+/// Reads a dataset from decoded text, keeping the text as its store.
 #[must_use]
 pub fn read_string(text: String) -> Dataset {
     read_segmented(text, SEGMENT_LIMIT)
@@ -195,13 +198,13 @@ fn read_segmented(text: String, limit: usize) -> Dataset {
         .as_deref()
         .map_or(GedcomVersion::V5_5_1, GedcomVersion::from_version_str);
     let escaping = Escaping::of(declared.as_deref());
-    let mut source = Source::new(text);
+    let mut store = Store::new(text);
     let mut records = Vec::new();
     let mut tags = TagInterner::default();
     {
-        let (input, side, xrefs) = source.parts_mut();
-        let mut cx = ReadCx::new(input, side, xrefs, version);
-        let mut builder = Builder::new(escaping, 1);
+        let (input, pieces, xrefs) = store.parts_mut();
+        let mut cx = ReadCx::new(input, pieces, xrefs, version);
+        let mut builder = Builder::new(escaping, 1).with_spans();
         for (start, end, first_line) in crate::tree::segment_bounds(input, limit) {
             let part = input.get(start..end).unwrap_or_default();
             builder.reset(first_line);
@@ -209,21 +212,21 @@ fn read_segmented(text: String, limit: usize) -> Dataset {
                 let arena = Arena {
                     text: part,
                     base: start,
-                    side: &b.side,
+                    joined: &b.joined,
                     nodes: &b.nodes,
                     xrefs: &b.xrefs,
                 };
-                if let Some(root) = NodeRef::root(arena) {
+                if let Some(root) = NodeRef::root(&arena) {
                     records.push(Generic::read(root, &mut cx));
                 }
             });
         }
     }
-    source.set_tags(tags.others);
-    source.shrink();
+    store.set_tags(tags.others);
+    store.shrink();
     records.shrink_to_fit();
     Dataset {
-        source,
+        store,
         records,
         version,
         declared_version: declared.map(Into::into),
@@ -267,18 +270,18 @@ struct Built<'d> {
 
 impl<'d> Build<'d> for Built<'d> {
     fn tag(&self) -> &'d str {
-        self.cx.source.tag(self.record.tag)
+        self.cx.store.tag(self.record.tag)
     }
 
     fn xref(&self) -> Option<&'d str> {
-        self.record.xref.map(|x| self.cx.source.xref(x))
+        self.record.xref.map(|x| self.cx.store.xref(x))
     }
 
     fn is_empty(&self) -> bool {
         let payload = match &self.record.payload {
             node::Value::None => true,
             node::Value::Pointer(_) => false,
-            node::Value::Text(t) => t.as_str(self.cx.source).is_empty(),
+            node::Value::Text(t) => t.is_empty(),
         };
         payload && self.record.children.is_empty()
     }
@@ -293,7 +296,7 @@ impl Dataset {
     /// configured.
     fn built(&self, writer: &GedcomWriter) -> Vec<Built<'_>> {
         let cx = WriteCx {
-            source: &self.source,
+            store: &self.store,
             version: writer.config().version.unwrap_or(self.version),
             convert: true,
         };
@@ -329,7 +332,7 @@ pub mod ledger {
     /// as generic structures, because they did not fit their type.
     #[must_use]
     pub fn untyped(data: &super::Dataset) -> Vec<String> {
-        super::generic::untyped(&data.records, &data.source, data.version)
+        super::generic::untyped(&data.records, &data.store, data.version)
     }
 }
 

@@ -73,6 +73,52 @@ pub(crate) enum Kind {
     Text,
     /// Text rewritten (unescaped or joined), in the side buffer.
     Side,
+    /// Text to unescape, in the source text (span mode only).
+    Escaped,
+    /// Text made of pieces of the source text (span mode only): the payload
+    /// spans the builder's `joined` pieces.
+    Joined,
+}
+
+/// A piece of a text joined from several spans of the source text: a span,
+/// and whether a newline comes before it (a `CONT`). The piece's length
+/// takes 31 bits (segments are at most 2 GiB), the flag the last one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TextPiece {
+    start: u32,
+    len_newline: u32,
+}
+
+impl TextPiece {
+    const NEWLINE: u32 = 1 << 31;
+
+    pub(crate) fn new(start: u32, len: u32, newline: bool) -> Self {
+        Self {
+            start,
+            len_newline: (len & !Self::NEWLINE) | if newline { Self::NEWLINE } else { 0 },
+        }
+    }
+
+    pub(crate) fn start(self) -> u32 {
+        self.start
+    }
+
+    pub(crate) fn len(self) -> u32 {
+        self.len_newline & !Self::NEWLINE
+    }
+
+    /// Whether a newline comes before the piece.
+    pub(crate) fn newline(self) -> bool {
+        self.len_newline & Self::NEWLINE != 0
+    }
+
+    /// The same piece, `by` bytes further.
+    pub(crate) fn shifted(self, by: u32) -> Self {
+        Self {
+            start: self.start.saturating_add(by),
+            ..self
+        }
+    }
 }
 
 /// One structure in a segment's flat, pre-order arena.
@@ -118,7 +164,10 @@ impl Hasher for TagHasher {
     }
 
     fn finish(&self) -> u64 {
-        self.0
+        // A product's high bits mix every input bit, its low bits only the
+        // low input bits: rotate them down, where hash tables take their
+        // bucket index (keys such as `@I123@` differ in their high bytes).
+        self.0.rotate_left(26)
     }
 }
 
@@ -402,40 +451,53 @@ pub(crate) fn needs_unescape(raw: &str, escaping: Escaping) -> bool {
     }
 }
 
-/// Appends the text a raw payload stands for.
+/// The text a raw payload stands for, as the spans of `raw` (offset,
+/// length) it is made of, in order.
 ///
 /// GEDCOM 7.0 doubles only a leading `@`. GEDCOM 5.5.1 doubles every `@` of
 /// text, except in escape sequences (`@#DJULIAN@`), which are kept as they
-/// are; a lone `@` is kept too.
-pub(crate) fn unescape_into(raw: &str, escaping: Escaping, out: &mut String) {
+/// are; a lone `@` is kept too. Unescaping only drops characters, so the
+/// text is `raw` with gaps.
+pub(crate) fn unescape_spans(raw: &str, escaping: Escaping, mut span: impl FnMut(usize, usize)) {
     match escaping {
-        Escaping::V70 => out.push_str(
-            raw.strip_prefix('@')
-                .filter(|r| r.starts_with('@'))
-                .unwrap_or(raw),
-        ),
+        Escaping::V70 => {
+            let skip = usize::from(raw.starts_with("@@"));
+            span(skip, raw.len() - skip);
+        }
         Escaping::V551 => {
-            let mut rest = raw;
-            while let Some(at) = rest.find('@') {
-                let (before, after) = rest.split_at(at + 1);
-                out.push_str(before);
-                let after = after.as_bytes();
-                rest = match after.first() {
-                    Some(b'@') => rest.get(at + 2..).unwrap_or_default(),
-                    Some(b'#') => match after.iter().skip(1).position(|&c| c == b'@') {
-                        Some(p) => {
-                            let escape = rest.get(at + 1..at + p + 3).unwrap_or_default();
-                            out.push_str(escape);
-                            rest.get(at + p + 3..).unwrap_or_default()
-                        }
-                        None => rest.get(at + 1..).unwrap_or_default(),
-                    },
-                    _ => rest.get(at + 1..).unwrap_or_default(),
+            let bytes = raw.as_bytes();
+            let mut start = 0;
+            let mut from = 0;
+            while let Some(at) = bytes
+                .get(from..)
+                .and_then(|rest| rest.iter().position(|&b| b == b'@'))
+                .map(|p| from + p)
+            {
+                from = match bytes.get(at + 1) {
+                    // `@@`: the first `@` stays, the second goes.
+                    Some(b'@') => {
+                        span(start, at + 1 - start);
+                        start = at + 2;
+                        at + 2
+                    }
+                    // An escape sequence, kept to its closing `@`.
+                    Some(b'#') => bytes
+                        .get(at + 2..)
+                        .and_then(|rest| rest.iter().position(|&b| b == b'@'))
+                        .map_or(at + 1, |p| at + p + 3),
+                    _ => at + 1,
                 };
             }
-            out.push_str(rest);
+            span(start, raw.len().saturating_sub(start));
         }
     }
+}
+
+/// Appends the text a raw payload stands for (see [`unescape_spans`]).
+pub(crate) fn unescape_into(raw: &str, escaping: Escaping, out: &mut String) {
+    unescape_spans(raw, escaping, |start, len| {
+        out.push_str(raw.get(start..start + len).unwrap_or_default());
+    });
 }
 
 /// The `HEAD.GEDC.VERS` payload, trimmed, of the first record that starts
@@ -480,7 +542,8 @@ pub(crate) fn head_version(text: &str) -> Option<String> {
     let vers = nodes.get(child(child(root, "GEDC")?, "VERS")?)?;
     let payload = match vers.kind {
         Kind::Side => vers.payload.get(&builder.side),
-        _ => vers.payload.get(prefix),
+        Kind::Joined => "",
+        Kind::None | Kind::Pointer | Kind::Text | Kind::Escaped => vers.payload.get(prefix),
     };
     Some(payload.trim().to_owned())
 }
@@ -589,6 +652,13 @@ pub(crate) struct Builder {
     /// `(node, identifier)`, by node.
     pub xrefs: Vec<(u32, Span)>,
     pub side: String,
+    /// In span mode, the pieces of the joined payloads (offsets relative to
+    /// the text read), which `Kind::Joined` payloads span.
+    pub joined: Vec<TextPiece>,
+    /// Span mode: payloads that reading rewrites are left as spans of the
+    /// text (`Kind::Escaped`, `Kind::Joined`) instead of being copied into
+    /// the side buffer.
+    spans: bool,
     escaping: Escaping,
     stack: Vec<Open>,
     pieces: Vec<Piece>,
@@ -603,6 +673,8 @@ impl Builder {
             nodes: Vec::new(),
             xrefs: Vec::new(),
             side: String::new(),
+            joined: Vec::new(),
+            spans: false,
             escaping,
             stack: Vec::new(),
             pieces: Vec::new(),
@@ -616,11 +688,19 @@ impl Builder {
         self.escaping = escaping;
     }
 
+    /// A builder in span mode: rewritten payloads stay spans of the text
+    /// read (see [`Kind::Escaped`] and [`Kind::Joined`]), nothing is copied.
+    pub(crate) fn with_spans(mut self) -> Self {
+        self.spans = true;
+        self
+    }
+
     /// Clears the arena for the next record, keeping the allocations.
     pub(crate) fn reset(&mut self, first_line: u32) {
         self.nodes.clear();
         self.xrefs.clear();
         self.side.clear();
+        self.joined.clear();
         self.stack.clear();
         self.pieces.clear();
         self.previous = None;
@@ -673,6 +753,7 @@ impl Builder {
         self.nodes.clear();
         self.xrefs.clear();
         self.side.clear();
+        self.joined.clear();
         self.stack.clear();
         self.pieces.clear();
         self.previous = None;
@@ -789,6 +870,8 @@ impl Builder {
                     (Kind::Text, Span::new(s, e - s))
                 } else if let Some(p) = pointer(raw) {
                     (Kind::Pointer, Span::new(s, p.len()))
+                } else if needs_unescape(raw, self.escaping) && self.spans {
+                    (Kind::Escaped, Span::new(s, e - s))
                 } else if needs_unescape(raw, self.escaping) {
                     let at = self.side.len();
                     unescape_into(raw, self.escaping, &mut self.side);
@@ -846,7 +929,7 @@ impl Builder {
     fn continuation_target(&self, empty_tag: u32) -> Option<u32> {
         let top = self.stack.last()?;
         let parent = top.node;
-        if matches!(self.kind(parent), Kind::Text | Kind::Side) {
+        if matches!(self.kind(parent), Kind::Text | Kind::Side | Kind::Escaped) {
             return Some(parent);
         }
         if top.last_child != u32::MAX && self.accepts_text(top.last_child, empty_tag) {
@@ -913,6 +996,58 @@ impl Builder {
         self.previous = Some(index);
     }
 
+    /// Span mode: lists, for each payload continued in the record, the
+    /// spans of the text it is made of (its own payload, then each
+    /// continuation, unescaped), and makes it a `Kind::Joined` payload.
+    fn join_spans(&mut self, text: &str, pieces: &[Piece]) {
+        for group in pieces.chunk_by(|a, b| a.target == b.target) {
+            let Some(first) = group.first() else { continue };
+            let Some(node) = self.nodes.get(first.target as usize).copied() else {
+                continue;
+            };
+            let at = self.joined.len();
+            let escaping = self.escaping;
+            let joined = &mut self.joined;
+            // The spans of a raw payload starting at `start`, the first one
+            // after a newline when `newline` holds.
+            let mut push = |start: u32, raw: &str, literal: bool, newline: bool| {
+                let mut newline = newline;
+                let mut add = |s: usize, len: usize| {
+                    if len > 0 || newline {
+                        let s = start.saturating_add(u32::try_from(s).unwrap_or(u32::MAX));
+                        let len = u32::try_from(len).unwrap_or(0);
+                        joined.push(TextPiece::new(s, len, newline));
+                        newline = false;
+                    }
+                };
+                // `add` is called at least once, so a newline is never lost.
+                if literal {
+                    add(0, raw.len());
+                } else {
+                    unescape_spans(raw, escaping, &mut add);
+                }
+            };
+            match node.kind {
+                Kind::Text => push(node.payload.start, node.payload.get(text), true, false),
+                Kind::Escaped => push(node.payload.start, node.payload.get(text), false, false),
+                Kind::None | Kind::Pointer | Kind::Side | Kind::Joined => {}
+            }
+            for piece in group {
+                push(
+                    piece.raw.start,
+                    piece.raw.get(text),
+                    piece.literal,
+                    piece.newline,
+                );
+            }
+            let count = self.joined.len() - at;
+            if let Some(n) = self.nodes.get_mut(first.target as usize) {
+                n.payload = Span::new(at, count);
+                n.kind = if count == 0 { Kind::None } else { Kind::Joined };
+            }
+        }
+    }
+
     /// Joins the record's continuation pieces into their payloads and closes it.
     fn close_record(&mut self, text: &str) {
         self.pop_to(0);
@@ -922,6 +1057,12 @@ impl Builder {
         }
         let mut pieces = std::mem::take(&mut self.pieces);
         pieces.sort_by_key(|p| p.target);
+        if self.spans {
+            self.join_spans(text, &pieces);
+            pieces.clear();
+            self.pieces = pieces;
+            return;
+        }
         for group in pieces.chunk_by(|a, b| a.target == b.target) {
             let Some(first) = group.first() else { continue };
             let Some(node) = self.nodes.get(first.target as usize).copied() else {
@@ -935,7 +1076,7 @@ impl Builder {
                     self.side
                         .extend_from_within(s..s + node.payload.len as usize);
                 }
-                Kind::None | Kind::Pointer => {}
+                Kind::None | Kind::Pointer | Kind::Escaped | Kind::Joined => {}
             }
             for piece in group {
                 if piece.newline {
@@ -1043,6 +1184,103 @@ mod tests {
         }
         // The note record's text, unescaped and joined, in its side buffer.
         assert_eq!(seen[2].2, "a@bc");
+    }
+
+    /// The payload of every node of a builder, as text.
+    fn payloads(b: &Builder, text: &str, escaping: Escaping) -> Vec<String> {
+        b.nodes
+            .iter()
+            .map(|n| match n.kind {
+                Kind::None => String::new(),
+                Kind::Pointer | Kind::Text => n.payload.get(text).to_string(),
+                Kind::Side => n.payload.get(&b.side).to_string(),
+                Kind::Escaped => {
+                    let mut out = String::new();
+                    unescape_into(n.payload.get(text), escaping, &mut out);
+                    out
+                }
+                Kind::Joined => {
+                    let start = n.payload.start as usize;
+                    let mut out = String::new();
+                    for p in &b.joined[start..start + n.payload.len as usize] {
+                        if p.newline() {
+                            out.push('\n');
+                        }
+                        let s = p.start() as usize;
+                        out.push_str(&text[s..s + p.len() as usize]);
+                    }
+                    out
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn span_mode_reads_what_the_side_buffer_holds() {
+        let fragments = [
+            "0 @N1@ NOTE a@@b",
+            "1 CONT @@c",
+            "1 CONC d@@@@e",
+            "1 CONT",
+            "1 CONC ",
+            "2 CONT x",
+            "stray line @@",
+            "1 SOUR @S1@",
+            "1 NOTE @@N1@ text",
+            "1 NOTE @#DJULIAN@@ 1700",
+            "1 _X @",
+            "0 @I1@ INDI",
+            "1 NAME A@@B /C/",
+            "2 CONC @@",
+            "1 @C@ CONT with an identifier",
+        ];
+        let mut seed = 7_u64;
+        let mut tags = TagInterner::default();
+        for case in 0..400 {
+            let mut text = String::new();
+            for _ in 0..(case % 12) + 1 {
+                seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                text.push_str(fragments[(seed >> 33) as usize % fragments.len()]);
+                text.push('\n');
+            }
+            for escaping in [Escaping::V551, Escaping::V70] {
+                let mut copy = Builder::new(escaping, 1);
+                copy.read(&text, &mut tags);
+                let mut spans = Builder::new(escaping, 1).with_spans();
+                spans.read(&text, &mut tags);
+                assert_eq!(
+                    payloads(&copy, &text, escaping),
+                    payloads(&spans, &text, escaping),
+                    "{escaping:?}: {text:?}"
+                );
+                assert!(spans.side.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn unescaped_spans_are_the_unescaped_text() {
+        for raw in [
+            "a@@b",
+            "@@",
+            "@@@",
+            "@#DJULIAN@@x",
+            "@#D",
+            "x@",
+            "@@a@@",
+            "plain",
+        ] {
+            for escaping in [Escaping::V551, Escaping::V70] {
+                let mut joined = String::new();
+                unescape_spans(raw, escaping, |s, l| joined.push_str(&raw[s..s + l]));
+                let mut out = String::new();
+                unescape_into(raw, escaping, &mut out);
+                assert_eq!(joined, out, "{raw:?} {escaping:?}");
+            }
+        }
+        let mut out = String::new();
+        unescape_into("a@@b@#DJULIAN@ c@@", Escaping::V551, &mut out);
+        assert_eq!(out, "a@b@#DJULIAN@ c@");
     }
 
     #[test]

@@ -3,7 +3,7 @@
 use super::driver::gedcom_struct;
 use super::enums::{Medium, MultimediaFormat, Phrased};
 use super::list::ThinVec;
-use super::text::{Source, Text, XrefId};
+use super::text::{Store, Text, XrefId};
 
 gedcom_struct! {
     /// A multimedia link (`OBJE`): a pointer to a multimedia record, with
@@ -91,8 +91,8 @@ gedcom_struct! {
 impl FileForm {
     /// The format as a 5.5.1 multimedia format.
     #[must_use]
-    pub fn multimedia_format<S: AsRef<Source> + ?Sized>(&self, source: &S) -> MultimediaFormat {
-        MultimediaFormat::parse(self.format.as_str(source))
+    pub fn multimedia_format<S: AsRef<Store> + ?Sized>(&self, store: &S) -> MultimediaFormat {
+        MultimediaFormat::parse(&self.format.to_str(store))
     }
 }
 
