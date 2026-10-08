@@ -53,7 +53,7 @@ fuzz_target!(|data: &[u8]| {
     if let Ok(d) = GedcomBuilder::new().build_from_bytes(data) {
         for version in ["5.5.1", "7.0"] {
             if let Ok(out) = GedcomWriter::new()
-                .gedcom_version(version)
+                .gedcom_version(ged_io::GedcomVersion::from_version_str(version))
                 .write_to_string(&d)
             {
                 let _ = GedcomBuilder::new().build_from_str(&out);

@@ -143,7 +143,7 @@ fn dates_of(data: &GedcomData) -> Vec<Option<String>> {
 
 fn write(data: &GedcomData, version: &str) -> GedcomData {
     let written = GedcomWriter::new()
-        .gedcom_version(version)
+        .gedcom_version(ged_io::GedcomVersion::from_version_str(version))
         .write_to_string(data)
         .unwrap();
     GedcomBuilder::new().build_from_str(&written).unwrap()

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     parser::{parse_subset, Parser},
-    tokenizer::{Token, Tokenizer},
+    tokenizer::Tokenizer,
     types::{
         address::Address, age::Age, custom::UserDefinedTag, date::Date,
         individual::attribute::IndividualAttribute, multimedia::Multimedia, note::Note,
@@ -147,14 +147,8 @@ impl AttributeDetail {
 
 impl Parser for AttributeDetail {
     fn parse(&mut self, tokenizer: &mut Tokenizer<'_>, level: u8) -> Result<(), GedcomError> {
-        tokenizer.next_token()?;
-
-        let mut value = String::new();
-
-        if let Token::LineValue(val) = &tokenizer.current_token {
-            value.push_str(val);
-            tokenizer.next_token()?;
-        }
+        // The value on the line, with its CONC/CONT continuations.
+        let value = tokenizer.take_line_value()?;
 
         let handle_subset = |tag: &str, tokenizer: &mut Tokenizer<'_>| -> Result<(), GedcomError> {
             match tag {

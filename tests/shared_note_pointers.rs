@@ -38,14 +38,14 @@ fn test_shared_note_pointers() {
         }
 
         let v7 = GedcomWriter::new()
-            .gedcom_version("7.0")
+            .gedcom_version(ged_io::GedcomVersion::V7_0)
             .write_to_string(&data)
             .unwrap();
         assert_eq!(v7.matches("1 SNOTE @N1@\n").count(), 2, "{v7}");
         assert!(!v7.contains(" NOTE @N1@"), "{v7}");
 
         let v551 = GedcomWriter::new()
-            .gedcom_version("5.5.1")
+            .gedcom_version(ged_io::GedcomVersion::V5_5_1)
             .write_to_string(&data)
             .unwrap();
         assert_eq!(v551.matches("1 NOTE @N1@\n").count(), 2, "{v551}");

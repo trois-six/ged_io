@@ -6,6 +6,7 @@
 //! Both tokenizers implement the [`TokenizerTrait`] trait, allowing parsers to
 //! work with either implementation.
 
+use crate::tree::{unescape_into, Escaping};
 use crate::GedcomError;
 use std::io::BufRead;
 use std::str::Chars;
@@ -160,6 +161,17 @@ fn unescape_leading_at(value: &mut String) {
     }
 }
 
+/// Undoes the `@` escapes of a payload for the file's version: 7.0 a
+/// leading `@@`; 5.5.1 every `@@`, escape sequences such as `@#DJULIAN@`
+/// kept as they are.
+fn unescape(value: &mut String, escaping: Escaping) {
+    if value.contains("@@") {
+        let mut out = String::with_capacity(value.len());
+        unescape_into(value, escaping, &mut out);
+        *value = out;
+    }
+}
+
 /// The tokenizer that turns the GEDCOM characters into a list of tokens
 pub struct Tokenizer<'a> {
     /// The active token type
@@ -172,9 +184,24 @@ pub struct Tokenizer<'a> {
     pub line: u32,
     /// The level number of the line being tokenized
     line_level: u8,
+    /// How text payloads escape `@`, by the file's version.
+    escaping: Escaping,
 }
 
 impl<'a> Tokenizer<'a> {
+    /// Sets how text payloads escape `@`: by the rules of `version`, which
+    /// the file's header declares. Without it, only a leading `@@` is
+    /// unescaped, the 7.0 rule.
+    #[must_use]
+    pub(crate) fn for_version(mut self, version: crate::GedcomVersion) -> Self {
+        self.escaping = if version.is_v7() {
+            Escaping::V70
+        } else {
+            Escaping::V551
+        };
+        self
+    }
+
     /// Creates a new tokenizer for a char interator of GEDCOM file contents
     #[must_use]
     pub fn new(chars: Chars<'a>) -> Tokenizer<'a> {
@@ -184,6 +211,7 @@ impl<'a> Tokenizer<'a> {
             chars,
             line: 0,
             line_level: 0,
+            escaping: Escaping::V70,
         }
     }
 
@@ -365,7 +393,7 @@ impl<'a> Tokenizer<'a> {
             value.push(self.current_char);
             self.next_char();
         }
-        unescape_leading_at(&mut value);
+        unescape(&mut value, self.escaping);
         value.into_boxed_str()
     }
 
@@ -420,8 +448,9 @@ impl<'a> Tokenizer<'a> {
                 self.next_token()?;
                 value
             }
-            // gracefully handle an attempt to take a value from a valueless line
-            Token::Level(_) => String::new(),
+            // gracefully handle an attempt to take a value from a valueless
+            // line, including the last line of a file without a trailer
+            Token::Level(_) | Token::EOF => String::new(),
             _ => {
                 return Err(GedcomError::ParseError {
                     line: self.line,
@@ -509,7 +538,8 @@ impl<'a> Tokenizer<'a> {
                     }
                 },
                 Token::Level(_) => self.next_token()?,
-                Token::EOF => break,
+                // An extension tag is a substructure too.
+                Token::CustomTag(_) | Token::EOF => break,
                 _ => {
                     return Err(GedcomError::ParseError {
                         line: self.line,
@@ -950,7 +980,7 @@ impl<R: BufRead> TokenizerTrait for StreamTokenizer<R> {
                 self.next_token()?;
                 Ok(value)
             }
-            Token::Level(_) => Ok(String::new()),
+            Token::Level(_) | Token::EOF => Ok(String::new()),
             _ => Err(GedcomError::ParseError {
                 line: self.line,
                 message: format!("Expected LineValue, found {:?}", self.current_token),
@@ -983,7 +1013,8 @@ impl<R: BufRead> TokenizerTrait for StreamTokenizer<R> {
                     }
                 },
                 Token::Level(_) => self.next_token()?,
-                Token::EOF => break,
+                // An extension tag is a substructure too.
+                Token::CustomTag(_) | Token::EOF => break,
                 _ => {
                     return Err(GedcomError::ParseError {
                         line: self.line,

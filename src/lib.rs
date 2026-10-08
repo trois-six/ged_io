@@ -256,7 +256,10 @@ pub use error::GedcomError;
 pub use stream::{GedcomRecord, GedcomStreamParser};
 pub use types::SourceCitationStats;
 pub use version::{detect_version, GedcomVersion, VersionRules};
-pub use writer::{GedcomWriter, WriterConfig};
+pub use writer::{
+    Bom, GedcomWriter, LineEnding, OutputEncoding, Repair, RepairKind, RepairPolicy, Unencodable,
+    WriteError, WriteReport, WriterConfig,
+};
 
 use crate::{
     tokenizer::{Token, Tokenizer},
@@ -313,7 +316,7 @@ impl<'a> Gedcom<'a> {
         // Every line terminator becomes LF and blank lines go, so that the
         // token-based parser reads CR-only, mixed and spaced-out files.
         let text = crate::tree::normalize_eol(self.chars.as_str());
-        let mut tokenizer = Tokenizer::new(text.chars());
+        let mut tokenizer = Tokenizer::new(text.chars()).for_version(detect_version(&text));
         tokenizer.next_token()?;
         // Accept EOF-terminated files (missing TRLR).
         if tokenizer.current_token == Token::EOF {

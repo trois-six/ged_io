@@ -46,12 +46,12 @@ fn test_write_place_exid_in_gedcom_7_only() {
         "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 BIRT\n2 PLAC Sampletown\n3 EXID 4242\n0 TRLR";
     let data = GedcomBuilder::new().build_from_str(original).unwrap();
     let v7 = GedcomWriter::new()
-        .gedcom_version("7.0")
+        .gedcom_version(ged_io::GedcomVersion::V7_0)
         .write_to_string(&data)
         .unwrap();
     assert!(v7.contains("2 PLAC Sampletown\n3 EXID 4242\n"), "{v7}");
     let v551 = GedcomWriter::new()
-        .gedcom_version("5.5.1")
+        .gedcom_version(ged_io::GedcomVersion::V5_5_1)
         .write_to_string(&data)
         .unwrap();
     assert!(!v551.contains("EXID"), "{v551}");

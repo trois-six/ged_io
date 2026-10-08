@@ -524,10 +524,11 @@ fn ansel_repertoire() {
     let run = cases::run("ansel", &c);
     failures.extend(run.failures);
     if let Some(out) = run.output {
-        let back =
-            adapter::encode_ansel(&out).and_then(|b| adapter::read(&b).map(|m| adapter::dump(&m)));
+        // The records only: the header names each output's own encoding.
+        let back = adapter::write_ansel(&model)
+            .and_then(|b| adapter::read(&b).map(|m| adapter::dump_records(&m)));
         match back {
-            Ok(d) if d == adapter::dump(&adapter::read(out.as_bytes()).unwrap()) => {}
+            Ok(d) if d == adapter::dump_records(&adapter::read(out.as_bytes()).unwrap()) => {}
             Ok(_) => failures.push(Failure::new(
                 "ansel/file",
                 "ansel-write",

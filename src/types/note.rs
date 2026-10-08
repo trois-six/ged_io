@@ -131,6 +131,7 @@ mod tests {
         let data = doc.parse_data().unwrap();
 
         let note = data.header.unwrap().note.unwrap();
-        assert_eq!(note.value.unwrap().chars().count(), 1441);
+        // The three `@@` of this 5.5 text each stand for one `@`.
+        assert_eq!(note.value.unwrap().chars().count(), 1438);
     }
 }

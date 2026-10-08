@@ -351,7 +351,7 @@ impl GedcomBuilder {
         // Every line terminator becomes LF and blank lines go, so that the
         // token-based parser reads CR-only, mixed and spaced-out files.
         let text = crate::tree::normalize_eol(text);
-        let mut tokenizer = Tokenizer::new(text.chars());
+        let mut tokenizer = Tokenizer::new(text.chars()).for_version(crate::detect_version(&text));
         tokenizer.next_token()?;
 
         let data = GedcomData::new(&mut tokenizer, 0)?;

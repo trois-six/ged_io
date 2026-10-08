@@ -175,7 +175,13 @@ pub struct VersionRules {
     pub(crate) gedc_form: Option<&'static str>,
     /// Whether `HEAD.CHAR` exists (it must then name the output encoding).
     pub(crate) head_char: bool,
+    /// Whether `HEAD.SOUR` and `HEAD.SUBM` are required.
+    pub(crate) head_sour_subm: bool,
     pub(crate) xref: XrefGrammar,
+    /// The deepest level a structure is written at: one less than the
+    /// deepest level of the version (5.5.1: two digits; 7.x: the 255 levels
+    /// readers nest), so that its `CONT` lines fit.
+    pub(crate) max_level: usize,
 }
 
 /// GEDCOM 5.5.1.
@@ -187,7 +193,9 @@ pub static V551: VersionRules = VersionRules {
     at_escape: AtEscape::AllAtSigns,
     gedc_form: Some("LINEAGE-LINKED"),
     head_char: true,
+    head_sour_subm: true,
     xref: XrefGrammar::V551 { max_len: 22 },
+    max_level: 98,
 };
 
 /// GEDCOM 7.0.
@@ -199,7 +207,9 @@ pub static V70: VersionRules = VersionRules {
     at_escape: AtEscape::LeadingOnly,
     gedc_form: None,
     head_char: false,
+    head_sour_subm: false,
     xref: XrefGrammar::V7,
+    max_level: 254,
 };
 
 /// GEDCOM 7.1, whose line grammar and header rules are those of 7.0.
@@ -218,7 +228,9 @@ const V70_LINES: VersionRules = VersionRules {
     at_escape: AtEscape::LeadingOnly,
     gedc_form: None,
     head_char: false,
+    head_sour_subm: false,
     xref: XrefGrammar::V7,
+    max_level: 254,
 };
 
 impl VersionRules {

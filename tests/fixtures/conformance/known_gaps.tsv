@@ -40,46 +40,34 @@ id	check	cause	current	next	note
 # TS32 the last line is written without a terminator
 # TS33 the written header is not synthesised for the target (5.5.1 SOUR/SUBM, GEDC.VERS, FORM)
 # TS34 values and structures the target does not allow are written verbatim (no conformance repair)
-ansel/*	output:eol-final	TS32	NONCONFORMANT	-	every output of the family
-ansel/file	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ANSEL for UTF-8 output
 ansel/file	roundtrip	TS30	DIFF	-	- INDI#0/NOTE[37] = "mark E0: Ả B\u{309} C\u{309} D\u{309} Ẻ F\u{309} G\u{309} H\u{309} Ỉ J\u{309} K\u{309} L\u{309} M\u{309} N\u{309} Ỏ P\u{309} Q\u{309} R\...
-calendar/*	output:eol-final	TS32	NONCONFORMANT	-	every output of the family
-calendar/*	output:v7-gedc-form	TS17	NONCONFORMANT	-	every output of the family
-case/*	output:eol-final	TS32	NONCONFORMANT	-	every output of the family
-case/*	output:head-required	TS33	NONCONFORMANT	-	every output of the family
-case/*	output:v7-gedc-form	TS17	NONCONFORMANT	-	every output of the family
 case/G5-AMBIG-NUMERIC-DATE	output:payload-date	TS34	NONCONFORMANT	-	line 10: payload-date: DATE "25/3/1934": not in the date grammar
 case/G5-CONTACTS	keep	TS13	LOST	-	missing line `3 PHON 555-0100`; missing line `3 EMAIL corp@@example.com`
 case/G5-CONTACTS-ON-INDI	output:misplaced	TS34	NONCONFORMANT	-	line 7: misplaced: ADDR under INDI
-case/G5-CUSTOM-AFTER-CONT	parse	TS2	FATAL	-	Parse error at line 11: Unhandled Continuation Token: CustomTag("_H")
-case/G5-CUSTOM-EVENTS	parse	TS2	FATAL	-	Parse error at line 11: Unhandled Continuation Token: CustomTag("_JUST")
-case/G5-CUSTOM-NOTE-SUB	parse	TS2	FATAL	-	Parse error at line 12: Unhandled Continuation Token: CustomTag("_AREA")
+case/G5-CUSTOM-AFTER-CONT	keep	TS2	LOST	-	parses now; the extension under a NOTE has no place in the model: missing line `2 _H custom after cont`
+case/G5-CUSTOM-AFTER-CONT	roundtrip	TS2	DIFF	-	- INDI#0/NOTE/_H = "custom after cont"
+case/G5-CUSTOM-EVENTS	keep	TS2	LOST	-	parses now; extensions under a CHIL pointer move to the FAM: missing line `2 _FREL Natural`
+case/G5-CUSTOM-EVENTS	roundtrip	TS2	DIFF	-	- FAM@F1@/CHIL/_FREL = "Natural"; - FAM@F1@/CHIL/_MREL = "Adopted"; + FAM@F1@/_FREL = "Natural"; + FAM@F1@/_FREL/_MREL = "Adopted"; + INDI@I1@/NAME/SURN = "Example"
+case/G5-CUSTOM-NOTE-SUB	keep	TS2	LOST	-	parses now; the extension under a NOTE has no place in the model: missing line `2 _AREA {1,2,3,4}`
+case/G5-CUSTOM-NOTE-SUB	roundtrip	TS2	DIFF	-	- OBJE#0/NOTE/_AREA = "{1,2,3,4}"
 case/G5-CUSTOM-UNDER-CITATION	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Example"
 case/G5-ESCAPE-NONDATE	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Example"
 case/G5-EVENT-DESCRIPTION	keep	TS16	LOST	-	model lacks `Born at home during a storm`
-case/G5-EVENT-DESCRIPTION	output:conc-split-space	TS16	NONCONFORMANT	-	line 9: conc-split-space: 2 CONC  during a storm
-case/G5-EVENT-DESCRIPTION	output:cont-position	TS16	NONCONFORMANT	-	line 9: cont-position: after another substructure
 case/G5-EVENT-DESCRIPTION	output:payload-y	TS34	NONCONFORMANT	-	line 7: payload-y: BIRT "Born at home during a storm": only Y or nothing
 case/G5-FAMC-DUP	roundtrip	TS12	LOST	-	tag FAMC (x1)
 case/G5-FORM-NOT-LINEAGE	parse	TS8	FATAL	-	Parse error at line 6: Unrecognized GEDCOM form. Expected LINEAGE-LINKED, found NOT LINEAGE-LINKED
-case/G5-HEAD-DUP-CHAR-FORM-CASE	output:gedc-form	TS33	NONCONFORMANT	-	line 4: gedc-form: Lineage-Linked
-case/G5-HEAD-DUP-CHAR-FORM-CASE	output:gedc-vers	TS33	NONCONFORMANT	-	line 3: gedc-vers: 5.5 instead of 5.5.1
 case/G5-LDS-OLD-STAT	keep	TS13	LOST	-	missing line `2 STAT Cleared`
 case/G5-LDS-OLD-STAT	output:misplaced	TS34	NONCONFORMANT	-	line 9: misplaced: NOTE under PLAC
 case/G5-LDS-OLD-STAT	roundtrip	TS13	LOST	-	tag STAT (x1); text Cleared (x1)
 case/G5-LINE-BREAK-NO-CONT	parse	TS5	FATAL	-	Parse error at line 7: Expected digit for level number
 case/G5-LONG-LINE	keep	TS21	LOST	-	missing line `2 CONC AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA`; model lacks `AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA...
-case/G5-LONG-LINE	output:line-length	TS21	NONCONFORMANT	-	line 7: line-length: 263 characters
 case/G5-MAP	keep	TS13	LOST	-	missing line `2 ROMN Taro /Yamada/`
 case/G5-MAP	roundtrip	TS13	DIFF	-	- INDI#0/NAME/FONE = "Taro /Yamada/"; - INDI#0/NAME/FONE/TYPE = "kana"; - INDI#0/NAME/ROMN = "Taro /Yamada/"; - INDI#0/NAME/ROMN/TYPE = "romaji"; + INDI#0/NA...
 case/G5-NETWORK-PTR	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Example"
-case/G5-NOTE-LOOKS-LIKE-PTR	output:payload-pointer	TS20	NONCONFORMANT	-	line 6: payload-pointer: NOTE "@N0@": a pointer where the type is not a pointer
-case/G5-NOTE-LOOKS-LIKE-PTR	output:pointer-dangling	TS20	NONCONFORMANT	-	line 6: pointer-dangling: @N0@
 case/G5-NOTE-PLACES	output:misplaced	TS34	NONCONFORMANT	-	line 15: misplaced: NOTE under ADDR
 case/G5-NOTE-RECORD-SUBS	keep	TS13	LOST	-	missing line `2 DATE 1 JAN 2000`
 case/G5-NOTE-RECORD-SUBS	roundtrip	TS13	DIFF	-	- NOTE#0/CHAN = ""; - NOTE#0/CHAN/DATE = "1 JAN 2000"
 case/G5-OBJE-55-STYLE	output:cardinality-min	TS34	NONCONFORMANT	-	line 11: cardinality-min: FILE under OBJE: missing
-case/G5-OBJE-55-STYLE	output:gedc-vers	TS33	NONCONFORMANT	-	line 3: gedc-vers: 5.5 instead of 5.5.1
 case/G5-OBJE-55-STYLE	output:misplaced	TS34	NONCONFORMANT	-	line 12: misplaced: FORM under OBJE
 case/G5-OBJE-55-STYLE	output:payload-enum	TS34	NONCONFORMANT	-	line 19: payload-enum: FORM "jpeg": not in MULTIMEDIA_FORMAT
 case/G5-OBJE-FILE-URL-SPACE	roundtrip	TS12	DIFF	-	- OBJE#0/FILE = " http://example.com/a.png"; - OBJE#0/FILE/FORM = "gif"; - OBJE#0/FILE[1] = "C:\\Users\\Example\\b.jpg"; - OBJE#0/FILE[1]/FORM = "jpg"; + OBJ...
@@ -87,7 +75,6 @@ case/G5-OBJE-TWO-FILES	keep	TS12	LOST	-	missing line `1 FILE one.jpg`
 case/G5-OBJE-TWO-FILES	roundtrip	TS12	DIFF	-	- OBJE#0/FILE = "one.jpg"; - OBJE#0/FILE/TITL = "First"; - OBJE#0/FILE[1] = "two.jpg"; - OBJE#0/FILE[1]/FORM = "jpg"; - OBJE#0/FILE[1]/FORM/TYPE = "photo"; -...
 case/G5-PEDI-NONSTD	parse	TS3	FATAL	-	Parse error at line 9: Unrecognized FamilyLink.pedigree code: stepchild
 case/G5-PLACE-HIERARCHY	keep	TS13	LOST	-	missing line `2 FORM Town, Area code, County, Region, Country, Subdivision`; model lacks `Second type`
-case/G5-PLACE-HIERARCHY	output:gedc-vers	TS33	NONCONFORMANT	-	line 3: gedc-vers: 5.5 instead of 5.5.1
 case/G5-PLACE-HIERARCHY	roundtrip	TS13	LOST	-	tag TYPE (x1); text Acquisition (x1)
 case/G5-RECORD-32K	output:record-size	TS27	NONCONFORMANT	-	line 10: record-size: 39674 bytes
 case/G5-RESI-ADDR-PLAC	keep	TS13	LOST	-	missing line `2 ADDR the address`
@@ -96,29 +83,16 @@ case/G5-SEX-LOWER	parse	TS3	FATAL	-	Parse error at line 7: Unknown gender value 
 case/G5-SOUR-TEXT-CITATION	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Example"
 case/G5-SUBN	keep	TS13	LOST	-	missing line `1 ORDI yes`
 case/G5-SUBN	roundtrip	TS13	DIFF	-	- HEAD#0/SUBN = "@SN@"; - SUBN@SN@ = ""; - SUBN@SN@/ANCE = "4"; - SUBN@SN@/DESC = "4"; - SUBN@SN@/FAMF = "Family file"; - SUBN@SN@/ORDI = "yes"; - SUBN@SN@/R...
-case/G5-WRITE-NO-CHAR-MISMATCH	lacks	TS18	PRESENT	-	output has `CHAR UNICODE`
-case/G5-WRITE-NO-CHAR-MISMATCH	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
-case/G5-XREF-INVALID	output:pointer-syntax	TS23	NONCONFORMANT	-	line 14: pointer-syntax: @IABCDEFGHIJKLMNOPQRSTUVWXYZ0123@
-case/G5-XREF-INVALID	output:xref-syntax	TS23	NONCONFORMANT	-	line 6: xref-syntax: @#I1@
 case/G5-XREF-WITH-SPACE	parse	TS7	FATAL	-	Parse error at line 10: Unhandled tag ref@
-case/G7-AT-ONLY-FIRST	keep	TS20	LOST	-	missing line `0 @N1@ SNOTE @@@@@ has four`
-case/G7-AT-ONLY-FIRST	roundtrip	TS20	DIFF	-	- SNOTE#0 = "@@@@ has four"; + SNOTE#0 = "@@@ has four"
-case/G7-BANNED-C0	output:banned-char	TS22	NONCONFORMANT	-	line 6: banned-char: U+0007
 case/G7-CONT-AFTER-SUB	roundtrip	TS16	LOST	-	tag LANG (x1); text b (x1); text en (x1)
-case/G7-CONT-ORPHAN	output:cont-position	TS16	NONCONFORMANT	-	line 7: cont-position: after another substructure
-case/G7-CONT-ORPHAN	output:payload-enum	TS16	NONCONFORMANT	-	line 6: payload-enum: SEX "F\norphan text": not in enumset-SEX
 case/G7-CONT-UNDER-PTR	keep	TS16	LOST	-	missing line `1 FAMC @F1@`
-case/G7-CONT-UNDER-PTR	output:line-syntax	TS16	NONCONFORMANT	-	line 7: line-syntax: stray text
 case/G7-CONT-UNDER-PTR	output:payload-pointer	TS16	NONCONFORMANT	-	line 6: payload-pointer: FAMC "@F1@\nstray text": text where a pointer is required
-case/G7-CONT-UNDER-PTR	reparse	TS16	FATAL	-	Parse error at line 6: Expected digit for level number
 case/G7-CONT-WRONG-LEVEL	keep	TS16	LOST	-	missing line `2 CONT b`; model lacks `a\nb`
-case/G7-CONT-WRONG-LEVEL	output:cont-position	TS16	NONCONFORMANT	-	line 7: cont-position: after another substructure
 case/G7-COORD-INVALID	keep	TS14	LOST	-	model lacks `91.5N`; model lacks `W200`
 case/G7-COORD-INVALID	output:payload-coordinate	TS34	NONCONFORMANT	-	line 10: payload-coordinate: LONG "W200": not a coordinate
 case/G7-CORP-CONTACTS	keep	TS13	LOST	-	missing line `3 PHON +1 555 0100`; missing line `3 EMAIL a@example.com`; missing line `3 WWW https://example.com`
 case/G7-DANGLING	output:pointer-dangling	TS34	NONCONFORMANT	-	line 6: pointer-dangling: @F9@
 case/G7-DATE-INVALID	output:payload-date	TS34	NONCONFORMANT	-	line 9: payload-date: DATE "BET 2000": not in the date grammar
-case/G7-DUP-XREF	output:xref-duplicate	TS23	NONCONFORMANT	-	line 7: xref-duplicate: @I1@ (first on line 5)
 case/G7-ENUM-EXT	parse	TS3	FATAL	-	Parse error at line 5: Unknown gender value _EXTVAL
 case/G7-ENUM-UPPER	keep	TS19	LOST	-	missing line `2 PEDI ADOPTED`; missing line `2 STAT CHALLENGED`
 case/G7-ENUM-UPPER	output:payload-enum	TS34	NONCONFORMANT	-	line 7: payload-enum: PEDI "adopted": not in enumset-PEDI
@@ -135,9 +109,6 @@ case/G7-HEAD-PLAC-FORM	roundtrip	TS13	DIFF	-	- HEAD#0/PLAC = ""; - HEAD#0/PLAC/F
 case/G7-LANG-TAGS	roundtrip	TS12	DIFF	-	- SUBM#0/LANG = "en"; - SUBM#0/LANG[1] = "ja"; + SUBM#0/LANG = "ja"
 case/G7-LDS-STAT	keep	TS13	LOST	-	missing line `2 STAT EXCLUDED`; missing line `2 STAT PRE_1970`
 case/G7-LDS-STAT	roundtrip	TS13	DIFF	-	- INDI#0/BAPL/STAT = "PRE_1970"; - INDI#0/BAPL/STAT/DATE = "27 MAR 2022"; - INDI#0/INIL/STAT = "EXCLUDED"; - INDI#0/INIL/STAT/DATE = "27 MAR 2022"
-case/G7-LONG-URL	keep	TS21	LOST	-	missing line `1 NOTE https://example.com/a/very/long/path/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa...
-case/G7-LONG-URL	lacks	TS21	PRESENT	-	output has `CONC`
-case/G7-LONG-URL	output:conc	TS21	NONCONFORMANT	-	line 7: conc: 2 CONC aaaaaaaaaaaaa/end
 case/G7-NAME-INVALID	output:payload-name	TS34	NONCONFORMANT	-	line 6: payload-name: NAME "a/b/c/d": slashes must come in one pair
 case/G7-NAME-NO-INVENTED-PIECES	lacks	TS24	PRESENT	-	output has `SURN`
 case/G7-NAME-NO-INVENTED-PIECES	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Doe"
@@ -145,7 +116,6 @@ case/G7-NAME-PIECES-MULTI	keep	TS12	LOST	-	missing line `2 GIVN givn1`; missing 
 case/G7-NAME-PIECES-MULTI	roundtrip	TS12	DIFF	-	- INDI#0/NAME/GIVN = "givn1"; - INDI#0/NAME/GIVN[1] = "givn2"; - INDI#0/NAME/SURN = "surn1"; - INDI#0/NAME/SURN[1] = "surn2"; + INDI#0/NAME/GIVN = "givn2"; +...
 case/G7-NCHI-FAM	keep	TS13	LOST	-	missing line `2 DATE 1900`
 case/G7-NCHI-FAM	roundtrip	TS13	DIFF	-	- FAM#0/NCHI/DATE = "1900"; - FAM#0/NCHI/TYPE = "counted"
-case/G7-NO-GEDC-FORM	lacks	TS17	PRESENT	-	output has `FORM LINEAGE`
 case/G7-NOTE-TRAN	keep	TS13	LOST	-	missing line `2 MIME text/html`; missing line `2 TRAN y`; missing line `3 LANG fr`
 case/G7-NOTE-TRAN	roundtrip	TS13	DIFF	-	- INDI#0/NOTE/LANG = "en"; - INDI#0/NOTE/MIME = "text/html"; - INDI#0/NOTE/TRAN = "y"; - INDI#0/NOTE/TRAN/LANG = "fr"
 case/G7-OBJE-LINK-TITL-CROP	keep	TS13	LOST	-	missing line `2 TITL party`
@@ -167,26 +137,13 @@ case/G7-TWO-SPACES-PAYLOAD	keep	TS15	LOST	-	missing line `1 NOTE  leading space 
 case/G7-TWO-SPACES-PAYLOAD	roundtrip	TS15	DIFF	-	- INDI#0/NOTE = " leading space kept"; + INDI#0/NOTE = "leading space kept"
 case/G7-UID-MULTI	keep	TS12	LOST	-	missing line `1 UID 0b0f2b0a-0000-4000-8000-000000000001`; missing line `1 REFN a`
 case/G7-UID-MULTI	roundtrip	TS12	DIFF	-	- INDI#0/REFN = "a"; - INDI#0/REFN[1] = "b"; - INDI#0/UID = "0b0f2b0a-0000-4000-8000-000000000001"; - INDI#0/UID[1] = "0b0f2b0a-0000-4000-8000-000000000002";...
-case/G7-VOID-AS-XREF	lacks	TS23	PRESENT	-	output has `0 @VOID@`
-case/G7-VOID-AS-XREF	output:xref-syntax	TS23	NONCONFORMANT	-	line 5: xref-syntax: @VOID@
-case/G7-XREF-INVALID	output:escape	TS23	NONCONFORMANT	-	line 10: escape: @I#1@
-case/G7-XREF-INVALID	output:payload-pointer	TS23	NONCONFORMANT	-	line 10: payload-pointer: WIFE "@I#1@": text where a pointer is required
-case/G7-XREF-INVALID	output:pointer-syntax	TS23	NONCONFORMANT	-	line 10: pointer-syntax: @I#1@
-case/G7-XREF-INVALID	output:xref-syntax	TS23	NONCONFORMANT	-	line 5: xref-syntax: @I#1@
-case/G7-XREF-LOWER	output:xref-syntax	TS23	NONCONFORMANT	-	line 5: xref-syntax: @i1@
+case/G7-XREF-INVALID	roundtrip	TS23	LOST	-	the semantic reader takes the 7.0-invalid pointer @I#1@ as text; the writer renames it to @I_1@ with its record, as the case asks
 case/G71-READ-WRITE	keep	TS13	LOST	-	missing line `2 KIND RESEARCH`
 case/G71-READ-WRITE	roundtrip	TS13	DIFF	-	- INDI#0/NOTE/KIND = "RESEARCH"
-case/X-BANNED-OUT	lacks	TS22	PRESENT	-	output has `\u{7}`
-case/X-BANNED-OUT	output:banned-char	TS22	NONCONFORMANT	-	line 6: banned-char: U+0007
-case/X-CUSTOM-AFTER-PTR-CITATION	parse	TS2	FATAL	-	Parse error at line 11: Unhandled Continuation Token: CustomTag("_LINK")
+case/X-CUSTOM-AFTER-PTR-CITATION	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Example"
 case/X-DUP-XREF-UNIQUE	lacks	TS23	PRESENT	-	output has `@I1@ INDI`
-case/X-DUP-XREF-UNIQUE	output:xref-duplicate	TS23	NONCONFORMANT	-	line 7: xref-duplicate: @I1@ (first on line 5)
-convert/*	output:eol-final	TS32	NONCONFORMANT	-	every output of the family
-convert/*	output:v7-char	TS17	NONCONFORMANT	-	every output of the family
-convert/*	output:v7-gedc-form	TS17	NONCONFORMANT	-	every output of the family
 convert/age-valid	convert	TS25	DIFF	-	48 differences: - INDI#0/DEAT = ""; - INDI#0/DEAT/AGE = "0y"; - INDI#0/DEAT/AGE/PHRASE = "Stillborn"; - INDI#0/EVEN/AGE = "<8y"; - INDI#0/EVEN[10]/AGE = "0y"...
 convert/atsign	convert	TS25	DIFF	-	24 differences: - SNOTE#10 = "JULIAN  date escape two spaces"; - SNOTE#11 = "non-leading JULIAN date escape"; - SNOTE#12 = "JULIAN_AND_SUCH date escape inter...
-convert/atsign	output:escape	TS25	NONCONFORMANT	-	line 10: escape: @ one leading
 convert/date-all	convert	TS25	DIFF	-	8292 differences: - INDI#0/BIRT[10]/DATE = "NOV 1401 BCE"; - INDI#0/BIRT[10]/DATE/PHRASE = "NOV 1401/8 B.C."; - INDI#0/BIRT[11]/DATE = "8 MAR 1401 BCE"; - IN...
 convert/date-all	output:payload-date	TS25	NONCONFORMANT	-	line 1002: payload-date: DATE "AFT UNKNOWN _MONTH 11": not in the date grammar
 convert/date-dual-invalid	convert	TS25	DIFF	-	252 differences: - INDI#0/BIRT/DATE = "BET 1701 AND 1799"; - INDI#0/BIRT/DATE/PHRASE = "1701/99"; - INDI#0/BIRT[10]/DATE = "8 JAN 1703"; - INDI#0/BIRT[10]/DA...
@@ -205,7 +162,6 @@ convert/obje-1	output:payload-media-type	TS25	NONCONFORMANT	-	line 14: payload-m
 convert/obje-1	output:payload-pointer	TS25	NONCONFORMANT	-	line 8: payload-pointer: OBJE "": text where a pointer is required
 convert/obsolete-1	convert	TS25	DIFF	-	4 differences: + SUBN#0 = ""; + SUBN#0/ANCE = "0"; + SUBN#0/DESC = "0"; + SUBN#0/FAMF = "Example file"
 convert/obsolete-1	output:misplaced	TS25	NONCONFORMANT	-	line 10: misplaced: record SUBN
-convert/obsolete-1	output:xref-syntax	TS25	NONCONFORMANT	-	line 10: xref-syntax: @submission@
 convert/pedi-1	convert	TS25	DIFF	-	2 differences: - INDI@1@/FAMC/PEDI = "BIRTH"; + INDI@1@/FAMC/PEDI = "birth"
 convert/pedi-1	output:payload-enum	TS25	NONCONFORMANT	-	line 13: payload-enum: PEDI "birth": not in enumset-PEDI
 convert/rela_1	convert	TS25	DIFF	-	5 differences: - INDI@I1@/ASSO/ROLE = "NGHBR"; - INDI@I2@/ASSO[1]/ROLE = "FRIEND"; + INDI@I1@/ASSO/ROLE = "OTHER"; + INDI@I2@/ASSO[1]/ROLE = "OTHER"; + INDI@...
@@ -213,16 +169,11 @@ convert/sour-1	convert	TS25	DIFF	-	24 differences: - INDI#0/SOUR = "@X1@"; - IND
 convert/sour-1	output:misplaced	TS25	NONCONFORMANT	-	line 12: misplaced: TEXT under SOUR
 convert/sour-1	output:payload-pointer	TS25	NONCONFORMANT	-	line 11: payload-pointer: SOUR "A source described inline": text where a pointer is required
 convert/xref-case	parse	TS7	FATAL	-	Parse error at line 13: Unhandled tag ref@
-corpus/*	output:eol-final	TS32	NONCONFORMANT	-	every output of the family
-corpus/*	output:v7-gedc-form	TS17	NONCONFORMANT	-	every output of the family
-corpus/familysearch/gedcom70/escapes.ged	output:escape	TS20	NONCONFORMANT	-	line 12: escape: @ one leading
 corpus/familysearch/gedcom70/escapes.ged	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Doe"
 corpus/familysearch/gedcom70/extension-record.ged	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Doe"
 corpus/familysearch/gedcom70/extensions.ged	parse	TS3	FATAL	-	Parse error at line 60: Unrecognized FamilyLink.pedigree code: _ENUMVAL
 corpus/familysearch/gedcom70/filename-1.ged	roundtrip	TS12	DIFF	-	- OBJE#0/FILE = "file:///unix/absolute"; - OBJE#0/FILE/FORM = "image/bmp"; - OBJE#0/FILE[10] = "MANIFEST.MF"; - OBJE#0/FILE[10]
-corpus/familysearch/gedcom70/lang.ged	output:conc	TS21	NONCONFORMANT	-	line 18: conc: 2 CONC h, Danish, Dogri, Dutch, English, Esperanto, Estonian, Faroese, Finnish, French, Georgian, German, G
 corpus/familysearch/gedcom70/lang.ged	roundtrip	TS12	DIFF	-	- SUBM#0/LANG = "en"; - SUBM#0/LANG[1] = "ja"; - SUBM#0/LANG[2] = "es"; - SUBM#1/LANG = "af"; - SUBM#1/LANG[10] = "bg"; - SUBM#1/LANG
-corpus/familysearch/gedcom70/long-url.ged	output:conc	TS21	NONCONFORMANT	-	line 10: conc: 2 CONC scing%20elit,%20sed%20do%20eiusmod%20tempor%20incididunt%20ut%20labore%20et%20dolore%20magna%20a
 corpus/familysearch/gedcom70/maximal70-lds.ged	roundtrip	TS24	DIFF	-	+ INDI@I1@/NAME/SURN = "de Allen"; + INDI@I1@/NAME[1]/SURN = "Doe"
 corpus/familysearch/gedcom70/maximal70-memories1.ged	roundtrip	TS12	DIFF	-	- OBJE@O1@/FILE = "file:///path/to/file1"; - OBJE@O1@/FILE/FORM = "text/plain"; - OBJE@O1@/FILE[1] = "media/original.m
 corpus/familysearch/gedcom70/maximal70-memories2.ged	roundtrip	TS12	DIFF	-	- OBJE@O1@/FILE = "file:///path/to/file1"; - OBJE@O1@/FILE/FORM = "text/plain"; - OBJE@O1@/FILE[1] = "media/original.m
@@ -241,33 +192,14 @@ corpus/familysearch/gedcom71/maximal71.gdz	parse	TS4	FATAL	-	GEDCOM error: Parse
 corpus/familysearch/gedcom71/maximal71.ged	parse	TS4	FATAL	-	Parse error at line 172: First individual of family already exists.
 corpus/familysearch/gedcom71/notes71.ged	roundtrip	TS13	DIFF	-	- SNOTE@3@/CHAN = ""; - SNOTE@3@/CHAN/DATE = "25 MAY 2021"; - SNOTE@4@/CHAN = ""; - SNOTE@4@/CHAN/DATE = "25 MAY 2021"; - SUBM#0/N
 corpus/familysearch/gedcom71/warnings71.ged	roundtrip	TS13	DIFF	-	- FAM#0/SLGS[1]/STAT = "EXCLUDED"; - FAM#0/SLGS[1]/STAT/DATE = "27 MAR 2022"; - FAM#0/SLGS[2]/STAT = "PRE_1970"; - FAM#0/SLGS[2
-encoding/*	output:eol-final	TS32	NONCONFORMANT	-	every output of the family
-encoding/*	output:head-required	TS33	NONCONFORMANT	-	every output of the family
-encoding/*	output:v7-gedc-form	TS17	NONCONFORMANT	-	every output of the family
-encoding/ansel-conc-diacritic	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ANSEL for UTF-8 output
-encoding/ansel-cr	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ANSEL for UTF-8 output
 encoding/ansel-cr	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Exemple"
-encoding/ansel-lf	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ANSEL for UTF-8 output
 encoding/ansel-lf	roundtrip	TS30	DIFF	-	- INDI#0/NAME = "André /Exemple/"; + INDI#0/NAME = "Andre\u{301} /Exemple/"; + INDI#0/NAME/SURN = "Exemple"
-encoding/ansi-cp1252	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ANSI for UTF-8 output
-encoding/ascii-declared-latin1-bytes	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ASCII for UTF-8 output
-encoding/cp1252-lower-case-label	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: cp1252 for UTF-8 output
 encoding/eol-lfcr	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Exemple"
-encoding/ibmpc-cp437	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: IBMPC for UTF-8 output
-encoding/latin1-declared	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ISO-8859-1 for UTF-8 output
-encoding/latin9-euro	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ISO-8859-15 for UTF-8 output
-encoding/macintosh	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: MACINTOSH for UTF-8 output
-encoding/utf16be-crlf	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
 encoding/utf16be-crlf	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Exemple"
-encoding/utf16le-cr	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
 encoding/utf16le-cr	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Exemple"
-encoding/utf16le-nobom	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
 encoding/utf16le-nobom	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Exemple"
 encoding/utf8-bom-v7-crlf	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Exemple"
 encoding/utf8-cr	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Exemple"
-encoding/utf8-mislabel-unicode	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
-encoding/windows-1252-euro	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: WINDOWS-1252 for UTF-8 output
-enum551/*	output:eol-final	TS32	NONCONFORMANT	-	every output of the family
 enum551/*/EVENT_DETAIL.RESN/Confidential	enum	TS19	CHANGED	-	49 superstructures; e.g. now "Confidential"
 enum551/*/EVENT_DETAIL.RESN/Confidential	output:payload-enum	TS19	NONCONFORMANT	-	49 superstructures; e.g. line 17: payload-enum: RESN "Confidential": not in RESTRICTION_NOTICE
 enum551/*/EVENT_DETAIL.RESN/_EXTVAL	output:payload-enum	TS34	NONCONFORMANT	-	49 superstructures; e.g. line 17: payload-enum: RESN "_EXTVAL": not in RESTRICTION_NOTICE
@@ -341,8 +273,6 @@ enum551/SUBMISSION_RECORD.SUBN/SUBMISSION_RECORD.SUBN.ORDI/Yes	enum	TS13	LOST	-	
 enum551/SUBMISSION_RECORD.SUBN/SUBMISSION_RECORD.SUBN.ORDI/_EXTVAL	enum	TS13	LOST	-	tag ORDI (x1); text _EXTVAL (x1)
 enum551/SUBMISSION_RECORD.SUBN/SUBMISSION_RECORD.SUBN.ORDI/no	enum	TS13	LOST	-	SUBN@P0@/ORDI = "no" not written
 enum551/SUBMISSION_RECORD.SUBN/SUBMISSION_RECORD.SUBN.ORDI/yes	enum	TS13	LOST	-	SUBN@P0@/ORDI = "yes" not written
-enum70/*	output:eol-final	TS32	NONCONFORMANT	-	every output of the family
-enum70/*	output:v7-gedc-form	TS17	NONCONFORMANT	-	every output of the family
 enum70/*/ord-STAT/DNS_CAN	enum	TS13	LOST	-	6 superstructures; e.g. INDI@P0@/BAPL/STAT = "DNS_CAN" not written
 enum70/*/ord-STAT/EXCLUDED	enum	TS13	LOST	-	6 superstructures; e.g. INDI@P0@/BAPL/STAT = "EXCLUDED" not written
 enum70/*/ord-STAT/PRE_1970	enum	TS13	LOST	-	6 superstructures; e.g. INDI@P0@/BAPL/STAT = "PRE_1970" not written
@@ -388,8 +318,6 @@ enum70/INDI-FAMC/PEDI/_EXTVAL	parse	TS3	FATAL	-	Parse error at line 7: Unrecogni
 enum70/INDI-NAME/NAME-TYPE/BIRTH	enum	TS13	CHANGED	-	now "AKA"
 enum70/SOUR/QUAY/_EXTVAL	parse	TS3	FATAL	-	Parse error at line 6: Unknown CertaintyAssessment value: _EXTVAL; level: 2
 enum70/record-INDI/SEX/_EXTVAL	parse	TS3	FATAL	-	Parse error at line 5: Unknown gender value _EXTVAL
-enum71/*	output:eol-final	TS32	NONCONFORMANT	-	every output of the family
-enum71/*	output:v7-gedc-form	TS17	NONCONFORMANT	-	every output of the family
 enum71/*/ord-STAT/DNS_CAN	enum	TS13	LOST	-	6 superstructures; e.g. INDI@P0@/BAPL/STAT = "DNS_CAN" not written
 enum71/*/ord-STAT/EXCLUDED	enum	TS13	LOST	-	6 superstructures; e.g. INDI@P0@/BAPL/STAT = "EXCLUDED" not written
 enum71/*/ord-STAT/PRE_1970	enum	TS13	LOST	-	6 superstructures; e.g. INDI@P0@/BAPL/STAT = "PRE_1970" not written
@@ -443,44 +371,23 @@ enum71/NOTE/NOTE-KIND/TODO	enum	TS13	LOST	-	FAM@P0@/NOTE/KIND = "TODO" not writt
 enum71/NOTE/NOTE-KIND/_EXTVAL	enum	TS13	LOST	-	FAM@P0@/NOTE/KIND = "_EXTVAL" not written
 enum71/SOUR/QUAY/_EXTVAL	parse	TS3	FATAL	-	Parse error at line 6: Unknown CertaintyAssessment value: _EXTVAL; level: 2
 enum71/record-INDI/SEX/_EXTVAL	parse	TS3	FATAL	-	Parse error at line 5: Unknown gender value _EXTVAL
-feature/*	output:eol-final	TS32	NONCONFORMANT	-	every output of the family
-feature/*	output:head-required	TS33	NONCONFORMANT	-	every output of the family
-feature/*	output:v7-char	TS17	NONCONFORMANT	-	every output of the family
-feature/*	output:v7-gedc-form	TS17	NONCONFORMANT	-	every output of the family
 feature/read/extensions70	parse	TS3	FATAL	-	Parse error at line 21: Unrecognized FamilyLink.pedigree code: _ENUMVAL
-feature/write-551/test-files-5-char_utf16le-2	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
 feature/write-551/test-files-7-date-all	output:payload-date	TS25	NONCONFORMANT	-	line 1007: payload-date: DATE "BET 1950 AND 302 BCE": not in the date grammar
 feature/write-551/test-files-7-date-all	output:record-size	TS27	NONCONFORMANT	-	line 4876: record-size: 128973 bytes
 feature/write-551/test-files-7-obje-1	output:payload-enum	TS25	NONCONFORMANT	-	line 10: payload-enum: FORM "audio/wav": not in MULTIMEDIA_FORMAT
 feature/write-70/maximal551	output:cardinality-min	TS25	NONCONFORMANT	-	line 262: cardinality-min: TYPE under FACT: missing
-feature/write-70/maximal551	output:conc	TS25	NONCONFORMANT	-	line 149: conc: 2 CONC continued
-feature/write-70/maximal551	output:escape	TS25	NONCONFORMANT	-	line 121: escape: @#DGREGORIAN@ 15 APR 1699/00
 feature/write-70/maximal551	output:misplaced	TS25	NONCONFORMANT	-	line 210: misplaced: TEXT under SOUR
 feature/write-70/maximal551	output:payload-enum	TS25	NONCONFORMANT	-	line 179: payload-enum: STAT "PRE-1970": not in enumset-ord-STAT
 feature/write-70/maximal551	output:payload-file-path	TS25	NONCONFORMANT	-	line 651: payload-file-path: FILE "Value FILE A": not a URI reference
 feature/write-70/maximal551	output:payload-media-type	TS25	NONCONFORMANT	-	line 640: payload-media-type: FORM "wav": not a media type
 feature/write-70/maximal551	output:payload-pointer	TS25	NONCONFORMANT	-	line 208: payload-pointer: SOUR "Free text source description\nsecond line": text where a pointer is required
-fixture/*	output:eol-final	TS32	NONCONFORMANT	-	every output of the family
 fixture/extensions70	parse	TS3	FATAL	-	Parse error at line 21: Unrecognized FamilyLink.pedigree code: _ENUMVAL
 fixture/maximal551	roundtrip	TS13	DIFF	-	- FAM#21/OBJE/FILE = "Value FILE A"; - FAM#21/OBJE/FILE[1] = "Value FILE A"; - FAM#21/OBJE/FILE[1]/FORM = "bmp"; - FAM#21/OBJE/FILE[2] = "Value FILE B"; - FA...
-matrix/*	output:eol-final	TS32	NONCONFORMANT	-	every output of the family
-matrix/ansel-cr	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ANSEL for UTF-8 output
-matrix/ansel-crlf	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ANSEL for UTF-8 output
-matrix/ansel-lf	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ANSEL for UTF-8 output
-matrix/latin1-cr	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ISO-8859-1 for UTF-8 output
-matrix/latin1-crlf	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ISO-8859-1 for UTF-8 output
-matrix/latin1-lf	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ISO-8859-1 for UTF-8 output
-matrix/utf16be-cr	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
 matrix/utf16be-cr	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Пример"
-matrix/utf16be-crlf	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
 matrix/utf16be-crlf	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Пример"
-matrix/utf16be-lf	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
 matrix/utf16be-lf	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Пример"
-matrix/utf16le-cr	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
 matrix/utf16le-cr	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Пример"
-matrix/utf16le-crlf	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
 matrix/utf16le-crlf	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Пример"
-matrix/utf16le-lf	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
 matrix/utf16le-lf	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Пример"
 matrix/utf8-bom-cr	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Пример"
 matrix/utf8-bom-crlf	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Пример"
@@ -488,8 +395,6 @@ matrix/utf8-bom-lf	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Пример"
 matrix/utf8-cr	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Пример"
 matrix/utf8-crlf	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Пример"
 matrix/utf8-lf	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Пример"
-payload/*	output:eol-final	TS32	NONCONFORMANT	-	every output of the family
-payload/*	output:v7-gedc-form	TS17	NONCONFORMANT	-	every output of the family
 payload/551/age/invalid11	output:payload-age	TS34	NONCONFORMANT	-	line 12: payload-age: AGE "about ten": not in the age grammar
 payload/551/date/invalid14	output:payload-date	TS34	NONCONFORMANT	-	line 12: payload-date: DATE "1 jan 1900": not in the date grammar
 payload/551/date/invalid16	output:payload-date	TS34	NONCONFORMANT	-	line 12: payload-date: DATE "BET 1900": not in the date grammar
@@ -546,7 +451,6 @@ payload/70/uri/invalid1	payload	TS13	LOST	-	tag TYPE (x1); text not a uri (x1)
 payload/70/uri/valid0	payload	TS13	LOST	-	INDI@I1@/EXID/TYPE = "https://example.com/id" not written
 payload/70/y-or-null/invalid1	output:payload-y	TS34	NONCONFORMANT	-	line 6: payload-y: BIRT "N": only Y or nothing
 payload/70/y-or-null/invalid2	output:payload-y	TS34	NONCONFORMANT	-	line 6: payload-y: BIRT "yes": only Y or nothing
-place551/*	output:eol-final	TS32	NONCONFORMANT	-	every output of the family
 place551/CHANGE_DATE.CHAN/NOTE_STRUCTURE.NOTE	place	TS13	LOST	-	FAM@P0@/CHAN/NOTE = "@N1@"; FAM@P0@/CHAN/NOTE = "@N2@" not written
 place551/CHANGE_DATE.CHAN/NOTE_STRUCTURE.NOTE#2	place	TS13	LOST	-	FAM@P0@/CHAN/NOTE = "Value NOTE A"; FAM@P0@/CHAN/NOTE = "Value NOTE B" not written
 place551/FAM_RECORD.FAM/FAM_RECORD.FAM.REFN	place	TS12	CARD	-	1/2 kept
@@ -599,8 +503,6 @@ place551/SUBMISSION_RECORD.SUBN/CHANGE_DATE.CHAN	place	TS13	LOST	-	SUBN@P0@/CHAN
 place551/SUBMISSION_RECORD.SUBN/SUBMISSION_RECORD.SUBN.ORDI	place	TS13	LOST	-	SUBN@P0@/ORDI = "yes" not written
 place551/SUBMISSION_RECORD.SUBN/SUBMISSION_RECORD.SUBN.RIN	place	TS13	LOST	-	SUBN@P0@/RIN = "Value RIN A" not written
 place551/SUBMITTER_RECORD.SUBM/SUBMITTER_RECORD.SUBM.LANG	place	TS12	CARD	-	1/2 kept
-place70/*	output:eol-final	TS32	NONCONFORMANT	-	every output of the family
-place70/*	output:v7-gedc-form	TS17	NONCONFORMANT	-	every output of the family
 place70/ALIA/PHRASE	place	TS13	LOST	-	INDI@P0@/ALIA/PHRASE = "Value PHRASE A" not written
 place70/CHAN/NOTE	place	TS13	LOST	-	FAM@P0@/CHAN/NOTE = "Value NOTE A"; FAM@P0@/CHAN/NOTE = "Value NOTE B" not written
 place70/CHAN/SNOTE	place	TS13	LOST	-	FAM@P0@/CHAN/SNOTE = "@N1@"; FAM@P0@/CHAN/SNOTE = "@N2@" not written
@@ -691,8 +593,6 @@ place70/record-SOUR/UID	place	TS12	CARD	-	1/2 kept
 place70/record-SUBM/REFN	place	TS12	CARD	-	1/2 kept
 place70/record-SUBM/SUBM-LANG	place	TS12	CARD	-	1/2 kept
 place70/record-SUBM/UID	place	TS12	CARD	-	1/2 kept
-place71/*	output:eol-final	TS32	NONCONFORMANT	-	every output of the family
-place71/*	output:v7-gedc-form	TS17	NONCONFORMANT	-	every output of the family
 place71/ALIA/PHRASE	place	TS13	LOST	-	INDI@P0@/ALIA/PHRASE = "Value PHRASE A" not written
 place71/CHAN/NOTE	place	TS13	LOST	-	FAM@P0@/CHAN/NOTE = "Value NOTE A"; FAM@P0@/CHAN/NOTE = "Value NOTE B" not written
 place71/CHAN/SNOTE	place	TS13	LOST	-	FAM@P0@/CHAN/SNOTE = "@N1@"; FAM@P0@/CHAN/SNOTE = "@N2@" not written
@@ -788,37 +688,20 @@ place71/record-SUBM/SUBM-LANG	place	TS12	CARD	-	1/2 kept
 place71/record-SUBM/UID	place	TS12	CARD	-	1/2 kept
 references/G7-PHRASE-PTRS	validate	TS26	FATAL	-	Invalid GEDCOM format: Family references non-existent individual: @VOID@
 references/G7-VOIDPTR	validate	TS26	FATAL	-	Invalid GEDCOM format: Individual references non-existent family: @VOID@
-vendored/*	output:eol-final	TS32	NONCONFORMANT	-	every output of the family
-vendored/*	output:head-required	TS33	NONCONFORMANT	-	every output of the family
-vendored/*	output:v7-gedc-form	TS17	NONCONFORMANT	-	every output of the family
 vendored/5/age-invalid	output:payload-unexpected	TS34	NONCONFORMANT	-	line 101: payload-unexpected: EVEN "when > 0 M": this structure takes no payload
 vendored/5/age-valid	output:payload-age	TS34	NONCONFORMANT	-	line 13: payload-age: AGE "child": not in the age grammar
 vendored/5/age-valid	output:payload-unexpected	TS34	NONCONFORMANT	-	line 101: payload-unexpected: EVEN "when 11m": this structure takes no payload
-vendored/5/atsign	keep	TS20	LOST	-	model lacks `doubled@internal no space`
-vendored/5/atsign	output:escape	TS20	NONCONFORMANT	-	line 10: escape: @ one leading
-vendored/5/char_ascii_1	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ASCII for UTF-8 output
-vendored/5/char_ascii_2	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: LATIN1 for UTF-8 output
-vendored/5/char_utf16be-1	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
-vendored/5/char_utf16be-2	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
-vendored/5/char_utf16le-1	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
-vendored/5/char_utf16le-2	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
-vendored/5/char_utf8-2	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
 vendored/5/date-all	output:payload-date	TS34	NONCONFORMANT	-	line 1026: payload-date: DATE "BET 1950 AND GREGORIAN 302": not in the date grammar
 vendored/5/date-all	output:record-size	TS27	NONCONFORMANT	-	line 4877: record-size: 131517 bytes
 vendored/5/date-dual-invalid	output:payload-date	TS34	NONCONFORMANT	-	line 100: payload-date: DATE "JAN 1751/9": not in the date grammar
-vendored/5/enum-ext	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ASCII for UTF-8 output
 vendored/5/enum-ext	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Family"; + INDI#0/NAME[1]/SURN = "Kong"
-vendored/5/filename-1	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ASCII for UTF-8 output
 vendored/5/filename-1	roundtrip	TS12	DIFF	-	- OBJE#0/FILE = "/unix/absolute"; - OBJE#0/FILE[1] = "c:\\windows\\absolute"; - OBJE#0/FILE[1]/FORM = "bmp"; - OBJE#0/FILE[2] = "\\\\windows\\server"; - OBJE...
 vendored/5/lang-all	roundtrip	TS12	DIFF	-	- SUBM#0/LANG = "English"; - SUBM#0/LANG[1] = "Japanese"; - SUBM#0/LANG[2] = "Spanish"; + SUBM#0/LANG = "Spanish"
 vendored/5/notes-1	roundtrip	TS13	DIFF	-	- NOTE@3@/CHAN = ""; - NOTE@3@/CHAN/DATE = "25 MAY 2021"; - NOTE@4@/CHAN = ""; - NOTE@4@/CHAN/DATE = "25 MAY 2021"
 vendored/5/obje-1	output:payload-enum	TS34	NONCONFORMANT	-	line 10: payload-enum: FORM "other": not in MULTIMEDIA_FORMAT
 vendored/5/obje-1	roundtrip	TS12	LOST	-	tag FILE (x2); tag FORM (x2); tag MEDI (x2); tag NOTE (x1); tag TITL (x1); tag TYPE (x1); text Example Image File (x1); text example.jpg (x1); text gifts.web...
-vendored/5/obsolete-1	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ASCII for UTF-8 output
 vendored/5/obsolete-1	roundtrip	TS13	DIFF	-	- HEAD#0/SUBN = "@submission@"; - SUBN@submission@ = ""; - SUBN@submission@/ANCE = "0"; - SUBN@submission@/CHAN = ""; - SUBN@submission@/CHAN/DATE = "24 DEC ...
-vendored/5/rela_1	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ASCII for UTF-8 output
 vendored/5/xref-case	parse	TS7	FATAL	-	Parse error at line 13: Unhandled tag ref@
-vendored/7/atsign	output:escape	TS20	NONCONFORMANT	-	line 10: escape: @ two leading
 vendored/7/enum-ext	roundtrip	TS13	DIFF	-	- INDI#0/NAME[1]/TYPE/PHRASE = "Screen"; + INDI#0/NAME/SURN = "Family"; + INDI#0/NAME[1]/SURN = "Kong"
 vendored/7/filename-1	roundtrip	TS12	DIFF	-	- OBJE#0/FILE = "file:///unix/absolute"; - OBJE#0/FILE[1] = "file:///c:/windows/absolute"; - OBJE#0/FILE[1]/FORM = "image/bmp"; - OBJE#0/FILE[2] = "file://wi...
 vendored/7/lang-all	roundtrip	TS12	DIFF	-	- SUBM#0/LANG = "en"; - SUBM#0/LANG[1] = "ja"; - SUBM#0/LANG[2] = "es"; + SUBM#0/LANG = "es"

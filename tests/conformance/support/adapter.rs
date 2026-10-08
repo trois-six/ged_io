@@ -5,7 +5,7 @@
 //! and what reads back. When the crate's types or entry points change, this
 //! file is the one to update; the cases, tables and checks stay as they are.
 
-use ged_io::{GedcomBuilder, GedcomWriter};
+use ged_io::{GedcomBuilder, GedcomVersion, GedcomWriter, LineEnding};
 use std::cell::Cell;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Once;
@@ -88,22 +88,31 @@ pub fn write_with(m: &Model, target: Target, eol: Option<&str>) -> Result<String
         let mut w = GedcomWriter::new();
         w = match target {
             Target::Same => w,
-            Target::V551 => w.gedcom_version("5.5.1"),
-            Target::V70 => w.gedcom_version("7.0"),
-            Target::V71 => w.gedcom_version("7.1"),
+            Target::V551 => w.gedcom_version(GedcomVersion::V5_5_1),
+            Target::V70 => w.gedcom_version(GedcomVersion::V7_0),
+            Target::V71 => w.gedcom_version(GedcomVersion::V7_1),
         };
         if let Some(eol) = eol {
-            w = w.line_ending(eol);
+            w = w.line_ending(match eol {
+                "\r\n" => LineEnding::CrLf,
+                "\r" => LineEnding::Cr,
+                _ => LineEnding::Lf,
+            });
         }
         w.write_to_string(&m.0).map_err(|e| e.to_string())
     })
 }
 
-/// Encodes written text into the bytes of a legacy output encoding.
-pub fn encode_ansel(text: &str) -> Result<Vec<u8>, String> {
+/// Writes the model as GEDCOM 5.5.1 bytes in ANSEL (`CHAR ANSEL`).
+pub fn write_ansel(m: &Model) -> Result<Vec<u8>, String> {
     guard(|| {
-        ged_io::encoding::encode_to_bytes(text, ged_io::GedcomEncoding::Ansel)
-            .map_err(|e| e.to_string())
+        let mut bytes = Vec::new();
+        GedcomWriter::new()
+            .gedcom_version(GedcomVersion::V5_5_1)
+            .output_encoding(ged_io::OutputEncoding::Ansel)
+            .write(&mut bytes, &m.0)
+            .map_err(|e| e.to_string())?;
+        Ok(bytes)
     })
 }
 
@@ -134,6 +143,13 @@ pub fn dump(m: &Model) -> String {
         }
     }
     d
+}
+
+/// The records of the model as text, header excluded.
+pub fn dump_records(m: &Model) -> String {
+    let mut data = m.0.clone();
+    data.header = None;
+    format!("{data:?}")
 }
 
 /// True when `needle` appears in the model. A needle is matched against the

@@ -95,7 +95,7 @@ Real-world GEDCOM files are messy. Granular error control and compat handling ar
 - Auto-fix known quirks: non-standard dates, misplaced tags, wrong nesting
 
 ### GEDCOM Sanitizer CLI
-- ✅ `GedcomWriter` round-trip support: `write_to_string()`, `write_to()`, configurable line endings / max line length / target version — `src/writer.rs:90`
+- ✅ `GedcomWriter`: `write()` to any `io::Write`, `write_to_string()`, `write_tree()`; one line emitter enforcing the 5.5.1 / 7.0 / 7.1 line rules (escapes, `CONT`/`CONC`, line length, identifiers, header); repairs reported — `src/writer/`
 - ✅ Lenient parsing already available via `.strict_mode(false)`
 - `ged_io --sanitize <file.ged>` CLI wrapper — parse with lenient/compat mode, write strict standard-compliant output
 
@@ -106,8 +106,8 @@ Real-world GEDCOM files are messy. Granular error control and compat handling ar
 Specialized but valuable for power users and tool builders. Significant substrate already in place from Phases 1–3 — remaining work is mostly CLI wiring and the 5.5.1↔7.0 transformation step.
 
 ### GEDCOM Version Conversion
-- ✅ `GedcomVersion` enum with feature predicates (`supports_conc`, `requires_utf8`, `supports_schema`, `supports_shared_notes`, `doubles_all_at_signs`, etc.) — `src/version.rs`
-- ✅ `detect_version()` and `VersionFeatures` for inspecting a parsed file
+- ✅ `GedcomVersion` (5.5.1, 7.0, 7.1) with a `VersionRules` table per version — `src/version.rs`
+- ✅ `detect_version()` for inspecting a file
 - `convert_to(GedcomVersion) -> Result<GedcomData>` — actual record transformation (SNOTE↔NOTE, SCHMA handling, `@` doubling, `CONC` collapse, encoding declarations)
 - `ged_io --convert-to 7.0 <file.ged>` / `--convert-to 5.5.1` CLI flag
 

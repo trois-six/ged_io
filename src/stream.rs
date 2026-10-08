@@ -298,6 +298,8 @@ pub struct GedcomStreamParser<R: BufRead> {
     line_number: u32,
     /// Whether we've finished parsing
     finished: bool,
+    /// The version the header declares, once the first record is read.
+    version: Option<crate::GedcomVersion>,
 }
 
 impl<R: BufRead> GedcomStreamParser<R> {
@@ -329,6 +331,7 @@ impl<R: BufRead> GedcomStreamParser<R> {
             document: String::with_capacity(4096),
             line_number: 0,
             finished: false,
+            version: None,
         })
     }
 
@@ -370,7 +373,11 @@ impl<R: BufRead> GedcomStreamParser<R> {
         self.document.push_str(&normalize_eol(&self.record));
         self.document.push_str("0 TRLR\n");
 
-        let mut tokenizer = Tokenizer::new(self.document.chars());
+        // The first record is the header, which declares the version.
+        let version = *self
+            .version
+            .get_or_insert_with(|| crate::detect_version(&self.record));
+        let mut tokenizer = Tokenizer::new(self.document.chars()).for_version(version);
         tokenizer.next_token()?;
 
         let Token::Level(level) = tokenizer.current_token else {

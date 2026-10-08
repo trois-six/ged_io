@@ -98,7 +98,7 @@ fn test_write_call_number_medium_per_version() {
     );
 
     let v7 = GedcomWriter::new()
-        .gedcom_version("7.0")
+        .gedcom_version(ged_io::GedcomVersion::V7_0)
         .write_to_string(&data)
         .unwrap();
     for expected in [
@@ -110,7 +110,7 @@ fn test_write_call_number_medium_per_version() {
     }
 
     let v551 = GedcomWriter::new()
-        .gedcom_version("5.5.1")
+        .gedcom_version(ged_io::GedcomVersion::V5_5_1)
         .write_to_string(&data)
         .unwrap();
     for expected in [

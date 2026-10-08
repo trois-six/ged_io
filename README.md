@@ -91,14 +91,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let content = std::fs::read_to_string("input.ged")?;
     let data = GedcomBuilder::new().build_from_str(&content)?;
 
-    // Write to new file
+    // Write to new file, in the version the data declares
     let writer = GedcomWriter::new();
     let output = writer.write_to_string(&data)?;
     std::fs::write("output.ged", output)?;
 
+    // Or stream GEDCOM 7.0 straight into a file
+    let file = std::io::BufWriter::new(std::fs::File::create("output70.ged")?);
+    let report = GedcomWriter::new()
+        .gedcom_version(ged_io::GedcomVersion::V7_0)
+        .write(file, &data)?;
+    for repair in &report.repairs {
+        println!("{repair}");
+    }
+
     Ok(())
 }
 ```
+
+The writer emits conformant lines in GEDCOM 5.5.1, 7.0 or 7.1, whatever the
+data holds:
+
+| Rule | 5.5.1 | 7.0 and 7.1 |
+|---|---|---|
+| Line length | At most 255 characters, the whole line counted; longer payloads continue with `CONC`, never split at a space or before a combining mark | No limit, no `CONC` |
+| Line breaks in text (LF, CR LF, CR) | `CONT` lines | `CONT` lines |
+| `@` in text | Every `@` doubled; `@#…@` escapes kept | A leading `@` doubled |
+| Identifiers | Valid (at most 22 characters) and unique | `@[A-Z0-9_]+@`, unique, never `@VOID@` |
+| Header | `GEDC.VERS`, `GEDC.FORM LINEAGE-LINKED`, `CHAR` naming the output encoding, `SOUR`, `SUBM` | `GEDC.VERS` only, no `FORM` or `CHAR` |
+| Last line | Terminated | Terminated |
+
+Pointers are written only from pointer fields, so text can never become a
+record or a pointer. Data that does not fit (an invalid or duplicate
+identifier, a tag outside the version's grammar, a control character) is
+rewritten into conformant form and reported as a `Repair`;
+`.on_nonconformant(RepairPolicy::Error)` makes the writer fail instead.
+`.output_encoding(OutputEncoding::Ansel)` (or `Utf16Le`, `Ascii`) writes
+5.5.1 bytes in another encoding, with a matching `CHAR`.
 
 ---
 
@@ -280,7 +309,7 @@ let data = GedcomBuilder::new()
 Lenient parsing policy (default):
 - Accepts common real-world quirks: a UTF-8 BOM, CR, LF, CR LF or LF CR line terminators (mixed or not), blank lines, a trailing newline at EOF, and bytes that contradict `HEAD.CHAR` (the bytes win; nothing fails to decode).
 - Allows missing `HEAD` and/or `TRLR` records (the parser stops cleanly at EOF).
-- Keeps writing strict: the writer always emits valid GEDCOM output (including `0 TRLR` without a final newline and using `CONT`/`CONC` for multiline text).
+- Keeps writing strict: the writer always emits conformant GEDCOM lines for the target version (every line terminated, `CONT` for line breaks, `CONC` only in 5.5.1, identifiers made valid and unique).
 
 | Option | Default | Description |
 |--------|---------|-------------|

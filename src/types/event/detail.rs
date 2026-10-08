@@ -195,15 +195,8 @@ impl std::fmt::Debug for Detail {
 
 impl Parser for Detail {
     fn parse(&mut self, tokenizer: &mut Tokenizer<'_>, level: u8) -> Result<(), GedcomError> {
-        tokenizer.next_token()?;
-
-        // handle value on event line
-        let mut value = String::new();
-
-        if let Token::LineValue(val) = &tokenizer.current_token {
-            value.push_str(val);
-            tokenizer.next_token()?;
-        }
+        // The value on the line, with its CONC/CONT continuations.
+        let value = tokenizer.take_line_value()?;
 
         let handle_subset = |tag: &str, tokenizer: &mut Tokenizer<'_>| -> Result<(), GedcomError> {
             let mut pointer: Option<String> = None;
