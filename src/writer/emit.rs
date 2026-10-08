@@ -705,6 +705,12 @@ pub(crate) fn candidate_xref(rules: &VersionRules, xref: &str) -> String {
     if rules.is_valid_xref(xref) {
         return xref.to_string();
     }
+    new_xref(rules, xref)
+}
+
+/// A new identifier made from any identifier, valid or not, in the stricter
+/// subset [`candidate_xref`] describes: what a duplicate is renamed from.
+pub(crate) fn new_xref(rules: &VersionRules, xref: &str) -> String {
     let id = xref.strip_prefix('@').unwrap_or(xref);
     let id = id.strip_suffix('@').unwrap_or(id);
     let mut out = String::with_capacity(id.len() + 3);
@@ -826,6 +832,9 @@ mod tests {
         assert_eq!(candidate_xref(&V551, "@#a b:c@"), "@X#a_b_c@");
         // Valid 5.5.1 identifiers with spaces, `!` or `:` stay (p. 13).
         assert_eq!(candidate_xref(&V551, "@NoTe ref@"), "@NoTe ref@");
+        assert_eq!(new_xref(&V551, "@NoTe ref@"), "@NoTe_ref@");
+        assert_eq!(new_xref(&V551, "@I1!2@"), "@I1_2@");
+        assert_eq!(new_xref(&V70, "@I1@"), "@I1@");
         let long = candidate_xref(&V551, "@IABCDEFGHIJKLMNOPQRSTUVWXYZ0123@");
         assert!(V551.is_valid_xref(&long), "{long}");
         assert!(is_valid_pointer(&V551, "@I1!2@"));

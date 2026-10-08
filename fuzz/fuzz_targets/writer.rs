@@ -122,8 +122,10 @@ fuzz_target!(|data: &[u8]| {
         let out = String::from_utf8(bytes).expect("UTF-8");
         check_lines(&out, version);
         let written = records(&out) - 2; // HEAD and TRLR
+        // 5.5.1 adds a submitter record when there is none, and the
+        // conformance repair moves notes out of records over 32K.
         assert!(
-            written == kept || (version.rules().max_line_length().is_some() && written == kept + 1),
+            written == kept || (version.rules().max_line_length().is_some() && written > kept),
             "{written} records written for {kept}"
         );
         assert_eq!(parse_tree(&out).records().count(), records(&out));

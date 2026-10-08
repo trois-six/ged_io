@@ -1,5 +1,6 @@
-//! The GEDCOM specifications as data, and a validator over
-//! [`tree`](crate::tree) structures, for GEDCOM 5.5.1, 7.0 and 7.1.
+//! The GEDCOM specifications as data: a validator and a conformance repair
+//! pass over [`tree`](crate::tree) structures, for GEDCOM 5.5.1, 7.0 and
+//! 7.1.
 //!
 //! # Tables
 //!
@@ -52,8 +53,54 @@
 //! checked: they describe storage limits of 1999-era systems, and no reader
 //! relies on them.
 //!
+//! # Conformance repair
+//!
+//! [`conform`] rewrites owned structures so that [`validate`] finds nothing,
+//! deterministically, keeping all data: what has no standard place becomes
+//! an extension structure (`_TAG`) where it was, with its payload and
+//! substructures. Each change is reported as a [`Repair`]. This is the
+//! structural half of a conformant writer, which
+//! [`GedcomWriter::write_tree`](crate::GedcomWriter::write_tree) and
+//! [`write_structures`](crate::GedcomWriter::write_structures) run before
+//! the line emitter applies the line-level rules (escapes, line length,
+//! `CONC`, terminators). The header is completed as the writer completes
+//! every header — `GEDC.VERS`; in 5.5.1 `GEDC.FORM`, `CHAR`, `SOUR` and
+//! `SUBM` (with a submitter record named `Unknown` when there is none); in
+//! 7.x no `CHAR` and no `GEDC.FORM` — which is not reported as a repair.
+//!
+//! | # | Situation | 7.x repair | 5.5.1 repair |
+//! |---|---|---|---|
+//! | a | Closed-enumeration value not in the set | `OTHER` and a `PHRASE` with the value, where the set has `OTHER` and the structure takes a `PHRASE` it has not; otherwise `_TAG` (a list with such a value too) | `_TAG` |
+//! | b | Value in the wrong case | Upper case; a list is written `A, B` | The specification's spelling |
+//! | c | Text or nothing where a pointer belongs, a dangling pointer | `@VOID@`, and a `PHRASE` with the text or the pointer, where the structure takes one it has not; nothing becomes `@VOID@`; otherwise `_TAG` with the text | `_TAG` with the text (an empty nullable pointer stays) |
+//! | c | A pointer where text belongs | The pointer as text | Same |
+//! | c | A pointer to a record of another type | `_TAG` with the pointer | Same |
+//! | c | A pointer of an extension to no record | The pointer as text | Same |
+//! | d | A date or an age outside the grammar | Empty payload and a `PHRASE` with the text, where the structure takes one it has not; otherwise `_TAG` | A date value becomes the date phrase `(text)`; otherwise `_TAG` |
+//! | d | An event (`Y` payload) with other text; text where no payload belongs | `Y` (nothing) and a `NOTE` with the text, where a `NOTE` is permitted; otherwise `_TAG` | Same |
+//! | d | Any other payload outside its grammar (names, integers, languages, media types, file paths, URIs, coordinates; 7.x `MIME` of a text not `text/…`) | `_TAG` | Same |
+//! | e | A standard tag not permitted here, an unknown tag, a tag outside the grammar, a `CONT`/`CONC` structure | `_TAG` (letters upper-cased, other characters `_`); a standard structure only one type has the tag of, valid as that type, keeps its meaning: `HEAD.SCHMA` declares `TAG _TAG` with the type's URI, unless the file uses `_TAG` already | `_TAG` |
+//! | f | More occurrences than permitted | The first ones kept; the others become `_TAG`, declared with their type's URI as in (e) | The first ones kept; the others become `_TAG` |
+//! | g | A required substructure missing | Synthesised from the list below; otherwise the superstructure becomes `_TAG`, and so on up | Same |
+//! | g | 7.x structure with neither payload nor substructure (§1.2) | `Y` where `Y` is a payload of the type; otherwise left out, as it holds nothing | — |
+//! | h | Identifiers outside the grammar, duplicated, `@VOID@`, on a substructure, on `HEAD` or `TRLR`; banned characters | Renamed (`@i 1@` becomes `@I_1@`, made unique with `_2`, `_3`…; pointers follow a renamed invalid identifier, and a duplicate's pointers stay with the first record); left out | Same; 5.5.1 tabs become spaces |
+//! | i | `HEAD` missing, misplaced or repeated; `TRLR` missing, misplaced, repeated or not empty | `HEAD` first (another becomes a `_HEAD` record); one empty `TRLR` last (one with content becomes a `_TRLR` record) | Same |
+//! | j | A 5.5.1 record over 32K | — | Inline notes moved to `NOTE` records, longest first, until the record fits; a record that moving every note would not bring under the limit stays as it is (the limit is a recommendation, p. 10, and nothing else can move out losslessly) |
+//!
+//! An extension tag the header documents with a standard URI (7.x §1.5.1)
+//! is that standard structure, wherever it is, and is repaired as one; an
+//! extension that cannot stay standard is never given such a tag.
+//!
+//! Synthesised substructures (g), besides the header's: a `FORM` of a `FILE` from the file's extension (7.x a media type,
+//! `application/octet-stream` when unknown; 5.5.1 a format of its list, else
+//! the `FILE` becomes `_FILE`); 7.x `LANG` of a translation (`und`),
+//! `ASSO.ROLE` (`OTHER`) and `SLGC.FAMC` (`@VOID@`); any other required
+//! text without required parts of its own, such as `TYPE`, `RELA` or a
+//! record's `NAME`: `Unknown`. Dates, ages, coordinates and files are never
+//! invented.
+//!
 //! ```rust
-//! use ged_io::spec::{validate, validate_text, DeviationKind};
+//! use ged_io::spec::{conform, validate, validate_text, DeviationKind, RepairKind};
 //! use ged_io::tree::parse_tree;
 //! use ged_io::GedcomVersion;
 //!
@@ -66,8 +113,17 @@
 //! // The text also shows the line grammar: two spaces before a tag.
 //! let issues = validate_text("0 HEAD\n1 GEDC\n2  VERS 7.0\n0 TRLR\n");
 //! assert_eq!(issues[0].kind, DeviationKind::LineSyntax);
+//!
+//! // The repair keeps the value, as an extension structure.
+//! let mut records = parse_tree(text).to_structures();
+//! let repairs = conform(&mut records, GedcomVersion::V7_0);
+//! assert_eq!(repairs.len(), 1);
+//! assert_eq!(repairs[0].kind, RepairKind::EnumValue);
+//! assert!(validate(&records, GedcomVersion::V7_0).is_empty());
+//! assert_eq!(records[1].substructures[0].tag, "_SEX");
 //! ```
 
+mod conform;
 mod lines;
 mod payload;
 mod schema;
@@ -84,6 +140,9 @@ use crate::GedcomVersion;
 use payload::Family;
 pub(crate) use schema::Schema;
 use sealed::Sealed;
+
+pub use crate::writer::{Repair, RepairKind};
+pub use conform::conform;
 
 /// A way in which a dataset does not follow its specification.
 #[non_exhaustive]

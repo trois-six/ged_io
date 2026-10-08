@@ -20,9 +20,22 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
-use super::emit::{candidate_xref, is_valid_pointer};
+use super::emit::{candidate_xref, is_valid_pointer, new_xref};
 use super::{Repair, RepairKind};
 use crate::version::{VersionRules, XrefGrammar};
+
+/// `candidate` (an identifier) with the suffix `_n`, shortened in 5.5.1 to
+/// fit 22 characters: the `n`-th try at making it unique.
+pub(crate) fn numbered_xref(rules: &VersionRules, candidate: &str, n: usize) -> String {
+    let base = candidate.trim_end_matches('@');
+    let suffix = format!("_{n}@");
+    let keep = match rules.xref {
+        XrefGrammar::V551 { max_len } => max_len.saturating_sub(suffix.len()),
+        XrefGrammar::V7 => usize::MAX,
+    };
+    let base: String = base.chars().take(keep).collect();
+    format!("{base}{suffix}")
+}
 
 /// The identifiers of the records of one written file.
 pub(crate) struct XrefMap<'a> {
@@ -73,7 +86,7 @@ impl<'a> XrefMap<'a> {
         for (index, prefix, xref) in irregular {
             let new = match xref {
                 Some(x) => {
-                    let new = map.unique(candidate_xref(rules, x));
+                    let new = map.unique(new_xref(rules, x));
                     if !rules.is_valid_xref(x) && seen_invalid.insert(x) {
                         map.renamed.insert(x.into(), new.clone().into());
                     }
@@ -111,29 +124,12 @@ impl<'a> XrefMap<'a> {
 
     /// `candidate`, or `candidate` with the first free `_n` suffix; taken.
     fn unique(&mut self, candidate: String) -> String {
+        let mut n = 1_usize;
         let mut new = candidate;
-        if self.is_taken(&new) {
-            let base = new.trim_end_matches('@').to_string();
-            let mut n = 1_usize;
-            new = loop {
-                n += 1;
-                let suffix = format!("_{n}@");
-                let base = match self.rules.xref {
-                    XrefGrammar::V551 { max_len } => {
-                        let keep = max_len.saturating_sub(suffix.len()).min(base.len());
-                        let mut keep = keep;
-                        while !base.is_char_boundary(keep) {
-                            keep -= 1;
-                        }
-                        &base[..keep]
-                    }
-                    XrefGrammar::V7 => base.as_str(),
-                };
-                let candidate = format!("{base}{suffix}");
-                if !self.is_taken(&candidate) {
-                    break candidate;
-                }
-            };
+        let base = new.clone();
+        while self.is_taken(&new) {
+            n += 1;
+            new = numbered_xref(self.rules, &base, n);
         }
         self.made.insert(new.as_str().into());
         new

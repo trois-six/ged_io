@@ -19,6 +19,10 @@ use crate::version::VersionRules;
 /// The product written as `HEAD.SOUR` when the data names none.
 pub(crate) const PRODUCT: &str = "ged_io";
 
+/// The text of a required structure nothing else can fill (the name of a
+/// stub submitter, a missing `TYPE`, …).
+pub(crate) const PLACEHOLDER: &str = "Unknown";
+
 /// Whether the completed header needs a `SUBM` pointer that `head` lacks.
 pub(crate) fn needs_submitter(head: &Structure, rules: &VersionRules) -> bool {
     rules.head_sour_subm && head.first("SUBM").is_none()
@@ -78,7 +82,7 @@ pub(crate) fn stub_submitter(xref: String) -> Structure {
         xref: Some(Xref::new(xref)),
         ..Structure::new("SUBM")
     };
-    subm.substructures.push(text("NAME", "Unknown"));
+    subm.substructures.push(text("NAME", PLACEHOLDER));
     subm
 }
 

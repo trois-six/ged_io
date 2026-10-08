@@ -37,3 +37,10 @@ path = "fuzz_targets/writer.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "spec"
+path = "fuzz_targets/spec.rs"
+test = false
+doc = false
+bench = false

@@ -1,0 +1,1310 @@
+//! The conformance repair pass: the repair table of the [module
+//! documentation](super#conformance-repair), applied to owned structures.
+//!
+//! The pass walks every record with its structure type, repairing payloads
+//! and substructures bottom-up: a structure that cannot be made valid where
+//! it is becomes an extension structure (`_TAG`) in the same place, with
+//! its payload and substructures. As that can change what a pointer points
+//! to (a record that becomes an extension is no longer of its type), the
+//! pass runs again until it changes nothing; each repair moves data towards
+//! extensions only, so this ends, in two passes in practice.
+
+use std::collections::{HashMap, HashSet};
+
+use super::payload::{self, is_ext_tag, Family};
+use super::schema::{tag_index, Kind, Schema, StructId, DATASET};
+use super::validate::{
+    bounds, encoded_len, is_external_pointer, pick, xref_error, Aliases, Pick, MAX_RECORD_BYTES,
+};
+use crate::tree::{Payload, Structure, Tag, Xref};
+use crate::version::VersionRules;
+use crate::writer::{
+    complete_head, extension_tag, needs_submitter, new_xref, numbered_xref, stub_submitter, Repair,
+    RepairKind, PLACEHOLDER,
+};
+use crate::GedcomVersion;
+
+/// The most passes [`conform`] makes; each one after the first only follows
+/// up on records that became extensions.
+const MAX_PASSES: usize = 8;
+
+/// Repairs `records` (a whole dataset: header, records and trailer, in
+/// order) so that [`validate`](super::validate) finds nothing for
+/// `version`, and returns what was changed, in the order it was changed.
+///
+/// Every repair is deterministic and keeps the data: what has no standard
+/// place becomes an extension structure where it was. The [module
+/// documentation](super#conformance-repair) lists every repair. The one
+/// deviation that may remain is a 5.5.1 record over 32K with no inline note
+/// left to move out ([`DeviationKind::RecordSize`]), which 5.5.1 only
+/// recommends against.
+///
+/// [`DeviationKind::RecordSize`]: super::DeviationKind::RecordSize
+pub fn conform(records: &mut Vec<Structure>, version: GedcomVersion) -> Vec<Repair> {
+    let rules = version.rules();
+    let mut c = Conformer {
+        rules,
+        schema: rules.spec,
+        family: Family::of(rules),
+        repairs: Vec::new(),
+        taken: HashSet::new(),
+        renamed: HashMap::new(),
+        types: HashMap::new(),
+        schma: Vec::new(),
+        path: Vec::new(),
+        submitter: None,
+        new_records: Vec::new(),
+        aliases: Aliases::default(),
+        used: HashSet::new(),
+    };
+    for pass in 0..MAX_PASSES {
+        let before = c.repairs.len();
+        c.pass(records);
+        if pass == 0 && c.family == Family::V551 {
+            c.record_sizes(records);
+        }
+        if c.repairs.len() == before && pass > 0 {
+            break;
+        }
+    }
+    c.repairs
+}
+
+struct Conformer {
+    rules: &'static VersionRules,
+    schema: &'static Schema,
+    family: Family,
+    repairs: Vec<Repair>,
+    /// Every record identifier in use.
+    taken: HashSet<Box<str>>,
+    /// The new identifier of each identifier that was invalid.
+    renamed: HashMap<Box<str>, Box<str>>,
+    /// The type of the record each identifier names, as the pass found it:
+    /// `None` for extension records.
+    types: HashMap<Box<str>, Option<StructId>>,
+    /// Extension tags of relocated standard structures, with their URIs.
+    schma: Vec<(String, String)>,
+    /// The tags from the record to the structure being repaired.
+    path: Vec<String>,
+    /// The submitter a synthesised 5.5.1 `HEAD.SUBM` points to.
+    submitter: Option<Box<str>>,
+    /// Records to add before the trailer.
+    new_records: Vec<Structure>,
+    /// The aliases `HEAD.SCHMA` declares (7.x).
+    aliases: Aliases,
+    /// Every extension tag of the dataset.
+    used: HashSet<String>,
+}
+
+/// What becomes of a structure after its repair.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Fate {
+    Keep,
+    /// It becomes an extension structure; the repair is reported already.
+    Extension,
+    /// It holds nothing and goes; the repair is reported already.
+    Remove,
+}
+
+fn text(tag: &str, value: &str) -> Structure {
+    Structure {
+        payload: Payload::Text(value.into()),
+        ..Structure::new(tag)
+    }
+}
+
+fn pointer(tag: &str, xref: &str) -> Structure {
+    Structure {
+        payload: Payload::Pointer(Xref::new(xref)),
+        ..Structure::new(tag)
+    }
+}
+
+/// The media type of a file from its extension; `application/octet-stream`
+/// when unknown.
+fn media_type(path: &str) -> &'static str {
+    let ext = extension(path);
+    match ext.as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "bmp" => "image/bmp",
+        "tif" | "tiff" => "image/tiff",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "pdf" => "application/pdf",
+        "txt" => "text/plain",
+        "htm" | "html" => "text/html",
+        "wav" => "audio/wav",
+        "mp3" => "audio/mpeg",
+        "ogg" => "audio/ogg",
+        "mp4" => "video/mp4",
+        "mpg" | "mpeg" => "video/mpeg",
+        "avi" => "video/x-msvideo",
+        _ => "application/octet-stream",
+    }
+}
+
+/// The 5.5.1 `MULTIMEDIA_FORMAT` of a file from its extension (p. 54), if
+/// the list has one.
+fn multimedia_format(path: &str) -> Option<&'static str> {
+    match extension(path).as_str() {
+        "bmp" => Some("bmp"),
+        "gif" => Some("gif"),
+        "jpg" | "jpeg" => Some("jpg"),
+        "ole" => Some("ole"),
+        "pcx" => Some("pcx"),
+        "tif" | "tiff" => Some("tif"),
+        "wav" => Some("wav"),
+        _ => None,
+    }
+}
+
+fn extension(path: &str) -> String {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or("");
+    let name = name.split(['?', '#']).next().unwrap_or("");
+    name.rsplit_once('.')
+        .map(|(_, e)| e.to_ascii_lowercase())
+        .unwrap_or_default()
+}
+
+impl Conformer {
+    fn repair(&mut self, line: u32, kind: RepairKind, detail: String) {
+        self.repairs.push(Repair {
+            line,
+            kind,
+            detail: detail.into(),
+        });
+    }
+
+    /// The path of the structure being repaired, ending with `tag`.
+    fn here(&self, tag: &str) -> String {
+        let mut p = self.path.join(".");
+        if !p.is_empty() {
+            p.push('.');
+        }
+        p.push_str(tag);
+        p
+    }
+
+    fn pass(&mut self, records: &mut Vec<Structure>) {
+        self.header_and_trailer(records);
+        self.xrefs(records);
+        self.aliases = Aliases::of(records.first().filter(|r| r.tag == "HEAD"), self.schema);
+        self.used.clear();
+        let mut stack: Vec<&Structure> = records.iter().collect();
+        while let Some(n) = stack.pop() {
+            if n.tag.as_str().starts_with('_') {
+                self.used.insert(n.tag.as_str().to_string());
+            }
+            stack.extend(&n.substructures);
+        }
+        let types: HashMap<Box<str>, Option<StructId>> = records
+            .iter()
+            .chain(&self.new_records)
+            .filter_map(|r| {
+                let x = r.xref.as_deref()?;
+                Some((x.into(), self.record_type(r.tag.as_str())))
+            })
+            .collect();
+        self.types = types;
+        self.submitter = self.submitter.take().or_else(|| {
+            records
+                .iter()
+                .chain(&self.new_records)
+                .find(|r| r.tag == "SUBM" && r.xref.is_some())
+                .and_then(|r| r.xref.as_deref().map(Box::from))
+        });
+        self.complete_head(records);
+        let mut counts: Vec<(u8, u32)> = Vec::new();
+        for r in records.iter_mut() {
+            match r.tag.as_str() {
+                "TRLR" => continue,
+                "HEAD" => {
+                    if let Some(head) = self.schema.record("HEAD") {
+                        self.path.clear();
+                        let _ = self.fix(r, head, true);
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+            self.path.clear();
+            self.record(r, &mut counts);
+        }
+        self.path.clear();
+        if !self.new_records.is_empty() {
+            let at = records.len().saturating_sub(1);
+            records.splice(at..at, self.new_records.drain(..));
+        }
+        if self.family == Family::V7 {
+            self.declare(records);
+        }
+    }
+
+    /// (i) Completes the header as the writer does for the version
+    /// ([`crate::writer`]): `GEDC.VERS` (and in 5.5.1 `GEDC.FORM`,
+    /// `CHAR`, `SOUR` and `SUBM`, with a submitter record when there is
+    /// none), without an identifier; 7.x drops `CHAR` and `GEDC.FORM`,
+    /// which describe the bytes and the form of the input. The writer
+    /// rewrites the header of every file it writes, so this is no repair.
+    fn complete_head(&mut self, records: &mut [Structure]) {
+        let Some(head) = records.first_mut().filter(|r| r.tag == "HEAD") else {
+            return;
+        };
+        let submitter = needs_submitter(head, self.rules).then(|| {
+            if let Some(x) = &self.submitter {
+                return x.to_string();
+            }
+            let x = self.fresh("U");
+            self.types
+                .insert(x.as_str().into(), self.schema.record("SUBM"));
+            self.new_records.push(stub_submitter(x.clone()));
+            self.submitter = Some(x.as_str().into());
+            x
+        });
+        complete_head(head, self.rules, "UTF-8", submitter);
+    }
+
+    /// The first `@<prefix>n@` no record holds; taken.
+    fn fresh(&mut self, prefix: &str) -> String {
+        let mut n = 0_usize;
+        loop {
+            n += 1;
+            let candidate = format!("@{prefix}{n}@");
+            if !self.taken.contains(candidate.as_str()) {
+                self.taken.insert(candidate.as_str().into());
+                return candidate;
+            }
+        }
+    }
+
+    fn record(&mut self, r: &mut Structure, counts: &mut Vec<(u8, u32)>) {
+        let is_ptr = matches!(r.payload, Payload::Pointer(_));
+        let tag = r.tag.as_str().to_string();
+        match pick(self.rules, DATASET, &tag, is_ptr) {
+            Pick::Type(ty) => {
+                if self.fix(r, ty, true) == Fate::Extension {
+                    self.make_extension(r);
+                    return;
+                }
+                let t = self.schema.tag_id(ty).unwrap_or(0);
+                let n = bump(counts, t);
+                if let Some(max) = bounds(self.schema, DATASET, t).1 {
+                    if n > u32::from(max) {
+                        self.repair(
+                            r.line,
+                            RepairKind::Repeated,
+                            format!("a {tag} record more than the {max} permitted, written as an extension record"),
+                        );
+                        self.make_extension(r);
+                    }
+                }
+            }
+            // A documented alias of a standard record is that record.
+            Pick::Extension => match self.aliases.structs.get(&tag).copied() {
+                Some(ty) if self.fix(r, ty, true) == Fate::Extension => self.make_extension(r),
+                Some(_) => {}
+                None => self.extension(r),
+            },
+            _ => {
+                let new = self.plain_tag(&tag);
+                self.repair(
+                    r.line,
+                    RepairKind::Misplaced,
+                    format!(
+                        "{tag:?} is not a record of GEDCOM {}: written as {new}",
+                        self.schema.version
+                    ),
+                );
+                self.make_extension(r);
+            }
+        }
+    }
+
+    /// (i) One `HEAD` first, one empty `TRLR` last.
+    fn header_and_trailer(&mut self, records: &mut Vec<Structure>) {
+        match records.iter().position(|r| r.tag == "HEAD") {
+            None => {
+                records.insert(0, Structure::new("HEAD"));
+                self.repair(0, RepairKind::Header, "HEAD added".into());
+            }
+            Some(0) => {}
+            Some(at) => {
+                let head = records.remove(at);
+                self.repair(head.line, RepairKind::Header, "HEAD moved first".into());
+                records.insert(0, head);
+            }
+        }
+        for r in records.iter_mut().skip(1).filter(|r| r.tag == "HEAD") {
+            r.tag = Tag::new("_HEAD");
+            self.repair(
+                r.line,
+                RepairKind::Header,
+                "a second HEAD written as a _HEAD record".into(),
+            );
+        }
+        if let Some(head) = records.first_mut() {
+            if let Some(x) = head.xref.take() {
+                self.repair(
+                    head.line,
+                    RepairKind::Xref,
+                    format!("identifier {x} of HEAD left out"),
+                );
+            }
+        }
+        let trailers: Vec<usize> = records
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.tag == "TRLR")
+            .map(|(i, _)| i)
+            .collect();
+        let well_formed = trailers.len() == 1
+            && trailers.first() == Some(&(records.len() - 1))
+            && records.last().is_some_and(|t| {
+                t.substructures.is_empty() && t.payload == Payload::None && t.xref.is_none()
+            });
+        if well_formed {
+            return;
+        }
+        let mut line = 0;
+        for &i in trailers.iter().rev() {
+            let Some(t) = records.get_mut(i) else {
+                continue;
+            };
+            line = t.line;
+            if t.substructures.is_empty() && t.payload == Payload::None {
+                records.remove(i);
+            } else {
+                t.tag = Tag::new("_TRLR");
+                t.xref = None;
+                self.repair(
+                    t.line,
+                    RepairKind::Header,
+                    "a TRLR with content written as a _TRLR record".into(),
+                );
+            }
+        }
+        records.push(Structure::new("TRLR"));
+        self.repair(
+            line,
+            RepairKind::Header,
+            "one empty TRLR written last".into(),
+        );
+    }
+
+    /// (h) Valid, unique identifiers on records; invalid ones renamed.
+    fn xrefs(&mut self, records: &mut [Structure]) {
+        self.taken.clear();
+        let mut keep = Vec::with_capacity(records.len());
+        for r in records.iter() {
+            let ok = matches!(r.tag.as_str(), "HEAD" | "TRLR")
+                || r.xref.as_deref().is_none_or(|x| {
+                    xref_error(x, self.rules).is_none() && self.taken.insert(x.into())
+                });
+            keep.push(ok);
+        }
+        for r in &self.new_records {
+            if let Some(x) = r.xref.as_deref() {
+                self.taken.insert(x.into());
+            }
+        }
+        for (r, ok) in records.iter_mut().zip(keep) {
+            if ok {
+                continue;
+            }
+            let Some(old) = r.xref.take() else { continue };
+            let new = self.unique(&new_xref(self.rules, &old));
+            if xref_error(&old, self.rules).is_some() && !self.renamed.contains_key(old.as_str()) {
+                self.renamed
+                    .insert(old.as_str().into(), new.as_str().into());
+            }
+            self.repair(
+                r.line,
+                RepairKind::Xref,
+                format!("identifier {old} written as {new}"),
+            );
+            r.xref = Some(Xref::new(new));
+        }
+    }
+
+    /// `candidate`, or `candidate` with the first free `_2`, `_3`… suffix;
+    /// taken.
+    fn unique(&mut self, candidate: &str) -> String {
+        let mut new = candidate.to_string();
+        let mut n = 1_usize;
+        while self.taken.contains(new.as_str()) {
+            n += 1;
+            new = numbered_xref(self.rules, candidate, n);
+        }
+        self.taken.insert(new.as_str().into());
+        new
+    }
+
+    /// The type of the record tagged `tag`: a standard one, or one an alias
+    /// stands for.
+    fn record_type(&self, tag: &str) -> Option<StructId> {
+        self.schema
+            .record(tag)
+            .or_else(|| self.aliases.structs.get(tag).copied())
+    }
+
+    /// The extension tag a structure tagged `tag` is written with when it
+    /// cannot stay standard: `_TAG`, and as many `_` more as it takes not to
+    /// be an alias of a standard structure.
+    fn plain_tag(&self, tag: &str) -> String {
+        let mut new = extension_tag(self.rules, tag);
+        while self.aliases.structs.contains_key(&new) || self.schma.iter().any(|(t, _)| *t == new) {
+            new.push('_');
+        }
+        new
+    }
+
+    /// Makes `s` an extension structure: its tag, then its content.
+    fn make_extension(&mut self, s: &mut Structure) {
+        s.tag = Tag::new(&self.plain_tag(s.tag.as_str()));
+        self.extension_content(s, true);
+    }
+
+    /// (e, f) Moves a standard structure of type `ty` (valid as such) out
+    /// of a place that does not permit it: in 7.x as an extension tag that
+    /// `HEAD.SCHMA` declares with the type's URI, when that tag is free;
+    /// otherwise as a plain extension. Returns the tag and how it was
+    /// declared, for the repair.
+    fn relocate(&mut self, s: &mut Structure, ty: Option<StructId>) -> (String, String) {
+        let tag = s.tag.as_str().to_string();
+        let candidate = extension_tag(self.rules, &tag);
+        if let (Family::V7, Some(ty)) = (self.family, ty) {
+            let uri = self.schema.uri(ty);
+            let ours = self.aliases.structs.get(&candidate) == Some(&ty)
+                || self.schma.iter().any(|(t, u)| *t == candidate && *u == uri);
+            let free = !self.aliases.structs.contains_key(&candidate)
+                && !self.used.contains(&candidate)
+                && !self.schma.iter().any(|(t, _)| *t == candidate);
+            if ours || free {
+                if free {
+                    self.schma.push((candidate.clone(), uri.clone()));
+                }
+                s.tag = Tag::new(&candidate);
+                return (candidate, format!(" (declared as {uri})"));
+            }
+        }
+        self.make_extension(s);
+        (s.tag.as_str().to_string(), String::new())
+    }
+
+    /// An extension structure: tags in the grammar, no identifier below the
+    /// record, pointers that name a record, no banned character.
+    fn extension(&mut self, s: &mut Structure) {
+        self.extension_content(s, true);
+    }
+
+    fn extension_content(&mut self, s: &mut Structure, top: bool) {
+        if !top {
+            if !self.rules.is_valid_tag(s.tag.as_str()) {
+                let new = extension_tag(self.rules, s.tag.as_str());
+                self.repair(
+                    s.line,
+                    RepairKind::Misplaced,
+                    format!("{:?} is not a tag: written as {new}", s.tag.as_str()),
+                );
+                s.tag = Tag::new(&new);
+            }
+            self.drop_xref(s);
+        }
+        match &s.payload {
+            Payload::Pointer(p) => {
+                let p = p.as_str().to_string();
+                if self.resolve(s, &p).is_err() {
+                    self.repair(
+                        s.line,
+                        RepairKind::Pointer,
+                        format!("{} {p} names no record: kept as text", s.tag.as_str()),
+                    );
+                    s.payload = Payload::Text(p.into());
+                }
+            }
+            Payload::Text(_) => self.characters(s),
+            Payload::None => {}
+        }
+        for c in &mut s.substructures {
+            self.extension_content(c, false);
+        }
+    }
+
+    fn drop_xref(&mut self, s: &mut Structure) {
+        if let Some(x) = s.xref.take() {
+            self.repair(
+                s.line,
+                RepairKind::Xref,
+                format!(
+                    "identifier {x} of {} left out: only records have one",
+                    s.tag.as_str()
+                ),
+            );
+        }
+    }
+
+    /// Follows a renamed identifier. `Ok(Some(type))` for a record of a
+    /// standard type, `Ok(None)` for an extension record, `@VOID@` (7.x) or a
+    /// 5.5.1 pointer to another file; `Err` for a pointer to nothing.
+    fn resolve(&mut self, s: &mut Structure, p: &str) -> Result<Option<StructId>, ()> {
+        let p = match self.renamed.get(p) {
+            Some(new) => {
+                let new = new.to_string();
+                s.payload = Payload::Pointer(Xref::new(new.as_str()));
+                new
+            }
+            None => p.to_string(),
+        };
+        if self.family == Family::V7 && p == "@VOID@" || is_external_pointer(&p, self.family) {
+            return Ok(None);
+        }
+        match self.types.get(p.as_str()) {
+            Some(ty) => Ok(*ty),
+            None => Err(()),
+        }
+    }
+
+    /// (h) Leaves out banned characters (5.5.1 tabs become spaces).
+    fn characters(&mut self, s: &mut Structure) {
+        let Payload::Text(t) = &s.payload else { return };
+        let (family, rules) = (self.family, self.rules);
+        if !t.chars().any(|c| payload::is_banned(c, rules)) {
+            return;
+        }
+        let mut removed = 0;
+        let clean: String = t
+            .chars()
+            .filter_map(|c| match c {
+                '\t' if family == Family::V551 => Some(' '),
+                c if payload::is_banned(c, rules) => {
+                    removed += 1;
+                    None
+                }
+                c => Some(c),
+            })
+            .collect();
+        let what = if removed == 0 {
+            "tabs written as spaces".to_string()
+        } else {
+            format!("{removed} banned character(s) left out")
+        };
+        let here = self.here(s.tag.as_str());
+        self.repair(s.line, RepairKind::Characters, format!("{here}: {what}"));
+        s.payload = Payload::Text(clean.into());
+    }
+
+    /// Whether `ty` takes a `tag` substructure (in its text form).
+    fn takes(&self, ty: StructId, tag: &str) -> Option<StructId> {
+        let tag = tag_index(tag)?;
+        self.schema
+            .subs_tagged(ty, tag)
+            .find(|s| {
+                !matches!(
+                    self.schema.kind(s.id).0,
+                    Kind::Pointer | Kind::NullablePointer
+                )
+            })
+            .map(|s| s.id)
+    }
+
+    /// Repairs a structure of type `ty` and its substructures.
+    fn fix(&mut self, s: &mut Structure, ty: StructId, record: bool) -> Fate {
+        if !record {
+            self.drop_xref(s);
+        }
+        if self.payload(s, ty) == Fate::Extension {
+            return Fate::Extension;
+        }
+        let children = std::mem::take(&mut s.substructures);
+        let mut kept = Vec::with_capacity(children.len());
+        let mut counts: Vec<(u8, u32)> = Vec::new();
+        self.path.push(s.tag.as_str().to_string());
+        for mut c in children {
+            if self.child(&mut c, ty, &mut counts) {
+                kept.push(c);
+            }
+        }
+        self.path.pop();
+        s.substructures = kept;
+        if self.required(s, ty, &counts) == Fate::Extension {
+            return Fate::Extension;
+        }
+        self.special(s, ty);
+        // 7.x §1.2: a structure has a payload or a substructure.
+        if self.family == Family::V7
+            && !record
+            && s.substructures.is_empty()
+            && s.payload.as_str().is_none_or(str::is_empty)
+        {
+            let here = self.here(s.tag.as_str());
+            if self.schema.kind(ty).0 == Kind::Y {
+                s.payload = Payload::Text("Y".into());
+                self.repair(
+                    s.line,
+                    RepairKind::Empty,
+                    format!("{here}: empty, written as Y"),
+                );
+            } else {
+                self.repair(
+                    s.line,
+                    RepairKind::Empty,
+                    format!("{here}: empty, left out"),
+                );
+                return Fate::Remove;
+            }
+        }
+        Fate::Keep
+    }
+
+    /// Repairs `c`, a substructure of a structure of type `ty`, counting the
+    /// standard ones in `counts`. Returns whether it stays.
+    fn child(&mut self, c: &mut Structure, ty: StructId, counts: &mut Vec<(u8, u32)>) -> bool {
+        let schema = self.schema;
+        let is_ptr = matches!(c.payload, Payload::Pointer(_));
+        let tag = c.tag.as_str().to_string();
+        match pick(self.rules, ty, &tag, is_ptr) {
+            Pick::Type(cty) => {
+                match self.fix(c, cty, false) {
+                    Fate::Remove => return false,
+                    Fate::Extension => self.make_extension(c),
+                    Fate::Keep => {
+                        let t = schema.tag_id(cty).unwrap_or(0);
+                        let n = bump(counts, t);
+                        if let Some(max) = bounds(schema, ty, t).1.filter(|&m| n > u32::from(m)) {
+                            let here = self.here(&tag);
+                            let (new, declared) = self.relocate(c, Some(cty));
+                            self.repair(
+                            c.line,
+                            RepairKind::Repeated,
+                            format!("{here}: more than the {max} permitted, written as {new}{declared}"),
+                        );
+                        }
+                    }
+                }
+            }
+            // A documented alias of a standard structure is that structure,
+            // wherever it is (7.x §1.5.1: relocated).
+            Pick::Extension => match self.aliases.structs.get(&tag).copied() {
+                Some(aty) => match self.fix(c, aty, false) {
+                    Fate::Keep => {}
+                    Fate::Remove => return false,
+                    Fate::Extension => self.make_extension(c),
+                },
+                None => self.extension(c),
+            },
+            other => {
+                let here = self.here(&tag);
+                let why = match other {
+                    Pick::Misplaced => "not permitted here",
+                    Pick::Continuation => "a continuation is not a structure",
+                    Pick::Unknown => "not a tag of the version",
+                    _ => "not a tag",
+                };
+                // A standard structure that one type only can stand for
+                // keeps its meaning where it moves, when it is valid.
+                let only = (other == Pick::Misplaced && self.family == Family::V7)
+                    .then(|| self.only_type(&tag))
+                    .flatten();
+                let fate = only.map(|oty| (oty, self.fix(c, oty, false)));
+                let (new, declared) = match fate {
+                    Some((_, Fate::Remove)) => return false,
+                    Some((oty, Fate::Keep)) => self.relocate(c, Some(oty)),
+                    Some((_, Fate::Extension)) | None => {
+                        self.make_extension(c);
+                        (c.tag.as_str().to_string(), String::new())
+                    }
+                };
+                self.repair(
+                    c.line,
+                    RepairKind::Misplaced,
+                    format!("{here}: {why}, written as {new}{declared}"),
+                );
+            }
+        }
+        true
+    }
+
+    /// The structure type a tag names when the version has exactly one with
+    /// that tag.
+    fn only_type(&self, tag: &str) -> Option<StructId> {
+        let t = tag_index(tag)?;
+        let mut found = None;
+        for id in 1..self.schema.structs.len() {
+            let Ok(id) = StructId::try_from(id) else {
+                break;
+            };
+            if self.schema.tag_id(id) == Some(t) {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(id);
+            }
+        }
+        found
+    }
+
+    /// Adds the `HEAD.SCHMA.TAG` declarations of relocated structures.
+    fn declare(&mut self, records: &mut [Structure]) {
+        if self.schma.is_empty() {
+            return;
+        }
+        let Some(head) = records.first_mut().filter(|h| h.tag == "HEAD") else {
+            return;
+        };
+        let at = head
+            .substructures
+            .iter()
+            .position(|s| s.tag == "SCHMA")
+            .unwrap_or_else(|| {
+                head.substructures.push(Structure::new("SCHMA"));
+                head.substructures.len() - 1
+            });
+        let Some(schma) = head.substructures.get_mut(at) else {
+            return;
+        };
+        let declared: HashSet<String> = schma
+            .substructures
+            .iter()
+            .filter(|t| t.tag == "TAG")
+            .filter_map(|t| t.text()?.split(' ').next().map(str::to_string))
+            .collect();
+        for (tag, uri) in &self.schma {
+            if !declared.contains(tag) {
+                schma
+                    .substructures
+                    .push(text("TAG", &format!("{tag} {uri}")));
+            }
+        }
+    }
+
+    /// The payload of a structure of type `ty`.
+    fn payload(&mut self, s: &mut Structure, ty: StructId) -> Fate {
+        let (kind, arg) = self.schema.kind(ty);
+        let here = self.here(s.tag.as_str());
+        if matches!(kind, Kind::Pointer | Kind::NullablePointer) {
+            return self.pointer_payload(s, ty, arg, &here);
+        }
+        if let Payload::Pointer(p) = &s.payload {
+            let p = p.as_str().to_string();
+            self.repair(
+                s.line,
+                RepairKind::Pointer,
+                format!("{here} {p}: a pointer where text belongs, written as text"),
+            );
+            s.payload = Payload::Text(p.into());
+        }
+        self.characters(s);
+        let raw = s.text().unwrap_or("").to_string();
+        let set = matches!(kind, Kind::Enum | Kind::ListEnum)
+            .then(|| self.schema.enum_set(arg))
+            .flatten();
+        match (kind, set) {
+            (Kind::Enum, Some(set)) if !raw.is_empty() => {
+                return self.enumeration(s, ty, set, &raw, &here)
+            }
+            (Kind::ListEnum, Some(set)) if !raw.is_empty() => {
+                return self.list(s, set, &raw, &here)
+            }
+            _ => {}
+        }
+        let error = if raw.is_empty() && payload::empty_is_valid(kind) {
+            None
+        } else if matches!(kind, Kind::Date | Kind::DateExact | Kind::DatePeriod) {
+            payload::check(kind, set, &self.aliases.unalias(&raw), self.family)
+        } else {
+            payload::check(kind, set, &raw, self.family)
+        };
+        let mime_text = self.family == Family::V7
+            && self.schema.name(ty) == "MIME"
+            && !raw.is_empty()
+            && !raw.to_ascii_lowercase().starts_with("text/");
+        match error.or_else(|| mime_text.then(|| "the media type of a text is text/…".into())) {
+            Some(why) => self.invalid_payload(s, ty, &raw, &why, &here),
+            None => Fate::Keep,
+        }
+    }
+
+    /// (d) A payload outside its type's grammar, `why`.
+    fn invalid_payload(
+        &mut self,
+        s: &mut Structure,
+        ty: StructId,
+        raw: &str,
+        why: &str,
+        here: &str,
+    ) -> Fate {
+        let kind = self.schema.kind(ty).0;
+        let line = s.line;
+        match kind {
+            // A date or an age: PHRASE in 7.x, a date phrase in 5.5.1.
+            Kind::Date | Kind::DatePeriod | Kind::Age if self.family == Family::V7 => {
+                if self.takes(ty, "PHRASE").is_some() && s.first("PHRASE").is_none() {
+                    s.payload = Payload::None;
+                    s.substructures.push(text("PHRASE", raw));
+                    self.repair(
+                        line,
+                        RepairKind::Payload,
+                        format!("{here} {raw:?}: {why}; moved to PHRASE"),
+                    );
+                    return Fate::Keep;
+                }
+            }
+            Kind::Date => {
+                let phrase = format!("({raw})");
+                if payload::check(kind, None, &phrase, self.family).is_none() {
+                    self.repair(
+                        line,
+                        RepairKind::Payload,
+                        format!("{here} {raw:?}: {why}; written as the date phrase {phrase}"),
+                    );
+                    s.payload = Payload::Text(phrase.into());
+                    return Fate::Keep;
+                }
+            }
+            // An event with text: `Y` and a note; text where none belongs:
+            // a note.
+            Kind::Y | Kind::None if self.takes(ty, "NOTE").is_some() => {
+                let (payload, to) = if kind == Kind::Y {
+                    (Payload::Text("Y".into()), "Y")
+                } else {
+                    (Payload::None, "nothing")
+                };
+                s.payload = payload;
+                s.substructures.push(text("NOTE", raw));
+                self.repair(
+                    line,
+                    RepairKind::Payload,
+                    format!("{here} {raw:?}: {why}; payload written as {to}, the text as a NOTE"),
+                );
+                return Fate::Keep;
+            }
+            _ => {}
+        }
+        let new = self.plain_tag(s.tag.as_str());
+        self.repair(
+            line,
+            RepairKind::Payload,
+            format!("{here} {raw:?}: {why}; written as {new}"),
+        );
+        Fate::Extension
+    }
+
+    /// (a, b) An enumeration value.
+    fn enumeration(
+        &mut self,
+        s: &mut Structure,
+        ty: StructId,
+        set: &super::schema::EnumSet,
+        raw: &str,
+        here: &str,
+    ) -> Fate {
+        if let Some(fixed) = canonical(set, raw, self.family) {
+            if fixed != raw {
+                self.repair(
+                    s.line,
+                    RepairKind::EnumCase,
+                    format!("{here} {raw:?} written as {fixed}"),
+                );
+                s.payload = Payload::Text(fixed.into());
+            }
+            return Fate::Keep;
+        }
+        if self.family == Family::V7
+            && set.values.contains(&"OTHER")
+            && self.takes(ty, "PHRASE").is_some()
+            && s.first("PHRASE").is_none()
+        {
+            s.payload = Payload::Text("OTHER".into());
+            s.substructures.push(text("PHRASE", raw));
+            self.repair(
+                s.line,
+                RepairKind::EnumValue,
+                format!(
+                    "{here} {raw:?}: not a value of {}; written as OTHER with a PHRASE",
+                    set.name
+                ),
+            );
+            return Fate::Keep;
+        }
+        let new = extension_tag(self.rules, s.tag.as_str());
+        self.repair(
+            s.line,
+            RepairKind::EnumValue,
+            format!(
+                "{here} {raw:?}: not a value of {}; written as {new}",
+                set.name
+            ),
+        );
+        Fate::Extension
+    }
+
+    /// (a, b) A list of enumeration values.
+    fn list(
+        &mut self,
+        s: &mut Structure,
+        set: &super::schema::EnumSet,
+        raw: &str,
+        here: &str,
+    ) -> Fate {
+        let mut items = Vec::new();
+        for item in payload::list_items(raw).filter(|i| !i.is_empty()) {
+            let Some(v) = canonical(set, item, self.family) else {
+                let new = self.plain_tag(s.tag.as_str());
+                self.repair(
+                    s.line,
+                    RepairKind::EnumValue,
+                    format!(
+                        "{here} {raw:?}: {item:?} is not a value of {}; written as {new}",
+                        set.name
+                    ),
+                );
+                return Fate::Extension;
+            };
+            items.push(v);
+        }
+        if items.is_empty() {
+            let new = self.plain_tag(s.tag.as_str());
+            self.repair(
+                s.line,
+                RepairKind::EnumValue,
+                format!("{here} {raw:?}: no value; written as {new}"),
+            );
+            return Fate::Extension;
+        }
+        let fixed = items.join(", ");
+        if fixed != raw {
+            self.repair(
+                s.line,
+                RepairKind::EnumCase,
+                format!("{here} {raw:?} written as {fixed}"),
+            );
+            s.payload = Payload::Text(fixed.into());
+        }
+        Fate::Keep
+    }
+
+    /// (c) The payload of a pointer structure.
+    fn pointer_payload(
+        &mut self,
+        s: &mut Structure,
+        ty: StructId,
+        target: u16,
+        here: &str,
+    ) -> Fate {
+        let kind = self.schema.kind(ty).0;
+        let v7 = self.family == Family::V7;
+        let line = s.line;
+        let new = self.plain_tag(s.tag.as_str());
+        let phrase_ok = self.takes(ty, "PHRASE").is_some() && s.first("PHRASE").is_none();
+        let to_void = |s: &mut Structure, phrase: Option<String>| {
+            s.payload = Payload::Pointer(Xref::new(Xref::VOID));
+            if let Some(p) = phrase {
+                s.substructures.push(text("PHRASE", &p));
+            }
+        };
+        match s.payload.clone() {
+            Payload::Pointer(p) => {
+                let p = p.as_str().to_string();
+                match self.resolve(s, &p) {
+                    Ok(Some(t)) if t == target => Fate::Keep,
+                    Ok(None) if v7 && s.pointer().is_some_and(Xref::is_void) => Fate::Keep,
+                    Ok(None) if is_external_pointer(&p, self.family) => Fate::Keep,
+                    Ok(_) => {
+                        let what = self.schema.tag(target);
+                        self.repair(
+                            line,
+                            RepairKind::Pointer,
+                            format!("{here} {p}: not a {what} record; written as {new}"),
+                        );
+                        Fate::Extension
+                    }
+                    Err(()) if v7 && phrase_ok => {
+                        to_void(s, Some(p.clone()));
+                        self.repair(
+                            line,
+                            RepairKind::Pointer,
+                            format!("{here} {p}: names no record; written as @VOID@ with a PHRASE"),
+                        );
+                        Fate::Keep
+                    }
+                    Err(()) => {
+                        s.payload = Payload::Text(p.as_str().into());
+                        self.repair(
+                            line,
+                            RepairKind::Pointer,
+                            format!("{here} {p}: names no record; written as {new} with the text"),
+                        );
+                        Fate::Extension
+                    }
+                }
+            }
+            Payload::Text(t) if !t.is_empty() => {
+                self.characters(s);
+                let t = s.text().unwrap_or("").to_string();
+                if v7 && phrase_ok {
+                    to_void(s, Some(t.clone()));
+                    self.repair(line, RepairKind::Pointer, format!("{here} {t:?}: text where a pointer belongs; written as @VOID@ with a PHRASE"));
+                    Fate::Keep
+                } else {
+                    self.repair(
+                        line,
+                        RepairKind::Pointer,
+                        format!("{here} {t:?}: text where a pointer belongs; written as {new}"),
+                    );
+                    Fate::Extension
+                }
+            }
+            _ if kind == Kind::NullablePointer => {
+                s.payload = Payload::None;
+                Fate::Keep
+            }
+            _ if v7 => {
+                to_void(s, None);
+                self.repair(
+                    line,
+                    RepairKind::Pointer,
+                    format!("{here}: no pointer; written as @VOID@"),
+                );
+                Fate::Keep
+            }
+            _ => {
+                self.repair(
+                    line,
+                    RepairKind::Pointer,
+                    format!("{here}: no pointer; written as {new}"),
+                );
+                Fate::Extension
+            }
+        }
+    }
+
+    /// (g) Required substructures.
+    fn required(&mut self, s: &mut Structure, ty: StructId, counts: &[(u8, u32)]) -> Fate {
+        let schema = self.schema;
+        let mut seen: Vec<u8> = Vec::new();
+        for sub in schema.subs(ty) {
+            let Some(t) = schema.tag_id(sub.id) else {
+                continue;
+            };
+            if seen.contains(&t) {
+                continue;
+            }
+            seen.push(t);
+            let (min, _) = bounds(schema, ty, t);
+            let found = counts.iter().find(|(k, _)| *k == t).map_or(0, |(_, n)| *n);
+            if found >= u32::from(min) {
+                continue;
+            }
+            let tag = schema.tag(sub.id);
+            let here = self.here(s.tag.as_str());
+            let Some(made) = self.synthesise(s, sub.id) else {
+                let new = self.plain_tag(s.tag.as_str());
+                self.repair(
+                    s.line,
+                    RepairKind::Required,
+                    format!("{here} lacks {tag}, which nothing can stand for; written as {new}"),
+                );
+                return Fate::Extension;
+            };
+            let shown = made.to_gedcom(0, self.rules.version);
+            let shown = shown
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim_start_matches("0 ")
+                .to_string();
+            self.repair(
+                0,
+                RepairKind::Required,
+                format!("{here} lacks {tag}: {shown} added"),
+            );
+            s.substructures.push(made);
+        }
+        Fate::Keep
+    }
+
+    /// The minimal structure that stands for a missing required `sub` of
+    /// `parent`, from the documented list; `None` when there is none.
+    fn synthesise(&mut self, parent: &Structure, sub: StructId) -> Option<Structure> {
+        let schema = self.schema;
+        let v7 = self.family == Family::V7;
+        let tag = schema.tag(sub);
+        let parent_tag = parent.tag.as_str();
+        let made = match (parent_tag, tag) {
+            (_, "FORM") if parent_tag == "FILE" || parent_tag == "TRAN" => {
+                let file = parent.text().unwrap_or("");
+                if v7 {
+                    text("FORM", media_type(file))
+                } else {
+                    text("FORM", multimedia_format(file)?)
+                }
+            }
+            ("TRAN", "LANG") if v7 => text("LANG", "und"),
+            ("ASSO", "ROLE") if v7 => text("ROLE", "OTHER"),
+            ("SLGC", "FAMC") if v7 => pointer("FAMC", Xref::VOID),
+            _ => {
+                let (kind, arg) = schema.kind(sub);
+                let open = kind == Kind::Enum && schema.enum_set(arg).is_some_and(|e| e.open);
+                // A placeholder only stands for a leaf: a structure with
+                // required parts of its own (a FILE needs its FORM) is not
+                // invented.
+                let leaf = schema.subs(sub).iter().all(|s| s.min == 0);
+                if (kind == Kind::Text || open) && leaf {
+                    text(tag, PLACEHOLDER)
+                } else {
+                    return None;
+                }
+            }
+        };
+        Some(made)
+    }
+
+    /// Rules the tables cannot state: a 7.x note translation says its
+    /// language or its media type.
+    fn special(&mut self, s: &mut Structure, ty: StructId) {
+        if self.family == Family::V7
+            && self.schema.name(ty) == "NOTE-TRAN"
+            && !s
+                .substructures
+                .iter()
+                .any(|c| c.tag == "MIME" || c.tag == "LANG")
+        {
+            let here = self.here(s.tag.as_str());
+            self.repair(
+                0,
+                RepairKind::Required,
+                format!("{here} lacks MIME and LANG: LANG und added"),
+            );
+            s.substructures.push(text("LANG", "und"));
+        }
+    }
+
+    /// (j) Moves inline notes out of 5.5.1 records over 32K, longest first,
+    /// until the record fits; a record that moving every note would not
+    /// bring under the limit is left as it is.
+    fn record_sizes(&mut self, records: &mut Vec<Structure>) {
+        let mut added = Vec::new();
+        for r in records.iter_mut() {
+            let Some(ty) = self.schema.record(r.tag.as_str()) else {
+                continue;
+            };
+            let mut size = encoded_len(&*r, 0, self.family);
+            if size <= MAX_RECORD_BYTES {
+                continue;
+            }
+            let mut notes = Vec::new();
+            movable_notes(self.rules, r, ty, &mut Vec::new(), &mut notes);
+            // The bytes each move saves: the note's lines, less the pointer
+            // line left in its place (`n NOTE @N…@`, at most 32 bytes).
+            let saved = |n: &(usize, Vec<usize>)| n.0.saturating_sub(32);
+            if size.saturating_sub(notes.iter().map(saved).sum()) > MAX_RECORD_BYTES {
+                continue;
+            }
+            // Longest first; between equals, file order.
+            notes.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+            let tag = r.tag.as_str().to_string();
+            for note in &notes {
+                if size <= MAX_RECORD_BYTES {
+                    break;
+                }
+                size = size.saturating_sub(saved(note));
+                let xref = self.unique("@N1@");
+                let Some(at) = node_at(r, &note.1) else {
+                    continue;
+                };
+                let line = at.line;
+                let moved = Structure {
+                    xref: Some(Xref::new(xref.as_str())),
+                    payload: std::mem::replace(
+                        &mut at.payload,
+                        Payload::Pointer(Xref::new(xref.as_str())),
+                    ),
+                    substructures: std::mem::take(&mut at.substructures),
+                    ..Structure::new("NOTE")
+                };
+                self.types
+                    .insert(xref.as_str().into(), self.schema.record("NOTE"));
+                self.repair(
+                    line,
+                    RepairKind::RecordSize,
+                    format!("a {tag} record over 32K: a note moved to the NOTE record {xref}"),
+                );
+                added.push(moved);
+            }
+        }
+        if !added.is_empty() {
+            let at = records.len().saturating_sub(1);
+            records.splice(at..at, added);
+        }
+    }
+}
+
+/// The spelling of `value` in `set`: 5.5.1 matches without regard to case
+/// (p. 21) and writes the specification's spelling; 7.x upper-cases (and
+/// keeps extension values, upper-cased). `None` when no value matches.
+fn canonical(set: &super::schema::EnumSet, value: &str, family: Family) -> Option<String> {
+    if set.open {
+        return Some(value.to_string());
+    }
+    if let Some(v) = set.values.iter().find(|v| v.eq_ignore_ascii_case(value)) {
+        return Some((*v).to_string());
+    }
+    if family == Family::V7 {
+        let upper = value.to_ascii_uppercase();
+        if is_ext_tag(&upper) {
+            return Some(upper);
+        }
+    }
+    None
+}
+
+/// Counts one more occurrence of tag `t`; returns the count.
+fn bump(counts: &mut Vec<(u8, u32)>, t: u8) -> u32 {
+    if let Some((_, n)) = counts.iter_mut().find(|(k, _)| *k == t) {
+        *n += 1;
+        *n
+    } else {
+        counts.push((t, 1));
+        1
+    }
+}
+
+/// The structure at `path` (indices of substructures) under `r`.
+fn node_at<'s>(r: &'s mut Structure, path: &[usize]) -> Option<&'s mut Structure> {
+    let mut cur = r;
+    for &i in path {
+        cur = cur.substructures.get_mut(i)?;
+    }
+    Some(cur)
+}
+
+/// The inline notes under `s` (of type `ty`) whose superstructure also
+/// takes a note pointer: (size as written, path).
+fn movable_notes(
+    rules: &VersionRules,
+    s: &Structure,
+    ty: StructId,
+    path: &mut Vec<usize>,
+    out: &mut Vec<(usize, Vec<usize>)>,
+) {
+    let (schema, family) = (rules.spec, Family::of(rules));
+    let takes_pointer = matches!(
+        pick(rules, ty, "NOTE", true),
+        Pick::Type(id) if schema.kind(id).0 == Kind::Pointer
+    );
+    for (i, c) in s.substructures.iter().enumerate() {
+        let is_ptr = matches!(c.payload, Payload::Pointer(_));
+        let Pick::Type(cty) = pick(rules, ty, c.tag.as_str(), is_ptr) else {
+            continue;
+        };
+        path.push(i);
+        if c.tag == "NOTE" && takes_pointer && c.text().is_some() {
+            out.push((encoded_len(c, path.len(), family), path.clone()));
+        } else {
+            movable_notes(rules, c, cty, path, out);
+        }
+        path.pop();
+    }
+}

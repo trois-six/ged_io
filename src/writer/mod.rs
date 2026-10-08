@@ -62,6 +62,10 @@ use crate::version::{GedcomVersion, VersionRules};
 use emit::{emit, LineSink};
 use xref::XrefMap;
 
+pub(crate) use emit::{extension_tag, new_xref};
+pub(crate) use head::{complete as complete_head, needs_submitter, stub_submitter, PLACEHOLDER};
+pub(crate) use xref::numbered_xref;
+
 /// The line terminator of written files.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum LineEnding {
@@ -540,10 +544,14 @@ impl GedcomWriter {
         Ok(sink.into_string())
     }
 
-    /// Writes a lossless [`Tree`] to `writer`, every structure as it is,
-    /// under the line rules of the target version (the tree's own version
-    /// unless one is configured): header completed, identifiers made valid
-    /// and unique, text escaped and continued, a final `TRLR`.
+    /// Writes a lossless [`Tree`] to `writer` in the target version (the
+    /// tree's own version unless one is configured): structures that the
+    /// version does not permit as they are are first repaired by
+    /// [`spec::conform`](crate::spec::conform) (as extension structures,
+    /// keeping their data), then every line follows the line rules: header
+    /// completed, identifiers valid and unique, text escaped and continued,
+    /// a final `TRLR`. The report lists the structural repairs, then the
+    /// line repairs.
     ///
     /// # Errors
     ///
@@ -554,7 +562,7 @@ impl GedcomWriter {
         tree: &Tree,
     ) -> Result<WriteReport, WriteError> {
         let rules = self.rules_for(tree.declared_version());
-        self.write_nodes(&mut writer, rules, tree.records())
+        self.write_conformed(&mut writer, rules, tree.to_structures())
     }
 
     /// Writes owned records — such as [`Tree::to_structures`] gives — like
@@ -576,7 +584,27 @@ impl GedcomWriter {
             .and_then(|g| g.first("VERS"))
             .and_then(Structure::text);
         let rules = self.rules_for(declared);
-        self.write_nodes(&mut writer, rules, records.iter())
+        self.write_conformed(&mut writer, rules, records.to_vec())
+    }
+
+    /// Repairs `records` for `rules` ([`crate::spec::conform`]), then writes
+    /// them.
+    fn write_conformed(
+        &self,
+        writer: &mut dyn io::Write,
+        rules: &'static VersionRules,
+        mut records: Vec<Structure>,
+    ) -> Result<WriteReport, WriteError> {
+        let repairs = crate::spec::conform(&mut records, rules.version);
+        if self.config.on_nonconformant == RepairPolicy::Error {
+            if let Some(first) = repairs.into_iter().next() {
+                return Err(WriteError::NonConformant(Box::new(first)));
+            }
+            return self.write_nodes(writer, rules, records.iter());
+        }
+        let mut report = self.write_nodes(writer, rules, records.iter())?;
+        report.repairs.splice(0..0, repairs);
+        Ok(report)
     }
 
     fn write_nodes<'n, N, I>(
