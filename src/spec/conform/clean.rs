@@ -393,15 +393,13 @@ impl Conformer<'_> {
 /// Whether an enumeration value is written as it is: it is its set's
 /// spelling ([`super::canonical`] gives `value` back).
 fn is_canonical(set: &EnumSet, value: &str, family: Family) -> bool {
-    if set.open {
-        return true;
-    }
     match set.values.iter().find(|v| v.eq_ignore_ascii_case(value)) {
         Some(v) => *v == value,
         None => {
-            family == Family::V7
-                && !value.bytes().any(|b| b.is_ascii_lowercase())
-                && payload::is_ext_tag(value)
+            set.open
+                || family == Family::V7
+                    && !value.bytes().any(|b| b.is_ascii_lowercase())
+                    && payload::is_ext_tag(value)
         }
     }
 }

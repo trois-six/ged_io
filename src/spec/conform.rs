@@ -1860,11 +1860,12 @@ fn extension_tags<'n, N: Node<'n>>(r: &Rec<'n, N>) -> HashSet<String> {
 /// (p. 21) and writes the specification's spelling; 7.x upper-cases (and
 /// keeps extension values, upper-cased). `None` when no value matches.
 fn canonical(set: &super::schema::EnumSet, value: &str, family: Family) -> Option<String> {
-    if set.open {
-        return Some(value.to_string());
-    }
     if let Some(v) = set.values.iter().find(|v| v.eq_ignore_ascii_case(value)) {
         return Some((*v).to_string());
+    }
+    // An open set's own value is kept as it is.
+    if set.open {
+        return Some(value.to_string());
     }
     if family == Family::V7 {
         let upper = value.to_ascii_uppercase();
