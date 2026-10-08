@@ -679,12 +679,19 @@ ged_io <file.ged>
 ged_io --individual <XREF> <file.ged>
 ged_io --individual-lastname <LASTNAME> <file.ged>
 ged_io --individual-firstname <FIRSTNAME> <file.ged>
+ged_io --validate <file.ged>
+ged_io --validate --validation-level strict <file.ged>
 
 OPTIONS:
 -h, --help                        Print this help
 --individual <XREF>               Display a single individual (e.g. @I1@)
 --individual-lastname <LASTNAME>  Filter individuals by last name (case-insensitive)
 --individual-firstname <FIRSTNAME> Filter individuals by first name (case-insensitive)
+--validate                        Check the file against the GEDCOM specification of the
+                                  version it declares (5.5.1, 7.0 or 7.1) and list every
+                                  deviation with its line
+--validation-level <LEVEL>        strict: deviations are errors (exit code 2);
+                                  lenient (default): they are warnings (exit code 0)
 
 NOTES:
 If both --individual-lastname and --individual-firstname are set,
@@ -695,6 +702,12 @@ Example with one file:
 ```bash
 # Analyze a file
 ged_io family.ged
+
+# Check it against its specification (`ged_io::spec::validate_bytes`)
+ged_io --validate --validation-level strict family.ged
+Validation: strict - errors: 2, warnings: 0
+error: line 14: SEX "male": not a value of enumset-SEX
+error: line 27: FAMC @F9@: no record has this identifier
 ```
 
 Output (example `tests/fixtures/sample.ged`):
