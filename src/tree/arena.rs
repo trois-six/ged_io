@@ -1,6 +1,6 @@
 //! Reading the flat arena the builder fills.
 
-use super::lexer::{Kind, RawNode, Span, NO_XREF};
+use super::lexer::{Kind, RawNode, Span};
 use super::tag::STANDARD_TAGS;
 use super::{PayloadRef, Structure, Tag, Xref};
 
@@ -11,7 +11,8 @@ pub(crate) struct View<'a> {
     pub text: &'a str,
     pub side: &'a str,
     pub nodes: &'a [RawNode],
-    pub xrefs: &'a [Span],
+    /// `(node, identifier)`, by node.
+    pub xrefs: &'a [(u32, Span)],
     /// The tags that are not standard.
     pub tags: &'a [Box<str>],
 }
@@ -32,13 +33,13 @@ impl<'a> View<'a> {
         }
     }
 
-    pub(crate) fn xref(self, node: &RawNode) -> Option<&'a str> {
-        if node.xref == NO_XREF {
+    pub(crate) fn xref(self, index: usize) -> Option<&'a str> {
+        if !self.nodes.get(index)?.has_xref {
             return None;
         }
-        self.xrefs
-            .get(node.xref as usize)
-            .map(|span| span.get(self.text))
+        let index = u32::try_from(index).ok()?;
+        let at = self.xrefs.binary_search_by_key(&index, |&(n, _)| n).ok()?;
+        self.xrefs.get(at).map(|(_, span)| span.get(self.text))
     }
 
     pub(crate) fn payload(self, node: &RawNode) -> PayloadRef<'a> {
@@ -66,7 +67,7 @@ impl<'a> View<'a> {
         }
         Structure {
             tag: self.tag_owned(node),
-            xref: self.xref(node).map(Xref::new),
+            xref: self.xref(index).map(Xref::new),
             payload: self.payload(node).to_payload(),
             substructures,
             line: node.line,

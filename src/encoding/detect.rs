@@ -5,7 +5,9 @@
 //! 1. a byte order mark selects UTF-8 or UTF-16 LE/BE;
 //! 2. a NUL pattern in the first KiB selects UTF-16;
 //! 3. bytes that read as UTF-8 (at least one multi-byte sequence, and more of
-//!    them than invalid bytes) are UTF-8, whatever `HEAD.CHAR` says;
+//!    them than invalid bytes) are UTF-8, whatever `HEAD.CHAR` says; the
+//!    bytes looked at are the first [`SNIFF_WINDOW`] ones, in memory as in a
+//!    stream, unless those are ASCII only;
 //! 4. otherwise the `HEAD.CHAR` declaration selects the single-byte set, and
 //!    anything unknown (or a declaration that the bytes contradict, such as
 //!    UTF-8 or UNICODE on bytes that are neither) falls back to Windows-1252.
@@ -38,13 +40,31 @@ pub(crate) struct Sniff {
     pub declared: Option<String>,
     /// Length of the byte order mark to skip.
     pub bom: usize,
-    /// The whole window is valid UTF-8 (after the BOM).
-    pub valid_utf8: bool,
 }
 
-/// Decides how to decode `window`, the start of the input (`complete` when it
+/// How much of the input the decoding is chosen from: a stream reads this
+/// much before it decodes anything.
+pub(crate) const SNIFF_WINDOW: usize = 64 * 1024;
+
+/// Decides how to decode `window`, the start of a stream (`complete` when it
 /// is the whole input).
 pub(crate) fn sniff(window: &[u8], complete: bool) -> Sniff {
+    sniff_with(window, complete, None)
+}
+
+/// Decides how to decode `input`, held whole in memory, as a stream of it
+/// decides ([`sniff`] of its first [`SNIFF_WINDOW`] bytes), so that both
+/// give the same text. Only an ASCII window, which tells nothing, lets the
+/// rest of the input choose between UTF-8 and the declared set.
+pub(crate) fn sniff_input(input: &[u8]) -> Sniff {
+    let window = input.get(..SNIFF_WINDOW).unwrap_or(input);
+    // A stream knows it has the whole input when it ends before the window
+    // is full.
+    sniff_with(window, window.len() < SNIFF_WINDOW, Some(input))
+}
+
+/// [`sniff`] of `window`; `input` is the whole input, when it is known.
+fn sniff_with(window: &[u8], complete: bool, input: Option<&[u8]>) -> Sniff {
     if let Some(sniff) = by_bom(window) {
         return sniff;
     }
@@ -58,13 +78,22 @@ pub(crate) fn sniff(window: &[u8], complete: bool) -> Sniff {
             },
             declared: None,
             bom: 0,
-            valid_utf8: false,
         };
     }
     let declared = declared_char(window).map(|v| String::from_utf8_lossy(v).into_owned());
     let declared_encoding = declared.as_deref().and_then(GedcomEncoding::from_label);
     let fallback = declared_encoding.map_or(SingleByte::Cp1252, single_byte_for);
-    let (multibyte, invalid) = utf8_evidence(window, complete);
+    let (mut multibyte, mut invalid) = utf8_evidence(window, complete);
+    if let (Some(input), (0, 0), false) = (input, (multibyte, invalid), complete) {
+        // An ASCII window (but for a sequence its end cuts): in memory, the
+        // bytes from the first that is not ASCII on decide (a stream cannot
+        // see them).
+        let start = window
+            .iter()
+            .position(|b| !b.is_ascii())
+            .unwrap_or(window.len());
+        (multibyte, invalid) = utf8_evidence(input.get(start..).unwrap_or_default(), true);
+    }
 
     let (mode, encoding) = if multibyte > invalid {
         (Mode::Utf8 { fallback }, GedcomEncoding::Utf8)
@@ -96,7 +125,6 @@ pub(crate) fn sniff(window: &[u8], complete: bool) -> Sniff {
         encoding,
         declared,
         bom: 0,
-        valid_utf8: invalid == 0,
     }
 }
 
@@ -151,7 +179,6 @@ fn by_bom(window: &[u8]) -> Option<Sniff> {
             None
         },
         bom,
-        valid_utf8: bom == 3 && std::str::from_utf8(rest).is_ok(),
     })
 }
 
@@ -330,7 +357,12 @@ mod tests {
     fn an_incomplete_window_ends_in_the_middle_of_a_sequence() {
         let s = sniff("0 HEAD\n1 NOTE é".as_bytes().split_last().unwrap().1, false);
         assert_eq!(s.encoding, GedcomEncoding::Ascii);
-        assert!(s.valid_utf8);
+        assert_eq!(
+            s.mode,
+            Mode::Utf8 {
+                fallback: SingleByte::Cp1252
+            }
+        );
         assert!(is_incomplete_sequence(&[0xE2, 0x82]));
         assert!(!is_incomplete_sequence(&[0xE0, 0x80]));
         assert!(!is_incomplete_sequence(&[0x80]));

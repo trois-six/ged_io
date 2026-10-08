@@ -37,11 +37,14 @@
 //! # Memory
 //!
 //! A tree keeps the decoded text it was read from and points into it: each
-//! structure is a 28-byte entry of a flat, pre-order array, with its tag as
-//! a 32-bit index (standard tags are interned in a static table), and its
-//! identifier and payload as 32-bit offset and length into the text. Only
+//! structure is a 24-byte entry of a flat, pre-order array, with its tag as
+//! a 32-bit index (standard tags are interned in a static table) and its
+//! payload as a 32-bit offset and length into the text; identifiers, which
+//! records carry and few substructures do, sit in a side table. Only
 //! payloads that reading rewrote (joined continuations, unescaped `@@`) are
-//! copied, into a side buffer. No structure allocates.
+//! copied, into a side buffer. No structure allocates. Read from a
+//! `Vec<u8>` of UTF-8 ([`Tree::from_bytes`]), the buffer itself becomes the
+//! text: a 64 MB file peaks at about 2.5 times its size.
 //!
 //! # Example
 //!
@@ -96,7 +99,7 @@ struct Segment {
     text: Box<str>,
     side: Box<str>,
     nodes: Box<[RawNode]>,
-    xrefs: Box<[Span]>,
+    xrefs: Box<[(u32, Span)]>,
 }
 
 impl Segment {
@@ -132,10 +135,11 @@ impl Tree {
     }
 
     /// Decodes bytes of any encoding (see [`crate::encoding::decode`]) and
-    /// parses them.
+    /// parses them. Given a `Vec<u8>` of UTF-8, the tree keeps that buffer
+    /// as its text, without a copy.
     #[must_use]
-    pub fn from_bytes(bytes: &[u8]) -> Self {
-        Self::parse(crate::encoding::decode(bytes).text)
+    pub fn from_bytes(bytes: impl Into<Vec<u8>>) -> Self {
+        Self::parse(crate::encoding::decode_owned(bytes.into()).text)
     }
 
     fn parse_segmented(text: String, limit: usize) -> Self {
@@ -395,7 +399,7 @@ impl<'t> StructureRef<'t> {
     /// The cross-reference identifier, delimiters included.
     #[must_use]
     pub fn xref(self) -> Option<&'t str> {
-        self.view().xref(self.node())
+        self.view().xref(self.index as usize)
     }
 
     /// The payload.
