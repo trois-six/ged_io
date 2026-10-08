@@ -564,7 +564,9 @@ impl GedcomWriter {
         tree: &Tree,
     ) -> Result<WriteReport, WriteError> {
         let rules = self.rules_for(tree.declared_version());
-        self.write_conformed(&mut writer, rules, tree.records().map(Rec::given).collect())
+        let mut records = Vec::with_capacity(tree.records().count());
+        records.extend(tree.records().map(Rec::given));
+        self.write_conformed(&mut writer, rules, records)
     }
 
     /// Writes owned records — such as [`Tree::to_structures`] gives — like
