@@ -22,6 +22,7 @@
 //! - New structures: `EXID`, `MIME`, `CREA`, `SDATE`, `CROP`, `NO`, `INIL`, `TRAN`
 //! - URIs for all structure types
 
+use crate::spec::{tables, Schema};
 #[cfg(feature = "json")]
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -182,6 +183,8 @@ pub struct VersionRules {
     /// deepest level of the version (5.5.1: two digits; 7.x: the 255 levels
     /// readers nest), so that its `CONT` lines fit.
     pub(crate) max_level: usize,
+    /// The specification tables of the version ([`crate::spec`]).
+    pub(crate) spec: &'static Schema,
 }
 
 /// GEDCOM 5.5.1.
@@ -196,30 +199,21 @@ pub static V551: VersionRules = VersionRules {
     head_sour_subm: true,
     xref: XrefGrammar::V551 { max_len: 22 },
     max_level: 98,
+    spec: &tables::V551,
 };
 
 /// GEDCOM 7.0.
-pub static V70: VersionRules = VersionRules {
-    version: GedcomVersion::V7_0,
-    vers_payload: "7.0",
-    max_line_len: None,
-    conc: false,
-    at_escape: AtEscape::LeadingOnly,
-    gedc_form: None,
-    head_char: false,
-    head_sour_subm: false,
-    xref: XrefGrammar::V7,
-    max_level: 254,
-};
+pub static V70: VersionRules = V70_LINES;
 
 /// GEDCOM 7.1, whose line grammar and header rules are those of 7.0.
 pub static V71: VersionRules = VersionRules {
     version: GedcomVersion::V7_1,
     vers_payload: "7.1",
+    spec: &tables::V71,
     ..V70_LINES
 };
 
-/// The 7.x line rules, shared by [`V70`] and [`V71`].
+/// The rules of 7.0, whose line rules 7.1 shares.
 const V70_LINES: VersionRules = VersionRules {
     version: GedcomVersion::V7_0,
     vers_payload: "7.0",
@@ -231,6 +225,7 @@ const V70_LINES: VersionRules = VersionRules {
     head_sour_subm: false,
     xref: XrefGrammar::V7,
     max_level: 254,
+    spec: &tables::V70,
 };
 
 impl VersionRules {

@@ -189,6 +189,8 @@ impl Gen {
             Pay::Time => pick("10:00:00", "11:00:00"),
             Pay::Lang if v7 => pick("en", "fr"),
             Pay::Lang => pick("English", "French"),
+            // MIME gives the media type of a text (7.x §MIME).
+            Pay::MediaType if tag == "MIME" => pick("text/plain", "text/html"),
             Pay::MediaType => pick("image/jpeg", "text/plain"),
             Pay::FilePath => pick("media/a.jpg", "media/b.jpg"),
             Pay::Name => pick("Ann /Sample/", "Bea /Example/"),
@@ -211,6 +213,11 @@ impl Gen {
                 n.children = self.required(s.ty, s.tag, depth + 1);
                 out.push(n);
             }
+        }
+        // A note translation says its language or its media type (7.x
+        // §NOTE-TRAN), which the tables cannot state.
+        if ty == "NOTE-TRAN" && self.skip.is_none() {
+            out.push(N::new("LANG", Some("en".into())));
         }
         out
     }
@@ -576,7 +583,11 @@ pub fn enum_probes(g: &Gen) -> Vec<(Probe, Mode)> {
             Pay::Enum(set) | Pay::ListEnum(set) => set,
             _ => continue,
         };
-        if !paths.contains_key(s.sup) {
+        // The writer sets the character set and the form of the header from
+        // its own output: they are not data to keep.
+        if !paths.contains_key(s.sup)
+            || matches!(s.ty, "HEADER.HEAD.CHAR" | "HEADER.HEAD.GEDC.FORM")
+        {
             continue;
         }
         let (vals, open) = g
@@ -686,6 +697,17 @@ fn enumerations_71() {
     enumerations(Target::V71);
 }
 
+/// What the crate's validator finds in a generated input, but for one rule
+/// the probes break on purpose: placing a structure alone, with neither a
+/// payload nor a substructure (`1 BAPL`), which GEDCOM 7 §1.2 forbids and
+/// the checker leaves to the validator.
+fn validator_issues(doc: &str) -> Vec<(String, u32, String)> {
+    adapter::validate(doc)
+        .into_iter()
+        .filter(|(_, _, detail)| !detail.ends_with("has neither a payload nor a substructure"))
+        .collect()
+}
+
 /// The generator only produces conformant datasets (lenient enumeration
 /// probes excepted): a probe that fails is a ged_io gap, not a test mistake.
 #[test]
@@ -699,12 +721,24 @@ fn generated_inputs_are_conformant() {
             for i in checker::check(&p.doc, t, None) {
                 bad.push(format!("{}: {i}", p.id));
             }
+            for (rule, line, detail) in validator_issues(&p.doc) {
+                bad.push(format!(
+                    "{}: validator: line {line}: {rule}: {detail}",
+                    p.id
+                ));
+            }
         }
         for (p, mode) in enum_probes(&g) {
             n += 1;
             if mode == Mode::Exact {
                 for i in checker::check(&p.doc, t, None) {
                     bad.push(format!("{}: {i}", p.id));
+                }
+                for (rule, line, detail) in validator_issues(&p.doc) {
+                    bad.push(format!(
+                        "{}: validator: line {line}: {rule}: {detail}",
+                        p.id
+                    ));
                 }
             }
         }
@@ -1104,41 +1138,77 @@ fn payload_types() {
     ratchet::verify("payload", n, failures);
 }
 
-/// The valid samples pass the checker and the invalid ones do not: the lists
-/// and the checker's grammars agree.
+/// Invalid samples the crate's validator accepts, and why.
+const VALIDATOR_READS_AS_VALID: &[(&str, &str, &str)] = &[
+    // 5.5.1 controlled values are case-insensitive (p. 21), months
+    // included; the checker reads months as tags, exact.
+    ("551", "date", "1 jan 1900"),
+];
+
+/// The valid samples pass the checker and the crate's validator, and the
+/// invalid ones do not: the lists and both sets of grammars agree.
 #[test]
 fn payload_samples_agree_with_the_checker() {
     let mut wrong = Vec::new();
     for t in [Target::V551, Target::V70] {
         for (kind, body, _, valid, invalid) in payload_samples(t) {
             for v in valid.iter() {
-                let issues = checker::check(&dataset(t, &body.replace("{}", v)), t, None);
+                let doc = dataset(t, &body.replace("{}", v));
+                let issues = checker::check(&doc, t, None);
                 if !issues.is_empty() {
                     wrong.push(format!("{} {kind} valid {v:?}: {:?}", short(t), issues));
                 }
+                let found = adapter::validate(&doc);
+                if !found.is_empty() {
+                    wrong.push(format!(
+                        "{} {kind} valid {v:?}: validator {found:?}",
+                        short(t)
+                    ));
+                }
             }
             for v in invalid.iter() {
-                if checker::check(&dataset(t, &body.replace("{}", v)), t, None).is_empty() {
+                let doc = dataset(t, &body.replace("{}", v));
+                if checker::check(&doc, t, None).is_empty() {
                     wrong.push(format!("{} {kind} invalid {v:?} passes", short(t)));
+                }
+                if adapter::validate(&doc).is_empty()
+                    && !VALIDATOR_READS_AS_VALID.contains(&(short(t), kind, v))
+                {
+                    wrong.push(format!(
+                        "{} {kind} invalid {v:?} passes the validator",
+                        short(t)
+                    ));
                 }
             }
         }
         for (key, value) in calendar_values(t) {
-            let issues = checker::check(
-                &dataset(t, &format!("0 @I1@ INDI\n1 BIRT\n2 DATE {value}\n")),
-                t,
-                None,
-            );
+            let doc = dataset(t, &format!("0 @I1@ INDI\n1 BIRT\n2 DATE {value}\n"));
+            let issues = checker::check(&doc, t, None);
             if !issues.is_empty() {
                 wrong.push(format!("{} calendar {key} {value:?}: {issues:?}", short(t)));
+            }
+            let found = adapter::validate(&doc);
+            if !found.is_empty() {
+                wrong.push(format!(
+                    "{} calendar {key} {value:?}: validator {found:?}",
+                    short(t)
+                ));
             }
         }
     }
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
-/// The checker reports misplaced, repeated and missing structures, for a
-/// deterministic sample of the table rows of every version.
+/// Whether the crate's validator reports one of `rules` on `doc`.
+fn validator_reports(doc: &str, rules: &[&str]) -> bool {
+    adapter::validate(doc)
+        .iter()
+        .any(|(rule, _, _)| rules.contains(&rule.as_str()))
+}
+
+/// The checker and the crate's validator both report misplaced, repeated
+/// and missing structures, for a deterministic sample of the table rows of
+/// every version.
 #[test]
 fn checker_self_test() {
     let mut missed = Vec::new();
@@ -1173,6 +1243,9 @@ fn checker_self_test() {
                 {
                     missed.push(format!("{} misplaced {}", short(t), sub.tag));
                 }
+                if !validator_reports(&doc, &["Misplaced", "Continuation"]) {
+                    missed.push(format!("{} validator: misplaced {}", short(t), sub.tag));
+                }
             }
             // Repeated beyond the maximum.
             if sub.max == 1 && alternatives == 1 {
@@ -1184,6 +1257,14 @@ fn checker_self_test() {
                     if !issues.iter().any(|i| i.rule == "cardinality-max") {
                         missed.push(format!(
                             "{} repeated {}/{}: {issues:?}",
+                            short(t),
+                            sub.sup,
+                            sub.tag
+                        ));
+                    }
+                    if !validator_reports(&doc, &["Cardinality"]) {
+                        missed.push(format!(
+                            "{} validator: repeated {}/{}",
                             short(t),
                             sub.sup,
                             sub.tag
@@ -1203,6 +1284,14 @@ fn checker_self_test() {
                     {
                         missed.push(format!(
                             "{} missing {}/{}: {issues:?}",
+                            short(t),
+                            sub.sup,
+                            sub.tag
+                        ));
+                    }
+                    if !validator_reports(&doc, &["MissingRequired"]) {
+                        missed.push(format!(
+                            "{} validator: missing {}/{}",
                             short(t),
                             sub.sup,
                             sub.tag

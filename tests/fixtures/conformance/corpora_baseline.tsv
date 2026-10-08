@@ -26,7 +26,7 @@ gedcom4j/sample/TGC551LF.ged	OK	332	cardinality-min,misplaced,payload-age,payloa
 gedcom4j/sample/TGC55C.ged	OK	343	cardinality-min,misplaced,payload-age,payload-date,payload-enum,payload-unexpected
 gedcom4j/sample/TGC55CLF.ged	OK	343	cardinality-min,misplaced,payload-age,payload-date,payload-enum,payload-unexpected
 gedcom4j/sample/a31486.ged	OK	0	cardinality-min,payload-date,payload-enum
-gedcom4j/sample/allged.ged	OK	25	cardinality-min,misplaced,payload-unexpected
+gedcom4j/sample/allged.ged	OK	25	cardinality-min,misplaced,payload-enum,payload-unexpected
 gedcom4j/sample/customtagstorture.ged	OK	103	payload-date,payload-enum,pointer-dangling
 gedcom4j/sample/famhistcustomtags.ged	OK	8	cardinality-min,misplaced
 gedcom4j/sample/famhistnocustomtags.ged	OK	0	cardinality-min,misplaced
@@ -68,9 +68,9 @@ gramps/data/tests/imp_FTM_16dec2015a-mod1.ged	OK	6	cardinality-min,payload-date
 gramps/data/tests/imp_FTM_LINK.ged	OK	0	cardinality-min
 gramps/data/tests/imp_FTM_OCCU_bug.ged	OK	0	cardinality-min
 gramps/data/tests/imp_FTM_PHOTO.ged	OK	0	cardinality-min,payload-enum
-gramps/data/tests/imp_Latin_1_CR.ged	OK	0	
-gramps/data/tests/imp_Latin_1_CRLF.ged	OK	0	
-gramps/data/tests/imp_Latin_1_LF.ged	OK	0	
+gramps/data/tests/imp_Latin_1_CR.ged	OK	0	payload-enum
+gramps/data/tests/imp_Latin_1_CRLF.ged	OK	0	payload-enum
+gramps/data/tests/imp_Latin_1_LF.ged	OK	0	payload-enum
 gramps/data/tests/imp_MediaTest.ged	OK	20	cardinality-min,misplaced,payload-enum
 gramps/data/tests/imp_MixInlineXrefNote.ged	OK	0	
 gramps/data/tests/imp_Paris.ged	OK	2	
@@ -88,9 +88,9 @@ gramps/data/tests/imp_UTF_8_NOBOM_CR.ged	OK	0
 gramps/data/tests/imp_UTF_8_NOBOM_CRLF.ged	OK	0	
 gramps/data/tests/imp_UTF_8_NOBOM_LF.ged	OK	0	
 gramps/data/tests/imp_bug_8322_test.ged	OK	16	misplaced
-gramps/data/tests/imp_cp1252_CR.ged	OK	25	
-gramps/data/tests/imp_cp1252_CRLF.ged	OK	25	
-gramps/data/tests/imp_cp1252_LF.ged	OK	25	
+gramps/data/tests/imp_cp1252_CR.ged	OK	25	payload-enum
+gramps/data/tests/imp_cp1252_CRLF.ged	OK	25	payload-enum
+gramps/data/tests/imp_cp1252_LF.ged	OK	25	payload-enum
 gramps/data/tests/imp_notetest_dfs.ged	OK	116	cardinality-min,misplaced,payload-date,payload-enum,pointer-dangling
 gramps/data/tests/imp_sample.ged	FATAL	0	
 gramps/data/tests/imp_test_FTM_CONC.ged	OK	0	

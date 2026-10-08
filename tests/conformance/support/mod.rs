@@ -8,8 +8,18 @@ pub mod cases;
 pub mod checker;
 pub mod ratchet;
 pub mod semantic;
-#[rustfmt::skip]
 pub mod spec_tables;
+
+// The crate's specification tables (`src/spec/`), included as data; the suite
+// reads them through `spec_tables` and leaves the rest of their API, which
+// the crate's validator uses, unused.
+#[allow(dead_code)]
+#[path = "../../../src/spec/schema.rs"]
+mod schema;
+#[allow(dead_code)]
+#[path = "../../../src/spec/tables.rs"]
+#[rustfmt::skip]
+mod tables;
 pub mod tree;
 
 use std::path::{Path, PathBuf};

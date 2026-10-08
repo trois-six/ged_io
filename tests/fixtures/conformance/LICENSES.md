@@ -29,8 +29,8 @@ in `tests/conformance/support/semantic.rs` as unit tests:
 
 | Path | Inputs | Licence |
 |------|--------|---------|
-| `tests/conformance/support/spec_tables.rs` (7.0, 7.1) | FamilySearch/GEDCOM `extracted-files/` at `512e38d` (main) and `c451779` (v7.1) | Apache-2.0; attribution in the repository `NOTICE` |
-| `tests/conformance/support/spec_tables.rs` (5.5.1) | cacack/gedcom-go `testdata/spec/gedcom-5.5.1/` at `3c6d42d`, completed by `tools/spec-tables/551-errata.tsv` (page references to `docs/ged551.pdf`) | MIT, Copyright (c) 2025 Chris Clonch |
+| `src/spec/tables.rs` (7.0, 7.1), read by the suite through `tests/conformance/support/spec_tables.rs` | FamilySearch/GEDCOM `extracted-files/` at `512e38d` (main) and `c451779` (v7.1) | Apache-2.0; attribution in the repository `NOTICE` |
+| `src/spec/tables.rs` (5.5.1) | cacack/gedcom-go `testdata/spec/gedcom-5.5.1/` at `3c6d42d`, completed by `tools/spec-tables/551-errata.tsv` (page references to `docs/ged551.pdf`) | MIT, Copyright (c) 2025 Chris Clonch |
 | `tests/conformance/support/ansel_table.rs` | The ANSEL tables of `docs/ged551.pdf` Appendix C and the Library of Congress MARC-8 mapping (facts) | — |
 
 GEDCOM-registries has no licence: it is only fetched (`tools/fetch-corpora.sh
