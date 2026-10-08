@@ -1,0 +1,63 @@
+# Long-running checks that do not gate pull requests: fuzzing and the opt-in
+# conformance corpora (fetched from pinned commits, never vendored).
+name: Nightly
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    name: Fuzz every entry point
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        fetch-depth: 1
+
+    - name: Install Rust nightly
+      uses: dtolnay/rust-toolchain@nightly
+
+    - name: Install cargo-fuzz
+      uses: taiki-e/install-action@cargo-fuzz
+
+    - name: Seed the corpus with the test fixtures
+      run: |
+        mkdir -p fuzz/corpus/entry_points
+        find tests/fixtures -name '*.ged' -size -64k -exec cp {} fuzz/corpus/entry_points/ \;
+
+    - name: Fuzz for five minutes
+      run: cargo fuzz run entry_points -- -max_total_time=300 -max_len=65536
+
+    - name: Keep the crashing inputs
+      if: failure()
+      uses: actions/upload-artifact@v5
+      with:
+        name: fuzz-artifacts
+        path: fuzz/artifacts/
+
+  corpora:
+    name: Conformance corpora (opt-in tier)
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        fetch-depth: 1
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Fetch the pinned corpora and specification inputs
+      run: tools/fetch-corpora.sh --registries
+
+    - name: Run the opt-in conformance tests
+      run: cargo test --all-features --test conformance -- --ignored
+
+    - name: Performance smoke test
+      run: cargo test --release --all-features --test conformance -- --ignored performance

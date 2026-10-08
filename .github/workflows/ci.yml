@@ -50,8 +50,56 @@ jobs:
     - name: Run tests
       run: cargo test --all-features --verbose
 
-    - name: Run doc tests
-      run: cargo test --doc
+  msrv:
+    name: MSRV (1.88)
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        fetch-depth: 1
+
+    - name: Install Rust 1.88
+      uses: dtolnay/rust-toolchain@1.88
+
+    - name: Cache dependencies
+      uses: actions/cache@v6
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-msrv-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Run tests at the minimum supported Rust version
+      run: cargo test --all-features
+
+  features:
+    name: Each feature alone
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        fetch-depth: 1
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Install cargo-hack
+      uses: taiki-e/install-action@cargo-hack
+
+    - name: Cache dependencies
+      uses: actions/cache@v6
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-hack-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Build and test each feature on its own, and none
+      run: cargo hack test --each-feature
 
   cross-platform-test:
     name: Cross Platform Tests
@@ -92,17 +140,13 @@ jobs:
       with:
         fetch-depth: 1
 
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-
-    - name: Install cargo-audit
-      run: cargo install cargo-audit
-
     - name: Run security audit
-      run: cargo audit
+      uses: rustsec/audit-check@v2
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
 
   trigger-release:
     name: Trigger Release
-    needs: [test, cross-platform-test, security-audit]
+    needs: [test, msrv, features, cross-platform-test, security-audit]
     if: startsWith(github.ref, 'refs/tags/v')
     uses: ./.github/workflows/release.yml
