@@ -27,6 +27,7 @@ pub mod source;
 pub mod submission;
 pub mod submitter;
 pub mod translation;
+pub mod value;
 
 use crate::{
     parser::Parser,
