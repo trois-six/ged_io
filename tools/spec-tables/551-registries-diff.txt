@@ -1,0 +1,6 @@
+# Expected output of `tools/spec-tables/gen.py --crosscheck-551 target/corpora/registries`:
+# the facts on which GEDCOM-registries 05519e8 and the generated 5.5.1 table disagree, each
+# settled against docs/ged551.pdf.
+#
+# SLGC.FAMC: the PDF gives {1:1} (LDS_INDIVIDUAL_ORDINANCE, p.36); the registries say {0:1}.
+cardinality SLGC.FAMC: registries ['0:1'], table ['1:1']
