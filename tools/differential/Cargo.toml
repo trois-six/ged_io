@@ -1,0 +1,13 @@
+[package]
+name = "ged_io-differential"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Compares what the published ged_io 0.17.0 and this checkout keep from the same GEDCOM files."
+
+[dependencies]
+ged_io_published = { package = "ged_io", version = "=0.17.0" }
+ged_io = { path = "../.." }
+
+# Not part of the crate's build: a stand-alone tool.
+[workspace]
