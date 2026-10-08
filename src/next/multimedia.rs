@@ -64,7 +64,7 @@ gedcom_struct! {
         "TRAN" => translations: ThinVec<FileTranslation>,
     }
     spec {
-        v551: ["MULTIMEDIA_LINK.OBJE#2.FILE"],
+        v551: ["MULTIMEDIA_LINK.OBJE#2.FILE", "MULTIMEDIA_RECORD.OBJE.FILE"],
         v70: ["FILE"],
         v71: ["FILE"],
     }
@@ -80,9 +80,15 @@ gedcom_struct! {
         format: Text;
         /// The medium (`MEDI`), with a phrase in 7.x.
         "MEDI" => medium: Option<Box<Phrased<Medium>>>,
+        /// The medium of a file of a 5.5.1 multimedia record (`TYPE`, which
+        /// links and 7.x name `MEDI`), kept as read (D12).
+        "TYPE" => medium_type: Option<Box<Medium>>,
     }
     spec {
-        v551: ["MULTIMEDIA_LINK.OBJE#2.FILE.FORM"],
+        v551: [
+            "MULTIMEDIA_LINK.OBJE#2.FILE.FORM",
+            "MULTIMEDIA_RECORD.OBJE.FILE.FORM",
+        ],
         v70: ["FORM"],
         v71: ["FORM"],
     }

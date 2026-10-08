@@ -4,6 +4,8 @@
 //! know is lost; the grammars of [`crate::types::date`] and
 //! [`crate::types::age`] read them on demand.
 
+use crate::spec::payload::Family;
+use crate::spec::schema::Kind;
 use crate::types::age::{self, AgeValue};
 use crate::types::date as values;
 use crate::types::date::time::Time;
@@ -11,6 +13,7 @@ use crate::types::date::value::{DateExact, DatePeriod, DateValue};
 
 use super::driver::{gedcom_struct, WriteCx};
 use super::list::ThinVec;
+use super::node::{Extra, Node, Value};
 use super::note::Note;
 use super::text::{Store, Text};
 
@@ -87,16 +90,94 @@ fn convert(
     (converted != date).then_some(converted)
 }
 
+/// The parts of an untyped value structure (a date, an age): its text
+/// payload, the first text of each leaf `tags` names, and the other
+/// substructures, as reading would give them; `None` when it would not fit
+/// (an identifier, a pointer).
+fn parts<const N: usize>(
+    node: &Node,
+    store: &Store,
+    tags: [&str; N],
+) -> Option<(Text, [Option<Text>; N], Extra)> {
+    let value = match (&node.payload, node.xref) {
+        (Value::None, None) => Text::default(),
+        (Value::Text(t), None) => t.clone(),
+        _ => return None,
+    };
+    let mut found: [Option<Text>; N] = std::array::from_fn(|_| None);
+    let mut sent = [false; N];
+    let mut extra = Extra::new();
+    for c in &node.children {
+        let at = tags.iter().position(|t| *t == store.tag(c.tag));
+        let leaf = match &c.payload {
+            Value::None => Some(Text::default()),
+            Value::Text(t) => Some(t.clone()),
+            Value::Pointer(_) => None,
+        };
+        match (at, leaf) {
+            (Some(i), Some(t))
+                if c.children.is_empty() && c.xref.is_none() && !sent[i] && found[i].is_none() =>
+            {
+                found[i] = Some(t);
+            }
+            (Some(i), _) => {
+                sent[i] = true;
+                extra.push(c.clone());
+            }
+            (None, _) => extra.push(c.clone()),
+        }
+    }
+    Some((value, found, extra))
+}
+
+fn untyped_date(node: &Node, store: &Store) -> Option<Date> {
+    let (value, [time, phrase], extra) = parts(node, store, ["TIME", "PHRASE"])?;
+    Some(Date {
+        value,
+        detail: (time.is_some() || phrase.is_some()).then(|| Box::new(DateDetail { time, phrase })),
+        extra,
+    })
+}
+
+fn untyped_exact(node: &Node, store: &Store) -> Option<ExactDate> {
+    let (value, [time], extra) = parts(node, store, ["TIME"])?;
+    Some(ExactDate { value, time, extra })
+}
+
+fn untyped_period(node: &Node, store: &Store) -> Option<Period> {
+    let (value, [phrase], extra) = parts(node, store, ["PHRASE"])?;
+    Some(Period {
+        value,
+        phrase,
+        extra,
+    })
+}
+
+fn untyped_age(node: &Node, store: &Store) -> Option<Age> {
+    let (value, [phrase], extra) = parts(node, store, ["PHRASE"])?;
+    Some(Age {
+        value,
+        phrase,
+        extra,
+    })
+}
+
 fn text(s: Option<String>) -> Option<Text> {
     s.map(Text::new)
 }
 
 fn convert_date(date: &Date, cx: &WriteCx<'_>) -> Option<Date> {
-    let c = date_to_version(&date.value, date.time.as_ref(), date.phrase.as_ref(), cx)?;
+    let detail = date.detail();
+    let c = date_to_version(
+        &date.value,
+        detail.time.as_ref(),
+        detail.phrase.as_ref(),
+        cx,
+    )?;
+    let (time, phrase) = (text(c.time), text(c.phrase));
     Some(Date {
         value: Text::new(c.value.unwrap_or_default()),
-        time: text(c.time),
-        phrase: text(c.phrase),
+        detail: (time.is_some() || phrase.is_some()).then(|| Box::new(DateDetail { time, phrase })),
         extra: date.extra.clone(),
     })
 }
@@ -127,6 +208,16 @@ fn convert_age(a: &Age, cx: &WriteCx<'_>) -> Option<Age> {
         value: owned(Some(&a.value), cx),
         phrase: owned(a.phrase.as_ref(), cx),
     };
+    // An age the target permits as it is (5.5.1 also spaces its bound,
+    // `> 25y`, and ignores case) is kept so, as the conformance repair
+    // keeps it: what a file says validly is not rewritten.
+    let valid = age.value.as_deref().is_some_and(|v| {
+        let family = Family::of(cx.version.rules());
+        crate::spec::payload::check(Kind::Age, None, v, family).is_none()
+    });
+    if valid && (cx.version.is_v7() || age.phrase.is_none()) {
+        return None;
+    }
     let c = age.to_version(cx.version);
     (c != age).then(|| Age {
         value: Text::new(c.value.unwrap_or_default()),
@@ -142,14 +233,18 @@ gedcom_struct! {
     /// Written in another version's grammar, it is converted
     /// ([`values::Date::to_version`]): `@#DJULIAN@` and `JULIAN`, `B.C.`
     /// and `BCE`, dual years, phrases.
-    pub struct Date [convert = convert_date] {
+    pub struct Date [convert = convert_date, untyped_date] {
         @payload
         /// The date value as written (`ABT 1900`, `@#DJULIAN@ 1 JAN 1700`).
         value: Text;
-        /// The time (`TIME`).
-        "TIME" => time: Option<Text>,
-        /// The date in words (`PHRASE`).
-        "PHRASE" => phrase: Option<Text>,
+        @detail
+        /// The time and phrase of a [`Date`], which few dates have.
+        DateDetail {
+            /// The time (`TIME`).
+            "TIME" => time: Option<Text>,
+            /// The date in words (`PHRASE`).
+            "PHRASE" => phrase: Option<Text>,
+        }
     }
     spec {
         v551: [
@@ -175,14 +270,14 @@ impl Date {
     /// The time read by the time grammar.
     #[must_use]
     pub fn parse_time<S: AsRef<Store> + ?Sized>(&self, store: &S) -> Option<Time> {
-        Time::parse(&self.time.as_ref()?.to_str(store))
+        Time::parse(&self.detail().time.as_ref()?.to_str(store))
     }
 }
 
 gedcom_struct! {
     /// An exact date (`DATE` of `CHAN`, `CREA`, an ordinance status or the
     /// header) and its time.
-    pub struct ExactDate [convert = convert_exact] {
+    pub struct ExactDate [convert = convert_exact, untyped_exact] {
         @payload
         /// The date as written (`1 JAN 2000`).
         value: Text;
@@ -222,7 +317,7 @@ impl ExactDate {
 gedcom_struct! {
     /// A date period (`DATE` of a source's recorded events, 7.x `NO`) and
     /// its phrase.
-    pub struct Period [convert = convert_period] {
+    pub struct Period [convert = convert_period, untyped_period] {
         @payload
         /// The period as written (`FROM 1900 TO 1910`).
         value: Text;
@@ -248,7 +343,7 @@ impl Period {
 gedcom_struct! {
     /// An age at an event (`AGE`) and its phrase. Written in another
     /// version's grammar, it is converted ([`age::Age::to_version`]).
-    pub struct Age [convert = convert_age] {
+    pub struct Age [convert = convert_age, untyped_age] {
         @payload
         /// The age as written (`> 25y 3m`, `CHILD`).
         value: Text;
