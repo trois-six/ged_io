@@ -147,10 +147,22 @@ pub fn compare_trees(
 }
 
 /// Payloads and structures of `input` that appear nowhere in `output`
-/// ("nothing lost", for leniency cases whose output is normalised). Tags
-/// compare without a leading underscore and case-insensitively, so a
-/// structure relocated as an extension still counts as kept; banned control
-/// characters are ignored; xrefs and pointers are not compared.
+/// ("nothing lost", for leniency cases whose output is normalised).
+///
+/// The output of invalid input is repaired by the writer (the table of
+/// `spec::conform`), so data counts as kept in the forms that table gives
+/// it:
+/// - tags compare without a leading underscore and case-insensitively, so
+///   a structure relocated as an extension (repairs a, e, f) counts as
+///   kept, and its payload is read as the standard tag's (`_AGE`, `_TIME`);
+/// - enumeration values compare without case: 5.5.1 controlled values are
+///   case-insensitive (p. 21), and repair b writes a value of the wrong
+///   case in the version's own (`SEX m` is `SEX M`);
+/// - a date kept as a 5.5.1 date phrase (`(7/11/1959)`, repair d) is its
+///   text; a 7.x one is in its `PHRASE`, compared like any text.
+///
+/// Banned control characters are ignored; xrefs and pointers are not
+/// compared.
 pub fn lost(input: &str, output: &str) -> Vec<String> {
     let bag = |text: &str| {
         let (v, t) = tree::parse(text);
@@ -159,12 +171,22 @@ pub fn lost(input: &str, output: &str) -> Vec<String> {
             if r.tag == "HEAD" || r.tag == "TRLR" {
                 continue;
             }
-            r.walk(&mut Vec::new(), &mut |_, n| {
+            r.walk(&mut Vec::new(), &mut |path, n| {
                 let tag = n.tag.trim_start_matches('_').to_ascii_uppercase();
                 *m.entry(format!("tag {tag}")).or_default() += 1;
                 if let Payload::Text(s) = &n.payload {
-                    let s: String = s.chars().filter(|c| !is_banned(*c)).collect();
-                    let s = normalise_value(&n.tag, &s, v);
+                    let mut s: String = s.chars().filter(|c| !is_banned(*c)).collect();
+                    if tag == "DATE" {
+                        if let Some(phrase) = s.strip_prefix('(').and_then(|r| r.strip_suffix(')'))
+                        {
+                            s = phrase.to_string();
+                        }
+                    }
+                    let mut s = normalise_value(&tag, &s, v);
+                    let parent = path.len().checked_sub(2).and_then(|i| path.get(i));
+                    if is_enum(&tag, parent.map(|p| p.trim_start_matches('_'))) {
+                        s = s.to_ascii_uppercase();
+                    }
                     if !s.is_empty() {
                         // A text may be re-split differently: compare by lines.
                         for part in s.split('\n') {
@@ -269,6 +291,16 @@ fn remove_path(n: &mut Node, parts: &[&str]) {
 }
 
 const NAME_PIECES: [&str; 6] = ["NPFX", "GIVN", "NICK", "SPFX", "SURN", "NSFX"];
+
+/// The tags of enumeration payloads (`TYPE` under `NAME`, `FONE` or
+/// `ROMN` only), for leniency.
+fn is_enum(tag: &str, parent: Option<&str>) -> bool {
+    match tag {
+        "TYPE" => matches!(parent, Some("NAME" | "FONE" | "ROMN")),
+        "PEDI" | "STAT" | "ADOP" | "MEDI" | "RESN" | "SEX" | "ROLE" | "QUAY" | "KIND" => true,
+        _ => false,
+    }
+}
 const ENUM_551: [&str; 8] = [
     "PEDI", "STAT", "ADOP", "MEDI", "RESN", "SEX", "ROLE", "TYPE",
 ];
@@ -886,5 +918,26 @@ mod tests {
         let a = format!("{H7}0 @I1@ INDI\n1 NOTE a\u{7}b\n1 _X\n2 _Y kept\n0 TRLR");
         let b = format!("{H7}0 @I1@ INDI\n1 NOTE ab\n1 X\n0 TRLR");
         assert_eq!(lost(&a, &b), ["tag Y (x1)", "text kept (x1)"]);
+    }
+
+    #[test]
+    fn lost_reads_the_repaired_forms() {
+        // Relocated as an extension; an enumeration value of another case.
+        let a = format!("{H5}0 @I1@ INDI\n1 SEX m\n1 FAMC @F1@\n2 PEDI stepchild\n0 TRLR");
+        let b = format!("{H5}0 @I1@ INDI\n1 SEX M\n1 FAMC @F1@\n2 _PEDI stepchild\n0 TRLR");
+        assert!(lost(&a, &b).is_empty(), "{:?}", lost(&a, &b));
+        // A 5.5.1 date phrase, a 7.x date in its phrase, an invalid time
+        // as an extension.
+        let a = format!("{H5}0 @I1@ INDI\n1 BIRT\n2 DATE 7/11/1959\n0 TRLR");
+        let b = format!("{H5}0 @I1@ INDI\n1 BIRT\n2 DATE (7/11/1959)\n0 TRLR");
+        assert!(lost(&a, &b).is_empty());
+        let a = format!("{H7}0 @I1@ INDI\n1 BIRT\n2 DATE 7/11/1959\n3 TIME 2:60\n0 TRLR");
+        let b =
+            format!("{H7}0 @I1@ INDI\n1 BIRT\n2 DATE\n3 PHRASE 7/11/1959\n3 _TIME 2:60\n0 TRLR");
+        assert!(lost(&a, &b).is_empty(), "{:?}", lost(&a, &b));
+        // A value of another case is not another value elsewhere.
+        let a = format!("{H5}0 @I1@ INDI\n1 NOTE m\n0 TRLR");
+        let b = format!("{H5}0 @I1@ INDI\n1 NOTE M\n0 TRLR");
+        assert_eq!(lost(&a, &b), ["text m (x1)"]);
     }
 }
