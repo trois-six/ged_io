@@ -4,16 +4,16 @@ file	outcome	lost	rules
 # missing from the written output, and the output-checker rules the output violates. Regenerate
 # with CORPORA_BASELINE_WRITE=1; every change must be an improvement.
 gedcom4j/sample/5.5.1 sample 1.ged	OK	29	banned-char,cardinality-min,eol-final,escape,line-length,misplaced,payload-date,payload-unexpected,record-size
-gedcom4j/sample/5.5.1 sample 2.ged	OK	5	eol-final,escape,gedc-vers,payload-date
+gedcom4j/sample/5.5.1 sample 2.ged	OK	4	eol-final,escape,gedc-vers,payload-date
 gedcom4j/sample/5.5.1 sample 3.ged	OK	42	cardinality-min,eol-final,escape,gedc-vers,head-required,misplaced,payload-date,payload-unexpected
-gedcom4j/sample/5.5.1 sample 4.ged	FATAL	0	
-gedcom4j/sample/5.5.1 sample 5.ged	FATAL	0	
+gedcom4j/sample/5.5.1 sample 4.ged	OK	0	cardinality-min,eol-final,escape,misplaced,payload-coordinate,payload-date
+gedcom4j/sample/5.5.1 sample 5.ged	OK	10	eol-final,escape,misplaced,payload-coordinate,payload-date,payload-enum
 gedcom4j/sample/ANSEL.GED	OK	66	char-mismatch,eol-final,gedc-form,gedc-vers
 gedcom4j/sample/Bad_custom_tag.ged	OK	0	eol-final,escape,misplaced,payload-coordinate,payload-date
 gedcom4j/sample/Event Tag Test.ged	OK	0	conc-split-space,cont-position,eol-final,payload-unexpected,payload-y
 gedcom4j/sample/Harry_Potter.ged	OK	0	cardinality-min,eol-final,gedc-vers,misplaced,payload-pointer,payload-y
 gedcom4j/sample/Issue 63.ged	OK	0	char-mismatch,eol-final,gedc-vers,head-required
-gedcom4j/sample/Issue 64.ged	FATAL	0	
+gedcom4j/sample/Issue 64.ged	OK	0	char-mismatch,eol-final,gedc-vers,head-required
 gedcom4j/sample/Issue 80.ged	OK	0	char-mismatch,eol-final,head-required,payload-coordinate
 gedcom4j/sample/Issue157.ged	OK	2	char-mismatch,eol-final,gedc-vers
 gedcom4j/sample/Issue166.ged	OK	0	eol-final,escape,gedc-vers
@@ -21,11 +21,11 @@ gedcom4j/sample/Issue87.ged	OK	5	char-mismatch,eol-final,gedc-vers,head-required
 gedcom4j/sample/RelationshipTest.ged	OK	0	cardinality-min,char-mismatch,eol-final,gedc-vers,payload-pointer
 gedcom4j/sample/RelationshipTestExtended.ged	OK	0	cardinality-min,eol-final,gedc-vers,payload-pointer
 gedcom4j/sample/Sopranos.ged	FATAL	0	
-gedcom4j/sample/TGC551.ged	FATAL	0	
-gedcom4j/sample/TGC551LF.ged	OK	440	cardinality-min,char-mismatch,eol-final,escape,gedc-vers,line-length,misplaced,payload-age,payload-date,payload-enum,payload-unexpected
-gedcom4j/sample/TGC55C.ged	FATAL	0	
-gedcom4j/sample/TGC55CLF.ged	OK	453	cardinality-min,char-mismatch,eol-final,escape,gedc-vers,line-length,misplaced,payload-age,payload-date,payload-enum,payload-unexpected
-gedcom4j/sample/a31486.ged	FATAL	0	
+gedcom4j/sample/TGC551.ged	OK	337	cardinality-min,char-mismatch,eol-final,escape,gedc-vers,line-length,misplaced,payload-age,payload-date,payload-enum,payload-unexpected
+gedcom4j/sample/TGC551LF.ged	OK	337	cardinality-min,char-mismatch,eol-final,escape,gedc-vers,line-length,misplaced,payload-age,payload-date,payload-enum,payload-unexpected
+gedcom4j/sample/TGC55C.ged	OK	348	cardinality-min,char-mismatch,eol-final,escape,gedc-vers,line-length,misplaced,payload-age,payload-date,payload-enum,payload-unexpected
+gedcom4j/sample/TGC55CLF.ged	OK	348	cardinality-min,char-mismatch,eol-final,escape,gedc-vers,line-length,misplaced,payload-age,payload-date,payload-enum,payload-unexpected
+gedcom4j/sample/a31486.ged	OK	0	cardinality-min,char-mismatch,eol-final,gedc-vers,payload-date,payload-enum
 gedcom4j/sample/allged.ged	OK	25	cardinality-min,char-mismatch,eol-final,gedc-vers,misplaced,payload-unexpected
 gedcom4j/sample/customtagstorture.ged	FATAL	0	
 gedcom4j/sample/famhistcustomtags.ged	FATAL	0	
@@ -34,7 +34,7 @@ gedcom4j/sample/ftmcustomtags.ged	OK	2	eol-final
 gedcom4j/sample/issue102_100levels.ged	OK	0	char-mismatch,eol-final,gedc-vers
 gedcom4j/sample/issue102_99levels.ged	OK	0	char-mismatch,eol-final,gedc-vers
 gedcom4j/sample/issue32.ged	OK	0	eol-final,gedc-vers,head-required,line-length,payload-date
-gedcom4j/sample/issue81.ged	FATAL	0	
+gedcom4j/sample/issue81.ged	OK	11	cardinality-min,char-mismatch,eol-final,gedc-vers,line-length
 gedcom4j/sample/issue95.ged	OK	0	eol-final
 gedcom4j/sample/issue96.ged	OK	9	char-mismatch,eol-final,gedc-vers,payload-pointer,pointer-dangling,xref-syntax
 gedcom4j/sample/john_of_sea_20101009.ged	OK	0	cardinality-min,eol-final,gedc-vers,misplaced
@@ -44,12 +44,12 @@ gedcom4j/sample/minimal55.ged	OK	4	char-mismatch,eol-final,gedc-vers
 gedcom4j/sample/minimal55indented.ged	OK	4	char-mismatch,eol-final,gedc-vers
 gedcom4j/sample/problemFile.ged	OK	0	cardinality-min,eol-final,escape,gedc-vers,misplaced,payload-date
 gedcom4j/sample/superlongline-ansel.ged	OK	0	char-mismatch,eol-final,gedc-vers,line-length
-gedcom4j/sample/unicode-littleendian-crlf.ged	REPARSE	0	char-mismatch,eol-final,gedc-form,gedc-vers
-gedcom4j/sample/unicode-littleendian-cronly.ged	FATAL	0	
+gedcom4j/sample/unicode-littleendian-crlf.ged	OK	0	char-mismatch,eol-final,gedc-form,gedc-vers
+gedcom4j/sample/unicode-littleendian-cronly.ged	OK	0	char-mismatch,eol-final,gedc-form,gedc-vers
 gedcom4j/sample/utf16be.ged	OK	4	char-mismatch,eol-final,gedc-vers
 gedcom4j/sample/utf16le.ged	OK	4	char-mismatch,eol-final,gedc-vers
 gedcom4j/sample/utf8.ged	OK	4	char-mismatch,eol-final,gedc-vers
-gedcom4j/sample/utf8_cr_nobom.ged	FATAL	0	
+gedcom4j/sample/utf8_cr_nobom.ged	OK	0	eol-final,head-required
 gedcom4j/sample/utf8_crlf_bom.ged	OK	0	eol-final,head-required
 gedcom4j/sample/utf8_crlf_nobom.ged	OK	0	eol-final,head-required
 gedcom4j/sample/utf8_lf_nobom.ged	OK	0	eol-final,head-required
@@ -60,7 +60,7 @@ gedcom4j/sample/willis-unicode-bigendian.ged	FATAL	0
 gedcom4j/sample/willis-unicode-littleendian.ged	FATAL	0	
 gedcom4j/sample/willis.ged	FATAL	0	
 gramps/data/tests/exp_sample_ged.ged	FATAL	0	
-gramps/data/tests/imp_ANSEL_CR.ged	FATAL	0	
+gramps/data/tests/imp_ANSEL_CR.ged	OK	66	char-mismatch,eol-final,gedc-vers
 gramps/data/tests/imp_ANSEL_CRLF.ged	OK	66	char-mismatch,eol-final,gedc-vers
 gramps/data/tests/imp_ANSEL_LF.ged	OK	66	char-mismatch,eol-final,gedc-vers
 gramps/data/tests/imp_CustTags.ged	OK	0	eol-final,gedc-vers,payload-unexpected
@@ -68,27 +68,27 @@ gramps/data/tests/imp_FTM_16dec2015a-mod1.ged	OK	6	cardinality-min,eol-final,ged
 gramps/data/tests/imp_FTM_LINK.ged	FATAL	0	
 gramps/data/tests/imp_FTM_OCCU_bug.ged	OK	0	cardinality-min,eol-final,gedc-vers
 gramps/data/tests/imp_FTM_PHOTO.ged	OK	0	cardinality-min,eol-final,payload-enum
-gramps/data/tests/imp_Latin_1_CR.ged	FATAL	0	
-gramps/data/tests/imp_Latin_1_CRLF.ged	FATAL	0	
-gramps/data/tests/imp_Latin_1_LF.ged	FATAL	0	
+gramps/data/tests/imp_Latin_1_CR.ged	OK	0	char-mismatch,eol-final,escape,gedc-vers,head-required
+gramps/data/tests/imp_Latin_1_CRLF.ged	OK	0	char-mismatch,eol-final,escape,gedc-vers,head-required
+gramps/data/tests/imp_Latin_1_LF.ged	OK	0	char-mismatch,eol-final,escape,gedc-vers,head-required
 gramps/data/tests/imp_MediaTest.ged	OK	20	cardinality-min,eol-final,escape,head-required,misplaced,payload-enum
 gramps/data/tests/imp_MixInlineXrefNote.ged	OK	0	eol-final,head-required
 gramps/data/tests/imp_Paris.ged	OK	2	eol-final,gedc-vers,head-required
 gramps/data/tests/imp_PhonFax_dfs.ged	OK	0	eol-final,escape,gedc-form,gedc-vers,misplaced
-gramps/data/tests/imp_UTF_16_BE_BOM_CR.ged	FATAL	0	
-gramps/data/tests/imp_UTF_16_BE_BOM_CRLF.ged	REPARSE	0	char-mismatch,eol-final,gedc-vers
-gramps/data/tests/imp_UTF_16_BE_BOM_LF.ged	REPARSE	0	char-mismatch,eol-final,gedc-vers
-gramps/data/tests/imp_UTF_16_LE_BOM_CR.ged	FATAL	0	
-gramps/data/tests/imp_UTF_16_LE_BOM_CRLF.ged	REPARSE	0	char-mismatch,eol-final,gedc-vers
-gramps/data/tests/imp_UTF_16_LE_BOM_LF.ged	REPARSE	0	char-mismatch,eol-final,gedc-vers
-gramps/data/tests/imp_UTF_8_BOM_CR.ged	FATAL	0	
+gramps/data/tests/imp_UTF_16_BE_BOM_CR.ged	OK	0	char-mismatch,eol-final,gedc-vers
+gramps/data/tests/imp_UTF_16_BE_BOM_CRLF.ged	OK	0	char-mismatch,eol-final,gedc-vers
+gramps/data/tests/imp_UTF_16_BE_BOM_LF.ged	OK	0	char-mismatch,eol-final,gedc-vers
+gramps/data/tests/imp_UTF_16_LE_BOM_CR.ged	OK	0	char-mismatch,eol-final,gedc-vers
+gramps/data/tests/imp_UTF_16_LE_BOM_CRLF.ged	OK	0	char-mismatch,eol-final,gedc-vers
+gramps/data/tests/imp_UTF_16_LE_BOM_LF.ged	OK	0	char-mismatch,eol-final,gedc-vers
+gramps/data/tests/imp_UTF_8_BOM_CR.ged	OK	0	eol-final,gedc-vers
 gramps/data/tests/imp_UTF_8_BOM_CRLF.ged	OK	0	eol-final,gedc-vers
 gramps/data/tests/imp_UTF_8_BOM_LF.ged	OK	0	eol-final,gedc-vers
-gramps/data/tests/imp_UTF_8_NOBOM_CR.ged	FATAL	0	
+gramps/data/tests/imp_UTF_8_NOBOM_CR.ged	OK	0	eol-final,gedc-vers
 gramps/data/tests/imp_UTF_8_NOBOM_CRLF.ged	OK	0	eol-final,gedc-vers
 gramps/data/tests/imp_UTF_8_NOBOM_LF.ged	OK	0	eol-final,gedc-vers
 gramps/data/tests/imp_bug_8322_test.ged	OK	16	eol-final,head-required,misplaced
-gramps/data/tests/imp_cp1252_CR.ged	FATAL	0	
+gramps/data/tests/imp_cp1252_CR.ged	OK	25	char-mismatch,eol-final,escape,gedc-vers,head-required
 gramps/data/tests/imp_cp1252_CRLF.ged	OK	25	char-mismatch,eol-final,escape,gedc-vers,head-required
 gramps/data/tests/imp_cp1252_LF.ged	OK	25	char-mismatch,eol-final,escape,gedc-vers,head-required
 gramps/data/tests/imp_notetest_dfs.ged	OK	116	cardinality-min,char-mismatch,eol-final,gedc-vers,misplaced,payload-date,payload-enum,pointer-dangling
