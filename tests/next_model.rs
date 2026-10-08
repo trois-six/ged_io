@@ -15,7 +15,7 @@ fn record<'a>(data: &'a Dataset, xref: &str) -> &'a Generic {
 }
 
 fn text(data: &Dataset, t: &Text) -> String {
-    t.as_str(data).to_string()
+    t.to_str(data).into_owned()
 }
 
 fn write(data: &Dataset) -> String {
@@ -46,7 +46,7 @@ fn extensions_are_kept_where_they_are() {
     let indi = record(&data, "@I1@");
     let note: &Note = indi.typed().next().expect("note");
     assert_eq!(note.extra.len(), 2);
-    assert_eq!(data.source.tag(note.extra[0].tag), "_NX");
+    assert_eq!(data.store.tag(note.extra[0].tag), "_NX");
     let out = write(&data);
     assert!(
         out.contains("2 DATE 1 JAN 1900\n3 _DX date extension\n"),
@@ -102,9 +102,9 @@ fn notes() {
     assert_eq!(text(&data, notes[0].mime.as_ref().unwrap()), "text/html");
     assert_eq!(text(&data, &notes[0].translations[0].text), "Hello");
     assert_eq!(notes[0].citations.len(), 1);
-    assert!(matches!(notes[1].content, NoteContent::Shared(id) if data.source.xref(id) == "@N1@"));
+    assert!(matches!(notes[1].content, NoteContent::Shared(id) if data.store.xref(id) == "@N1@"));
     assert!(
-        matches!(&notes[2].content, NoteContent::Text(t) if t.as_str(&data) == "@N1@ is an address")
+        matches!(&notes[2].content, NoteContent::Text(t) if t.to_str(&data) == "@N1@ is an address")
     );
     let out = write(&data);
     assert!(out.contains("1 NOTE <p>Bonjour</p>\n2 MIME text/html\n2 LANG fr\n2 TRAN Hello\n3 LANG en\n2 SOUR @S1@\n3 PAGE 4\n"), "{out}");
@@ -130,7 +130,7 @@ fn citations() {
     let data = read_str(&v7(
         "0 @I1@ INDI\n1 BIRT\n2 SOUR @S1@\n3 PAGE 12\n3 PAGE 13\n3 DATA\n4 DATE 1 JAN 1900\n4 TEXT Born at home\n5 LANG en\n3 EVEN BIRT\n4 PHRASE Birth\n4 ROLE OTHER\n5 PHRASE Midwife\n3 QUAY 3\n0 @S1@ SOUR\n1 TITL Register\n",
     ));
-    let birt = record(&data, "@I1@").generic("BIRT", &data.source).unwrap();
+    let birt = record(&data, "@I1@").generic("BIRT", &data.store).unwrap();
     let citation: &Citation = birt.typed().next().unwrap();
     assert!(matches!(citation.source, CitationSource::Pointer(_)));
     assert_eq!(text(&data, citation.page.as_ref().unwrap()), "12");
@@ -151,7 +151,7 @@ fn citations() {
     ));
     let citation: &Citation = record(&data, "@I1@").typed().next().unwrap();
     assert!(
-        matches!(&citation.source, CitationSource::Description(t) if t.as_str(&data) == "Parish register")
+        matches!(&citation.source, CitationSource::Description(t) if t.to_str(&data) == "Parish register")
     );
     assert_eq!(text(&data, &citation.texts[0].text), "Born on a Sunday");
     let out = write(&data);
@@ -171,7 +171,7 @@ fn repository_citations() {
     let repo: &RepositoryCitation = record(&data, "@S1@").typed().next().unwrap();
     assert_eq!(repo.call_numbers.len(), 2);
     let medium = repo.call_numbers[0].medium.as_ref().unwrap();
-    assert!(matches!(&medium.value, Medium::Unknown(t) if t.as_str(&data) == "_MYMEDIUM"));
+    assert!(matches!(&medium.value, Medium::Unknown(t) if t.to_str(&data) == "_MYMEDIUM"));
     assert_eq!(
         repo.call_numbers[1].medium.as_ref().unwrap().value,
         Medium::Other
@@ -233,7 +233,7 @@ fn places() {
     let data = read_str(&v7(
         "0 @I1@ INDI\n1 BIRT\n2 PLAC Sampleton, Example County\n3 FORM City, County\n3 LANG en\n3 TRAN Sampleville, Exemple\n4 LANG fr\n3 MAP\n4 LATI N18.150944\n4 LONG E168.150944\n3 EXID 77\n4 TYPE http://example.com/places\n3 NOTE Near the river\n",
     ));
-    let birt = record(&data, "@I1@").generic("BIRT", &data.source).unwrap();
+    let birt = record(&data, "@I1@").generic("BIRT", &data.store).unwrap();
     let place: &Place = birt.typed().next().unwrap();
     assert_eq!(text(&data, place.form.as_ref().unwrap()), "City, County");
     assert_eq!(
@@ -248,7 +248,7 @@ fn places() {
     let data = read_str(&v551(
         "0 @I1@ INDI\n1 BIRT\n2 PLAC Sample City\n3 FONE Sanpuru\n4 TYPE kana\n3 ROMN Sanpuru Shi\n4 TYPE romaji\n3 MAP\n4 LATI N35.0\n4 LONG E135.0\n",
     ));
-    let birt = record(&data, "@I1@").generic("BIRT", &data.source).unwrap();
+    let birt = record(&data, "@I1@").generic("BIRT", &data.store).unwrap();
     let place: &Place = birt.typed().next().unwrap();
     assert_eq!(place.phonetic.len(), 1);
     assert_eq!(place.romanized.len(), 1);
@@ -281,8 +281,8 @@ fn enumeration_values_are_never_fatal() {
     ));
     let indi = record(&data, "@I1@");
     let sex: &Sex = indi.typed().next().unwrap();
-    assert!(matches!(sex, Sex::Unknown(t) if t.as_str(&data) == "_I"));
-    let famc = indi.generic("FAMC", &data.source).unwrap();
+    assert!(matches!(sex, Sex::Unknown(t) if t.to_str(&data) == "_I"));
+    let famc = indi.generic("FAMC", &data.store).unwrap();
     let pedi: &Phrased<Pedigree> = famc.typed().next().unwrap();
     assert_eq!(pedi.value, Pedigree::Other);
     assert_eq!(text(&data, pedi.phrase.as_ref().unwrap()), "Guardianship");
@@ -304,11 +304,11 @@ fn enumeration_values_are_never_fatal() {
     ));
     let indi = record(&data, "@I1@");
     assert_eq!(indi.typed::<Sex>().next(), Some(&Sex::Male));
-    let famc = indi.generic("FAMC", &data.source).unwrap();
+    let famc = indi.generic("FAMC", &data.store).unwrap();
     let pedi: &Pedigree = famc.typed().next().unwrap();
-    assert!(matches!(pedi, Pedigree::Unknown(t) if t.as_str(&data) == "stepchild"));
+    assert!(matches!(pedi, Pedigree::Unknown(t) if t.to_str(&data) == "stepchild"));
     let citation: &Citation = indi.typed().next().unwrap();
-    assert!(matches!(&citation.quality, Some(Certainty::Unknown(t)) if t.as_str(&data) == "5"));
+    assert!(matches!(&citation.quality, Some(Certainty::Unknown(t)) if t.to_str(&data) == "5"));
     let out = write(&data);
     assert!(out.contains("1 SEX M\n"), "{out}");
     // Written conformant, with nothing lost: as extensions.
@@ -323,7 +323,7 @@ fn enumeration_spellings_per_version() {
     let data = read_str(&v551(
         "0 @I1@ INDI\n1 NAME Ann /Sample/\n2 TYPE birth\n1 FAMC @F1@\n2 PEDI adopted\n2 STAT challenged\n0 @F1@ FAM\n1 CHIL @I1@\n2 ADOP BOTH\n",
     ));
-    let name = record(&data, "@I1@").generic("NAME", &data.source).unwrap();
+    let name = record(&data, "@I1@").generic("NAME", &data.store).unwrap();
     assert_eq!(name.typed::<NameType>().next(), Some(&NameType::Birth));
     let out = write(&data);
     assert!(out.contains("2 TYPE birth\n"), "{out}");
@@ -343,7 +343,7 @@ fn ordinance_statuses() {
     let data = read_str(&v7(
         "0 @I1@ INDI\n1 BAPL\n2 STAT PRE_1970\n3 DATE 27 MAR 2022\n1 INIL\n2 STAT EXCLUDED\n3 DATE 27 MAR 2022\n0 @F1@ FAM\n1 SLGS\n2 STAT DNS_CAN\n3 DATE 1 JAN 2000\n",
     ));
-    let bapl = record(&data, "@I1@").generic("BAPL", &data.source).unwrap();
+    let bapl = record(&data, "@I1@").generic("BAPL", &data.store).unwrap();
     let stat: &LdsStatus = bapl.typed().next().unwrap();
     assert_eq!(stat.value, OrdinanceStatus::Pre1970);
     assert_eq!(
@@ -378,7 +378,7 @@ fn dates_and_ages() {
     ));
     let indi = record(&data, "@I1@");
     let date: &ged_io::next::Date = indi
-        .generic("BIRT", &data.source)
+        .generic("BIRT", &data.store)
         .unwrap()
         .typed()
         .next()
@@ -389,7 +389,7 @@ fn dates_and_ages() {
         ged_io::types::date::value::DateValue::Date(_)
     ));
     let age: &ged_io::next::Age = indi
-        .generic("DEAT", &data.source)
+        .generic("DEAT", &data.store)
         .unwrap()
         .typed()
         .next()
@@ -448,9 +448,9 @@ fn building_a_note() {
         language: Some("en".into()),
         ..note
     };
-    assert_eq!(typed_note.language.as_ref().unwrap().as_str(&data), "en");
-    let id = data.source.intern_xref("@N9@").unwrap();
-    assert_eq!(data.source.xref(id), "@N9@");
+    assert_eq!(typed_note.language.as_ref().unwrap().to_str(&data), "en");
+    let id = data.store.intern_xref("@N9@").unwrap();
+    assert_eq!(data.store.xref(id), "@N9@");
 }
 
 /// A small deterministic generator of GEDCOM-like inputs: standard and
@@ -581,7 +581,7 @@ fn values_of_the_other_version_keep_their_spelling() {
     let repo: &RepositoryCitation = record(&data, "@S1@").typed().next().unwrap();
     assert!(matches!(
         &repo.call_numbers[0].medium.as_ref().unwrap().value,
-        Medium::Unknown(t) if t.as_str(&data) == "Other"
+        Medium::Unknown(t) if t.to_str(&data) == "Other"
     ));
     assert_eq!(
         repo.call_numbers[1].medium.as_ref().unwrap().value,

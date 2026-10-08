@@ -49,8 +49,11 @@ impl<'a> View<'a> {
         match node.kind {
             Kind::None => PayloadRef::None,
             Kind::Pointer => PayloadRef::Pointer(node.payload.get(self.text)),
-            Kind::Text => PayloadRef::Text(node.payload.get(self.text)),
+            // A builder in span mode makes `Escaped` and `Joined`; trees
+            // never are.
+            Kind::Text | Kind::Escaped => PayloadRef::Text(node.payload.get(self.text)),
             Kind::Side => PayloadRef::Text(node.payload.get(self.side)),
+            Kind::Joined => PayloadRef::Text(""),
         }
     }
 

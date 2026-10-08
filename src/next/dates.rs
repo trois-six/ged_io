@@ -12,14 +12,14 @@ use crate::types::date::value::{DateExact, DatePeriod, DateValue};
 use super::driver::{gedcom_struct, WriteCx};
 use super::list::ThinVec;
 use super::note::Note;
-use super::text::{Source, Text};
+use super::text::{Store, Text};
 
 /// The characters of an optional text as they will be written — without
 /// the characters the target version bans, which the writer leaves out (a
 /// 5.5.1 tab becomes a space) — `None` when empty.
 fn owned(text: Option<&Text>, cx: &WriteCx<'_>) -> Option<String> {
     let rules = cx.version.rules();
-    text.map(|t| t.as_str(cx.source))
+    text.map(|t| t.to_str(cx.store))
         .map(|s| {
             s.chars()
                 .map(|c| {
@@ -47,7 +47,8 @@ fn date_to_version(
     // A date of the commonest shapes is written alike in every version
     // (5.5.1 reads its month in any case, 7.x in upper case).
     if time.is_none() && phrase.is_none() {
-        let text = value.as_str(cx.source);
+        let text = value.to_str(cx.store);
+        let text = &*text;
         let v7 = cx.version.is_v7();
         if crate::spec::is_simple_date(text, false, !v7) {
             debug_assert!(convert(value, None, None, cx).is_none(), "{value:?}");
@@ -167,14 +168,14 @@ gedcom_struct! {
 impl Date {
     /// The date value read by the date grammar of either version.
     #[must_use]
-    pub fn parse<S: AsRef<Source> + ?Sized>(&self, source: &S) -> DateValue {
-        DateValue::parse(self.value.as_str(source))
+    pub fn parse<S: AsRef<Store> + ?Sized>(&self, store: &S) -> DateValue {
+        DateValue::parse(&self.value.to_str(store))
     }
 
     /// The time read by the time grammar.
     #[must_use]
-    pub fn parse_time<S: AsRef<Source> + ?Sized>(&self, source: &S) -> Option<Time> {
-        Time::parse(self.time.as_ref()?.as_str(source))
+    pub fn parse_time<S: AsRef<Store> + ?Sized>(&self, store: &S) -> Option<Time> {
+        Time::parse(&self.time.as_ref()?.to_str(store))
     }
 }
 
@@ -207,14 +208,14 @@ impl ExactDate {
     /// The date read by the exact-date grammar; `None` when it does not
     /// follow it.
     #[must_use]
-    pub fn parse<S: AsRef<Source> + ?Sized>(&self, source: &S) -> Option<DateExact> {
-        DateExact::parse(self.value.as_str(source))
+    pub fn parse<S: AsRef<Store> + ?Sized>(&self, store: &S) -> Option<DateExact> {
+        DateExact::parse(&self.value.to_str(store))
     }
 
     /// The time read by the time grammar.
     #[must_use]
-    pub fn parse_time<S: AsRef<Source> + ?Sized>(&self, source: &S) -> Option<Time> {
-        Time::parse(self.time.as_ref()?.as_str(source))
+    pub fn parse_time<S: AsRef<Store> + ?Sized>(&self, store: &S) -> Option<Time> {
+        Time::parse(&self.time.as_ref()?.to_str(store))
     }
 }
 
@@ -239,8 +240,8 @@ impl Period {
     /// The period read by the date-period grammar; `None` when it does not
     /// follow it.
     #[must_use]
-    pub fn parse<S: AsRef<Source> + ?Sized>(&self, source: &S) -> Option<DatePeriod> {
-        DatePeriod::parse(self.value.as_str(source))
+    pub fn parse<S: AsRef<Store> + ?Sized>(&self, store: &S) -> Option<DatePeriod> {
+        DatePeriod::parse(&self.value.to_str(store))
     }
 }
 
@@ -268,8 +269,8 @@ gedcom_struct! {
 impl Age {
     /// The age read by the age grammar of either version.
     #[must_use]
-    pub fn parse<S: AsRef<Source> + ?Sized>(&self, source: &S) -> AgeValue {
-        AgeValue::parse(self.value.as_str(source))
+    pub fn parse<S: AsRef<Store> + ?Sized>(&self, store: &S) -> AgeValue {
+        AgeValue::parse(&self.value.to_str(store))
     }
 }
 

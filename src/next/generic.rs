@@ -23,7 +23,7 @@ use crate::version::GedcomVersion;
 use super::driver::{FromNode, NodeRef, ReadCx, SpecNames, Struct, ToNodes, WriteCx};
 use super::enums::{self, EnumDesc, EnumList, Enumeration, LdsStatus, Phrased};
 use super::node::Value;
-use super::text::{Source, TagId, XrefId};
+use super::text::{Store, TagId, XrefId};
 use super::{
     Address, Age, Association, CallNumber, ChangeDate, Citation, CitationData, CitedEvent,
     CreationDate, Crop, Date, ExactDate, Exid, File, FileForm, FileTranslation, Map,
@@ -335,9 +335,9 @@ impl Generic {
 
     /// The first generic substructure tagged `tag`.
     #[must_use]
-    pub fn generic<'a>(&'a self, tag: &str, source: &Source) -> Option<&'a Generic> {
+    pub fn generic<'a>(&'a self, tag: &str, store: &Store) -> Option<&'a Generic> {
         self.children.iter().find_map(|c| match c {
-            Child::Generic(g) if source.tag(g.tag) == tag => Some(g),
+            Child::Generic(g) if store.tag(g.tag) == tag => Some(g),
             _ => None,
         })
     }
@@ -378,10 +378,10 @@ impl Generic {
 
     /// The structure, written for `cx.version`.
     pub(crate) fn to_structure(&self, cx: &WriteCx<'_>) -> Structure {
-        let source: &Source = cx.source;
+        let store: &Store = cx.store;
         Structure {
-            tag: Tag::new(source.tag(self.tag)),
-            xref: self.xref.map(|x| Xref::new(source.xref(x))),
+            tag: Tag::new(store.tag(self.tag)),
+            xref: self.xref.map(|x| Xref::new(store.xref(x))),
             payload: match &self.payload {
                 Value::None => crate::tree::Payload::None,
                 Value::Pointer(p) => cx.pointer(*p),
@@ -401,7 +401,7 @@ impl Generic {
 
     /// [`Generic::to_structure`], into a flat arena, borrowing the texts.
     pub(crate) fn to_flat<'s>(&'s self, cx: &WriteCx<'s>, out: &mut Flat<'s>) {
-        let source: &'s Source = cx.source;
+        let store: &'s Store = cx.store;
         let payload = match &self.payload {
             Value::None => FlatPayload::None,
             Value::Pointer(p) => cx.pointer_flat(*p),
@@ -411,9 +411,9 @@ impl Generic {
             .ok()
             .filter(|&t| usize::from(t) < crate::tree::STANDARD_TAGS.len());
         let at = out.open_standard(
-            Cow::Borrowed(source.tag(self.tag)),
+            Cow::Borrowed(store.tag(self.tag)),
             standard,
-            self.xref.map(|x| Cow::Borrowed(source.xref(x))),
+            self.xref.map(|x| Cow::Borrowed(store.xref(x))),
             payload,
         );
         for c in &self.children {
@@ -431,14 +431,14 @@ impl Generic {
 /// type. A conformant file has none, but for leaves (types without
 /// substructures, read as a value alone) that carry extension
 /// substructures, which stay whole.
-pub(crate) fn untyped(records: &[Generic], source: &Source, version: GedcomVersion) -> Vec<String> {
+pub(crate) fn untyped(records: &[Generic], store: &Store, version: GedcomVersion) -> Vec<String> {
     let registry = registry(version);
     let mut out = Vec::new();
     for record in records {
         let pointer = matches!(record.payload, Value::Pointer(_));
         let spec = registry.child_type(DATASET, record.tag, pointer);
-        let mut path = vec![source.tag(record.tag)];
-        walk_untyped(record, spec, registry, source, &mut path, &mut out);
+        let mut path = vec![store.tag(record.tag)];
+        walk_untyped(record, spec, registry, store, &mut path, &mut out);
     }
     out
 }
@@ -447,7 +447,7 @@ fn walk_untyped<'a>(
     node: &Generic,
     spec: Option<StructId>,
     registry: &Registry,
-    source: &'a Source,
+    store: &'a Store,
     path: &mut Vec<&'a str>,
     out: &mut Vec<String>,
 ) {
@@ -455,7 +455,7 @@ fn walk_untyped<'a>(
         let Child::Generic(g) = child else { continue };
         let pointer = matches!(g.payload, Value::Pointer(_));
         let ty = spec.and_then(|s| registry.child_type(s, g.tag, pointer));
-        path.push(source.tag(g.tag));
+        path.push(store.tag(g.tag));
         // A leaf (a type without substructures) with substructures of its
         // own, extensions, is kept whole: leaves have no `extra`.
         let leaf_with_children =
@@ -463,7 +463,7 @@ fn walk_untyped<'a>(
         if !leaf_with_children && ty.is_some_and(|t| registry.ctor(t).is_some()) {
             out.push(path.join("/"));
         }
-        walk_untyped(g, ty, registry, source, path, out);
+        walk_untyped(g, ty, registry, store, path, out);
         path.pop();
     }
 }

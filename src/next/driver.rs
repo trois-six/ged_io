@@ -23,55 +23,50 @@
 use std::borrow::Cow;
 
 use crate::tree::{
-    Flat, FlatPayload, Payload, RawKind, RawNode, RawSpan, Structure, Tag, Xref, STANDARD_TAGS,
+    unescape_spans, Escaping, Flat, FlatPayload, Payload, RawKind, RawNode, RawSpan, Structure,
+    Tag, TextPiece, Xref, STANDARD_TAGS,
 };
 use crate::version::GedcomVersion;
 
+use super::list::ThinVec;
 use super::node::{Extra, Node, Value};
-use super::text::{Source, TagId, Text, XrefId, XrefTable};
+use super::text::{Store, TagId, Text, XrefId, XrefTable};
 
 /// The arena of the record being read: the builder's nodes, identifiers
-/// and side buffer, with offsets relative to `input` shifted by `base`.
+/// and joined pieces, with offsets relative to `text`, which starts at
+/// `base` in the store's input.
 #[derive(Clone, Copy)]
 pub(crate) struct Arena<'a> {
-    /// The text the builder read (a segment of the source's input).
+    /// The text the builder read (a segment of the store's input).
     pub text: &'a str,
-    /// The offset of `text` in the source's input.
+    /// The offset of `text` in the store's input.
     pub base: usize,
-    pub side: &'a str,
+    pub joined: &'a [TextPiece],
     pub nodes: &'a [RawNode],
     pub xrefs: &'a [(u32, RawSpan)],
 }
 
-/// A node of the record arena.
+/// A node of the record arena, with its entry.
 #[derive(Clone, Copy)]
 pub(crate) struct NodeRef<'a> {
-    arena: Arena<'a>,
+    arena: &'a Arena<'a>,
+    raw: RawNode,
     index: u32,
 }
 
 impl<'a> NodeRef<'a> {
     /// The record at the start of the arena.
-    pub(crate) fn root(arena: Arena<'a>) -> Option<Self> {
-        (!arena.nodes.is_empty()).then_some(Self { arena, index: 0 })
+    pub(crate) fn root(arena: &'a Arena<'a>) -> Option<Self> {
+        Self::at(arena, 0)
+    }
+
+    fn at(arena: &'a Arena<'a>, index: u32) -> Option<Self> {
+        let raw = *arena.nodes.get(index as usize)?;
+        Some(Self { arena, raw, index })
     }
 
     fn raw(self) -> RawNode {
-        // The index comes from the arena itself, so it is in range; a
-        // default node keeps this total anyway.
-        self.arena
-            .nodes
-            .get(self.index as usize)
-            .copied()
-            .unwrap_or(RawNode {
-                payload: RawSpan::default(),
-                tag: 0,
-                line: 0,
-                end: self.index + 1,
-                depth: 0,
-                kind: RawKind::None,
-                has_xref: false,
-            })
+        self.raw
     }
 
     /// The tag's identifier: a standard tag's index, or past the table.
@@ -99,14 +94,43 @@ impl<'a> NodeRef<'a> {
         self.raw().kind == RawKind::None
     }
 
-    /// The payload's characters: the pointer or the text.
-    pub(crate) fn payload_str(self) -> &'a str {
+    /// The payload's characters: the pointer or the text, unescaped and
+    /// joined (borrowed unless joined from several lines).
+    pub(crate) fn payload_str(self, escaping: Escaping) -> Cow<'a, str> {
         let raw = self.raw();
+        let text = self.arena.text;
         match raw.kind {
-            RawKind::None => "",
-            RawKind::Pointer | RawKind::Text => raw.payload.get(self.arena.text),
-            RawKind::Side => raw.payload.get(self.arena.side),
+            RawKind::None | RawKind::Side => Cow::Borrowed(""),
+            RawKind::Pointer | RawKind::Text => Cow::Borrowed(raw.payload.get(text)),
+            RawKind::Escaped => {
+                let raw = raw.payload.get(text);
+                let mut out = String::with_capacity(raw.len());
+                crate::tree::unescape_into(raw, escaping, &mut out);
+                Cow::Owned(out)
+            }
+            RawKind::Joined => {
+                let mut out = String::new();
+                for piece in self.joined(raw) {
+                    if piece.newline() {
+                        out.push('\n');
+                    }
+                    let start = piece.start() as usize;
+                    out.push_str(
+                        text.get(start..start + piece.len() as usize)
+                            .unwrap_or_default(),
+                    );
+                }
+                Cow::Owned(out)
+            }
         }
+    }
+
+    fn joined(self, raw: RawNode) -> &'a [TextPiece] {
+        let start = raw.payload.start as usize;
+        self.arena
+            .joined
+            .get(start..start + raw.payload.len as usize)
+            .unwrap_or_default()
     }
 
     /// The substructures, in order.
@@ -134,7 +158,7 @@ impl<'a> NodeRef<'a> {
 
 /// The substructures of a [`NodeRef`].
 pub(crate) struct Children<'a> {
-    arena: Arena<'a>,
+    arena: &'a Arena<'a>,
     next: u32,
     end: u32,
 }
@@ -146,21 +170,19 @@ impl<'a> Iterator for Children<'a> {
         if self.next >= self.end {
             return None;
         }
-        let child = NodeRef {
-            arena: self.arena,
-            index: self.next,
-        };
-        self.next = child.raw().end.max(self.next + 1);
+        let child = NodeRef::at(self.arena, self.next)?;
+        self.next = child.raw.end.max(self.next + 1);
         Some(child)
     }
 }
 
-/// What reading needs besides the node: the dataset's buffers, being
-/// filled, and the version the file declares.
+/// What reading needs besides the node: the store's tables, being filled,
+/// how the file escapes `@` and the version it declares.
 pub(crate) struct ReadCx<'s> {
     input: &'s str,
-    side: &'s mut String,
+    pieces: &'s mut Vec<TextPiece>,
     xrefs: &'s mut XrefTable,
+    escaping: Escaping,
     /// The version of the file.
     pub(crate) version: GedcomVersion,
 }
@@ -168,31 +190,81 @@ pub(crate) struct ReadCx<'s> {
 impl<'s> ReadCx<'s> {
     pub(crate) fn new(
         input: &'s str,
-        side: &'s mut String,
+        pieces: &'s mut Vec<TextPiece>,
         xrefs: &'s mut XrefTable,
         version: GedcomVersion,
     ) -> Self {
         Self {
             input,
-            side,
+            pieces,
             xrefs,
+            escaping: if version.is_v7() {
+                Escaping::V70
+            } else {
+                Escaping::V551
+            },
             version,
         }
     }
 
+    /// The payload's characters (see [`NodeRef::payload_str`]).
+    pub(crate) fn payload_str<'a>(&self, node: NodeRef<'a>) -> Cow<'a, str> {
+        node.payload_str(self.escaping)
+    }
+
     /// The text payload of a node (empty when it has none); `None` for a
-    /// pointer.
+    /// pointer. A payload reading rewrote is pieces of the input, not a
+    /// copy.
     pub(crate) fn text(&mut self, node: NodeRef<'_>) -> Option<Text> {
         let raw = node.raw();
+        let base = node.arena.base;
         match raw.kind {
             RawKind::None => Some(Text::default()),
+            RawKind::Pointer => None,
             RawKind::Text => Some(Text::input(
                 self.input,
-                node.arena.base + raw.payload.start as usize,
+                base + raw.payload.start as usize,
                 raw.payload.len as usize,
             )),
-            RawKind::Side => Some(Text::side(self.side, raw.payload.get(node.arena.side))),
-            RawKind::Pointer => None,
+            RawKind::Escaped => {
+                let at = self.pieces.len();
+                let start = base + raw.payload.start as usize;
+                let mut fits = true;
+                let pieces = &mut *self.pieces;
+                unescape_spans(raw.payload.get(node.arena.text), self.escaping, |s, len| {
+                    if len > 0 {
+                        match (u32::try_from(start + s), u32::try_from(len)) {
+                            (Ok(s), Ok(len)) => pieces.push(TextPiece::new(s, len, false)),
+                            _ => fits = false,
+                        }
+                    }
+                });
+                Some(self.finish_pieces(at, fits, node))
+            }
+            RawKind::Joined => {
+                let at = self.pieces.len();
+                let shift = u32::try_from(base).ok();
+                let mut fits = shift.is_some();
+                for piece in node.joined(raw) {
+                    let end = shift.and_then(|b| b.checked_add(piece.start() + piece.len()));
+                    fits &= end.is_some();
+                    self.pieces.push(piece.shifted(shift.unwrap_or(0)));
+                }
+                Some(self.finish_pieces(at, fits, node))
+            }
+            // Only a builder outside span mode makes these.
+            RawKind::Side => Some(Text::new(&*self.payload_str(node))),
+        }
+    }
+
+    /// The text of the pieces pushed from `at`; an owned copy when their
+    /// offsets do not fit in 32 bits.
+    fn finish_pieces(&mut self, at: usize, fits: bool, node: NodeRef<'_>) -> Text {
+        if fits {
+            Text::from_pieces(self.input, self.pieces, at)
+        } else {
+            self.pieces.truncate(at);
+            Text::new(&*self.payload_str(node))
         }
     }
 
@@ -211,7 +283,7 @@ impl<'s> ReadCx<'s> {
         self.intern(node.arena, span)
     }
 
-    fn intern(&mut self, arena: Arena<'_>, span: RawSpan) -> Option<XrefId> {
+    fn intern(&mut self, arena: &Arena<'_>, span: RawSpan) -> Option<XrefId> {
         self.xrefs.intern(span.get(arena.text))
     }
 
@@ -236,10 +308,13 @@ impl<'s> ReadCx<'s> {
     /// A node and its substructures, untyped.
     pub(crate) fn node(&mut self, node: NodeRef<'_>) -> Node {
         let mut n = self.node_shallow(node);
-        n.children = Vec::with_capacity(node.children().count());
-        for child in node.children() {
-            let c = self.node(child);
-            n.children.push(c);
+        let count = node.children().count();
+        if count > 0 {
+            n.children = Vec::with_capacity(count);
+            for child in node.children() {
+                let c = self.node(child);
+                n.children.push(c);
+            }
         }
         n
     }
@@ -256,11 +331,11 @@ impl<'s> ReadCx<'s> {
     }
 }
 
-/// What writing needs: the source the model points into and the target
+/// What writing needs: the store the model points into and the target
 /// version.
 #[derive(Clone, Copy)]
 pub(crate) struct WriteCx<'s> {
-    pub(crate) source: &'s Source,
+    pub(crate) store: &'s Store,
     pub(crate) version: GedcomVersion,
     /// Whether values are converted to `version`'s grammars (dates, ages,
     /// times), as for writing a file, or given as the model holds them.
@@ -270,17 +345,16 @@ pub(crate) struct WriteCx<'s> {
 impl<'a> WriteCx<'a> {
     /// A text payload; none when empty.
     pub(crate) fn text(&self, text: &Text) -> Payload {
-        let s = text.as_str(self.source);
-        if s.is_empty() {
+        if text.is_empty() {
             Payload::None
         } else {
-            Payload::Text(s.into())
+            Payload::Text(text.to_str(self.store).into())
         }
     }
 
     /// A pointer payload.
     pub(crate) fn pointer(&self, id: XrefId) -> Payload {
-        Payload::Pointer(Xref::new(self.source.xref(id)))
+        Payload::Pointer(Xref::new(self.store.xref(id)))
     }
 
     /// [`WriteCx::text`], borrowed.
@@ -288,17 +362,16 @@ impl<'a> WriteCx<'a> {
     where
         'a: 's,
     {
-        let s = text.as_str(self.source);
-        if s.is_empty() {
+        if text.is_empty() {
             FlatPayload::None
         } else {
-            FlatPayload::Text(Cow::Borrowed(s))
+            FlatPayload::Text(text.to_str(self.store))
         }
     }
 
     /// [`WriteCx::pointer`], borrowed.
     pub(crate) fn pointer_flat(&self, id: XrefId) -> FlatPayload<'a> {
-        FlatPayload::Pointer(Cow::Borrowed(self.source.xref(id)))
+        FlatPayload::Pointer(Cow::Borrowed(self.store.xref(id)))
     }
 
     /// [`WriteCx::str`] of static characters, borrowed.
@@ -477,6 +550,36 @@ impl<T: FromNode + ToNodes> Slot for Vec<T> {
     }
 }
 
+impl<T: FromNode + ToNodes> Slot for ThinVec<T> {
+    const MANY: bool = true;
+
+    fn accept(&mut self, node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> bool {
+        match T::from_node(node, cx) {
+            Some(v) => {
+                self.push(v);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn write(&self, tag: &'static str, cx: &WriteCx<'_>, out: &mut Vec<Structure>) {
+        for v in self {
+            out.push(v.to_node(tag, cx));
+        }
+    }
+
+    fn to_flat<'s>(&'s self, tag: &'static str, cx: &WriteCx<'s>, out: &mut Flat<'s>) {
+        for v in self {
+            v.to_flat(tag, cx, out);
+        }
+    }
+
+    fn finish(&mut self) {
+        self.shrink();
+    }
+}
+
 impl<T: FromNode> FromNode for Box<T> {
     fn from_node(node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> Option<Self> {
         T::from_node(node, cx).map(Box::new)
@@ -583,8 +686,8 @@ impl PayloadField for XrefId {
 /// An integer (`HEIGHT 100`, `NCHI 3`): digits only, at most `u32::MAX`;
 /// anything else does not fit and is kept as it is, in `extra`.
 impl PayloadField for u32 {
-    fn read(node: NodeRef<'_>, _cx: &mut ReadCx<'_>) -> Option<Self> {
-        let s = node.payload_str();
+    fn read(node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> Option<Self> {
+        let s = cx.payload_str(node);
         if node.is_pointer() || s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
             return None;
         }

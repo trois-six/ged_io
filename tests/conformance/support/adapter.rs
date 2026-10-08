@@ -249,7 +249,7 @@ pub fn record_count(m: &Model) -> usize {
             let tags = ["HEAD", "TRLR"];
             data.records
                 .iter()
-                .filter(|r| !tags.contains(&data.source.tag(r.tag)))
+                .filter(|r| !tags.contains(&data.store.tag(r.tag)))
                 .count()
         }
     }

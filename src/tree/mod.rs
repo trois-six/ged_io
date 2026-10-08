@@ -75,8 +75,8 @@ pub use xref::{Xref, XrefForm};
 pub(crate) use flat::{Flat, FlatPayload};
 pub(crate) use lexer::{
     find_eol, head_version, lex_line, normalize_eol, pointer, terminator_len, unescape_into,
-    Builder, Escaping, Kind as RawKind, Line, Lines, RawNode, Span as RawSpan, TagHasher,
-    TagInterner,
+    unescape_spans, Builder, Escaping, Kind as RawKind, Line, Lines, RawNode, Span as RawSpan,
+    TagHasher, TagInterner, TextPiece,
 };
 pub(crate) use node::Node;
 pub(crate) use reader::RecordSplitter;

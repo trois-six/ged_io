@@ -1,13 +1,14 @@
 //! Untyped structures: what typed structures keep in `extra`.
 
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 
 use std::borrow::Cow;
 
 use crate::tree::{Flat, FlatPayload, Payload, Structure, Tag, Xref};
 
 use super::driver::WriteCx;
-use super::text::{Source, TagId, Text, XrefId};
+use super::list::ThinVec;
+use super::text::{Store, TagId, Text, XrefId};
 
 /// The payload of a [`Node`].
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
@@ -23,7 +24,8 @@ pub enum Value {
 
 /// A structure kept as it was read: a tag, an identifier, a payload and
 /// substructures. Typed structures keep in their `extra` every substructure
-/// they have no field for.
+/// they have no field for, and a dataset keeps so the records it has no
+/// type for.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Node {
     /// The tag.
@@ -48,48 +50,46 @@ impl Node {
         }
     }
 
-    /// An owned [`Structure`] with the same contents, read from `source`.
+    /// An owned [`Structure`] with the same contents, read from `store`.
     #[must_use]
-    pub fn to_structure<S: AsRef<Source> + ?Sized>(&self, source: &S) -> Structure {
-        let source = source.as_ref();
+    pub fn to_structure<S: AsRef<Store> + ?Sized>(&self, store: &S) -> Structure {
+        let store = store.as_ref();
         Structure {
-            tag: Tag::new(source.tag(self.tag)),
-            xref: self.xref.map(|x| Xref::new(source.xref(x))),
+            tag: Tag::new(store.tag(self.tag)),
+            xref: self.xref.map(|x| Xref::new(store.xref(x))),
             payload: match &self.payload {
                 Value::None => Payload::None,
-                Value::Pointer(p) => Payload::Pointer(Xref::new(source.xref(*p))),
-                Value::Text(t) => WriteCx::str(t.as_str(source)),
+                Value::Pointer(p) => Payload::Pointer(Xref::new(store.xref(*p))),
+                Value::Text(t) => WriteCx::str(&t.to_str(store)),
             },
             substructures: self
                 .children
                 .iter()
-                .map(|c| c.to_structure(source))
+                .map(|c| c.to_structure(store))
                 .collect(),
             line: 0,
         }
     }
 
     /// [`Node::to_structure`], into a flat arena, borrowing the texts.
-    pub(crate) fn to_flat<'s>(&'s self, source: &'s Source, out: &mut Flat<'s>) {
+    pub(crate) fn to_flat<'s>(&'s self, store: &'s Store, out: &mut Flat<'s>) {
         let payload = match &self.payload {
             Value::None => FlatPayload::None,
-            Value::Pointer(p) => FlatPayload::Pointer(Cow::Borrowed(source.xref(*p))),
-            Value::Text(t) => match t.as_str(source) {
-                "" => FlatPayload::None,
-                s => FlatPayload::Text(Cow::Borrowed(s)),
-            },
+            Value::Pointer(p) => FlatPayload::Pointer(Cow::Borrowed(store.xref(*p))),
+            Value::Text(t) if t.is_empty() => FlatPayload::None,
+            Value::Text(t) => FlatPayload::Text(t.to_str(store)),
         };
         let standard = u16::try_from(self.tag.get())
             .ok()
             .filter(|&t| usize::from(t) < crate::tree::STANDARD_TAGS.len());
         let at = out.open_standard(
-            Cow::Borrowed(source.tag(self.tag)),
+            Cow::Borrowed(store.tag(self.tag)),
             standard,
-            self.xref.map(|x| Cow::Borrowed(source.xref(x))),
+            self.xref.map(|x| Cow::Borrowed(store.xref(x))),
             payload,
         );
         for c in &self.children {
-            c.to_flat(source, out);
+            c.to_flat(store, out);
         }
         out.close(at);
     }
@@ -97,60 +97,56 @@ impl Node {
 
 /// The substructures of a typed structure that no field holds, in order.
 ///
-/// Empty, it takes one word and no allocation.
-// Boxing the vector keeps an empty `extra`, the common case, to one word
-// instead of three, on every typed structure.
-#[allow(clippy::box_collection)]
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
-pub struct Extra(Option<Box<Vec<Node>>>);
+/// Empty, it takes one word and no allocation; it dereferences to a
+/// [`ThinVec`] of [`Node`]s.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Extra(ThinVec<Node>);
 
 impl Extra {
-    /// Appends a node.
-    pub fn push(&mut self, node: Node) {
-        super::driver::push_exact(self.0.get_or_insert_with(Box::default), node);
-    }
-
-    /// The nodes, to edit.
-    pub fn as_vec_mut(&mut self) -> &mut Vec<Node> {
-        self.0.get_or_insert_with(Box::default)
+    /// No node.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self(ThinVec::new())
     }
 
     /// Writes the nodes.
     pub(crate) fn write(&self, cx: &WriteCx<'_>, out: &mut Vec<Structure>) {
-        for n in self {
-            out.push(n.to_structure(cx.source));
+        for n in &self.0 {
+            out.push(n.to_structure(cx.store));
         }
     }
 
     /// Writes the nodes into a flat arena.
     pub(crate) fn write_flat<'s>(&'s self, cx: &WriteCx<'s>, out: &mut Flat<'s>) {
         for n in self {
-            n.to_flat(cx.source, out);
+            n.to_flat(cx.store, out);
         }
     }
 }
 
 impl Deref for Extra {
-    type Target = [Node];
+    type Target = ThinVec<Node>;
 
-    fn deref(&self) -> &[Node] {
-        self.0.as_deref().map_or(&[], Vec::as_slice)
+    fn deref(&self) -> &ThinVec<Node> {
+        &self.0
+    }
+}
+
+impl DerefMut for Extra {
+    fn deref_mut(&mut self) -> &mut ThinVec<Node> {
+        &mut self.0
     }
 }
 
 impl From<Vec<Node>> for Extra {
     fn from(nodes: Vec<Node>) -> Self {
-        if nodes.is_empty() {
-            Self(None)
-        } else {
-            Self(Some(Box::new(nodes)))
-        }
+        Self(nodes.into())
     }
 }
 
 impl FromIterator<Node> for Extra {
     fn from_iter<I: IntoIterator<Item = Node>>(iter: I) -> Self {
-        iter.into_iter().collect::<Vec<_>>().into()
+        Self(iter.into_iter().collect())
     }
 }
 
@@ -159,6 +155,6 @@ impl<'a> IntoIterator for &'a Extra {
     type IntoIter = std::slice::Iter<'a, Node>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.iter()
+        self.0.iter()
     }
 }

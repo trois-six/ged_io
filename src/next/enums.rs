@@ -71,7 +71,7 @@ pub(crate) fn read_enum<E: Enumeration>(node: NodeRef<'_>, cx: &mut ReadCx<'_>) 
     if node.is_pointer() || node.has_no_payload() {
         return None;
     }
-    match E::known(node.payload_str(), Some(cx.version)) {
+    match E::known(&cx.payload_str(node), Some(cx.version)) {
         Some(v) => Some(v),
         None => cx.text(node).map(E::from_unknown),
     }
@@ -689,8 +689,8 @@ impl<E: Enumeration> PayloadField for EnumList<E> {
         if node.is_pointer() || node.has_no_payload() {
             return None;
         }
-        let items = node
-            .payload_str()
+        let items = cx
+            .payload_str(node)
             .split(',')
             .map(|item| {
                 E::known(item, Some(cx.version))
@@ -701,13 +701,13 @@ impl<E: Enumeration> PayloadField for EnumList<E> {
     }
 
     fn write(&self, cx: &WriteCx<'_>) -> Payload {
-        let items: Vec<&str> = self
+        let items: Vec<std::borrow::Cow<'_, str>> = self
             .0
             .iter()
             .map(|e| match (e.spelling(cx.version), e.unknown()) {
-                (Some(s), _) => s,
-                (None, Some(t)) => t.as_str(cx.source),
-                (None, None) => "",
+                (Some(s), _) => s.into(),
+                (None, Some(t)) => t.to_str(cx.store),
+                (None, None) => "".into(),
             })
             .collect();
         WriteCx::str(&items.join(", "))

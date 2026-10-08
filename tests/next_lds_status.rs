@@ -26,13 +26,13 @@ fn test_round_trip_lds_status_outside_the_enumeration_gedcom_5() {
     let data = read_str(source);
 
     let indi = data.find("@I1@").unwrap();
-    let bapl = indi.generic("BAPL", &data.source).unwrap();
-    let endl = indi.generic("ENDL", &data.source).unwrap();
+    let bapl = indi.generic("BAPL", &data.store).unwrap();
+    let endl = indi.generic("ENDL", &data.store).unwrap();
     let excluded: &LdsStatus = bapl.typed().next().unwrap();
     let completed: &LdsStatus = endl.typed().next().unwrap();
     assert_eq!(excluded.value, OrdinanceStatus::Excluded);
     assert_eq!(
-        excluded.date.as_ref().unwrap().value.as_str(&data),
+        excluded.date.as_ref().unwrap().value.to_str(&data),
         "1 JAN 2000"
     );
     assert_eq!(completed.value, OrdinanceStatus::Completed);
@@ -49,7 +49,7 @@ fn test_round_trip_lds_status_outside_the_enumeration_gedcom_5() {
     let bapl = read
         .find("@I1@")
         .unwrap()
-        .generic("BAPL", &read.source)
+        .generic("BAPL", &read.store)
         .unwrap();
     let back: &LdsStatus = bapl.typed().next().unwrap();
     assert_eq!(back.value, excluded.value);
@@ -71,10 +71,10 @@ fn test_round_trip_lds_extension_status_gedcom_7() {
     let slgs = data
         .find("@F1@")
         .unwrap()
-        .generic("SLGS", &data.source)
+        .generic("SLGS", &data.store)
         .unwrap();
     let sealing: &LdsStatus = slgs.typed().next().unwrap();
-    assert!(matches!(&sealing.value, OrdinanceStatus::Unknown(t) if t.as_str(&data) == "_PENDING"));
+    assert!(matches!(&sealing.value, OrdinanceStatus::Unknown(t) if t.to_str(&data) == "_PENDING"));
 
     let written = write_string(&data, &GedcomWriter::new()).unwrap();
     assert!(
@@ -85,8 +85,8 @@ fn test_round_trip_lds_extension_status_gedcom_7() {
     let slgs = read
         .find("@F1@")
         .unwrap()
-        .generic("SLGS", &read.source)
+        .generic("SLGS", &read.store)
         .unwrap();
     let back: &LdsStatus = slgs.typed().next().unwrap();
-    assert!(matches!(&back.value, OrdinanceStatus::Unknown(t) if t.as_str(&read) == "_PENDING"));
+    assert!(matches!(&back.value, OrdinanceStatus::Unknown(t) if t.to_str(&read) == "_PENDING"));
 }
