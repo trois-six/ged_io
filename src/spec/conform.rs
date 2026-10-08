@@ -31,7 +31,7 @@ use super::validate::{
     bounds, encoded_len, is_external_pointer, pick, xref_error, Aliases, Pick, Picker,
     MAX_RECORD_BYTES,
 };
-use crate::tree::{Node, Payload, PayloadRef, Structure, Tag, Xref};
+use crate::tree::{Flat, Node, Payload, PayloadRef, Structure, Tag, Xref};
 use crate::version::VersionRules;
 use crate::writer::{
     complete_head, extension_tag, needs_submitter, new_xref, numbered_xref, stub_submitter, Repair,
@@ -104,10 +104,10 @@ pub(crate) fn conform_records<'n, N: Node<'n>>(
 }
 
 /// A record of a dataset being repaired: as it was given (a node of a
-/// parsed tree, a borrowed structure), as long as the repair leaves it so,
-/// or an owned copy, which the repair changes.
+/// parsed tree, a borrowed structure, a record that writes itself), as long
+/// as the repair leaves it so, or an owned copy, which the repair changes.
 pub(crate) struct Rec<'n, N> {
-    body: Body<N>,
+    body: Body<'n, N>,
     /// The tag and identifier of a record as given (read once: they are
     /// asked for pass after pass, and a tree finds an identifier by a
     /// search), and the tag's index among the standard tags.
@@ -124,29 +124,75 @@ pub(crate) struct Rec<'n, N> {
     /// records over 32K: [`Conformer::record_sizes`]); `u32::MAX` when
     /// unknown.
     size: u32,
+    /// The structures of a record that writes itself, kept from its first
+    /// writing while the dataset is small ([`KEEP_BUILT`]).
+    built: Option<Box<Flat<'n>>>,
 }
 
-enum Body<N> {
+/// The most structures of records that write themselves kept once written
+/// (about 6 MB): a small dataset is written once, a large one again for
+/// each look, so that its memory stays bounded.
+const KEEP_BUILT: usize = 1 << 16;
+
+enum Body<'n, N> {
     Given(N),
+    Built(&'n dyn Build<'n>),
     Owned(Box<Structure>),
 }
 
-/// A record, borrowed: given or owned.
-pub(crate) enum RecRef<'b, N> {
+/// A record that writes its structures when they are needed, each time:
+/// a record of the typed model, written into a flat arena.
+pub(crate) trait Build<'n> {
+    /// The tag.
+    fn tag(&self) -> &'n str;
+    /// The identifier.
+    fn xref(&self) -> Option<&'n str>;
+    /// Whether it has neither payload nor substructure.
+    fn is_empty(&self) -> bool;
+    /// Writes the record, and its substructures, into `out`.
+    fn build(&self, out: &mut Flat<'n>);
+}
+
+/// A record, borrowed: given, written on demand (or written already), or
+/// owned.
+pub(crate) enum RecRef<'b, 'n, N> {
     Given(N),
+    Built(&'n dyn Build<'n>),
+    Kept(&'b Flat<'n>),
     Owned(&'b Structure),
 }
 
-/// Runs `$body` with `$n` bound to record `$rec` as a node: as given or as
-/// owned.
+/// Runs `$body` with `$n` bound to record `$rec` as a node: as given, as
+/// owned, or written into the flat arena `$scratch`.
 macro_rules! with_node {
-    ($rec:expr, |$n:ident| $body:expr) => {
+    ($rec:expr, $scratch:expr, |$n:ident| $body:expr) => {
         match $rec {
             RecRef::Given($n) => $body,
             RecRef::Owned($n) => $body,
+            RecRef::Kept(flat) => match flat.root() {
+                Some($n) => $body,
+                None => {
+                    let empty = Structure::default();
+                    let $n = &empty;
+                    $body
+                }
+            },
+            RecRef::Built(b) => {
+                $scratch.clear();
+                b.build(&mut $scratch);
+                match $scratch.root() {
+                    Some($n) => $body,
+                    None => {
+                        let empty = Structure::default();
+                        let $n = &empty;
+                        $body
+                    }
+                }
+            }
         }
     };
 }
+pub(crate) use with_node;
 
 impl<'n, N: Node<'n>> Rec<'n, N> {
     /// A record as it is given.
@@ -159,12 +205,19 @@ impl<'n, N: Node<'n>> Rec<'n, N> {
         )
     }
 
+    /// A record that writes itself when needed.
+    pub(crate) fn built(record: &'n dyn Build<'n>) -> Self {
+        let tag = record.tag();
+        let standard = crate::tree::node::standard_index(tag);
+        Self::of(tag, record.xref(), standard, Body::Built(record))
+    }
+
     /// An owned record.
     pub(crate) fn owned(s: Structure) -> Self {
         Self::of("", None, None, Body::Owned(Box::new(s)))
     }
 
-    fn of(tag: &'n str, xref: Option<&'n str>, standard: Option<u16>, body: Body<N>) -> Self {
+    fn of(tag: &'n str, xref: Option<&'n str>, standard: Option<u16>, body: Body<'n, N>) -> Self {
         Self {
             body,
             tag,
@@ -173,14 +226,31 @@ impl<'n, N: Node<'n>> Rec<'n, N> {
             clean: 0,
             rtype: DATASET,
             size: u32::MAX,
+            built: None,
         }
     }
 
     /// The record, borrowed.
-    pub(crate) fn get(&self) -> RecRef<'_, N> {
-        match &self.body {
-            Body::Given(n) => RecRef::Given(*n),
-            Body::Owned(s) => RecRef::Owned(s),
+    pub(crate) fn get(&self) -> RecRef<'_, 'n, N> {
+        match (&self.body, &self.built) {
+            (Body::Given(n), _) => RecRef::Given(*n),
+            (Body::Built(_), Some(flat)) => RecRef::Kept(flat),
+            (Body::Built(b), None) => RecRef::Built(*b),
+            (Body::Owned(s), _) => RecRef::Owned(s),
+        }
+    }
+
+    /// Writes a record that writes itself once and keeps it, while `kept`
+    /// (the structures kept so far) allows; written in `scratch`, kept at
+    /// its size.
+    fn keep_built(&mut self, kept: &mut usize, scratch: &mut Flat<'n>) {
+        if let (Body::Built(b), None) = (&self.body, &self.built) {
+            if *kept < KEEP_BUILT {
+                scratch.clear();
+                b.build(scratch);
+                *kept += scratch.len();
+                self.built = Some(Box::new(scratch.clone()));
+            }
         }
     }
 
@@ -189,7 +259,7 @@ impl<'n, N: Node<'n>> Rec<'n, N> {
         'n: 'b,
     {
         match &self.body {
-            Body::Given(_) => self.tag,
+            Body::Given(_) | Body::Built(_) => self.tag,
             Body::Owned(s) => s.tag.as_str(),
         }
     }
@@ -199,7 +269,7 @@ impl<'n, N: Node<'n>> Rec<'n, N> {
         'n: 'b,
     {
         match &self.body {
-            Body::Given(_) => self.xref,
+            Body::Given(_) | Body::Built(_) => self.xref,
             Body::Owned(s) => s.xref.as_deref(),
         }
     }
@@ -207,7 +277,7 @@ impl<'n, N: Node<'n>> Rec<'n, N> {
     /// The index of the tag among the standard tags.
     fn standard_tag(&self) -> Option<u16> {
         match &self.body {
-            Body::Given(_) => self.standard,
+            Body::Given(_) | Body::Built(_) => self.standard,
             Body::Owned(s) => s.tag.standard_index(),
         }
     }
@@ -215,6 +285,7 @@ impl<'n, N: Node<'n>> Rec<'n, N> {
     fn line(&self) -> u32 {
         match &self.body {
             Body::Given(n) => n.line(),
+            Body::Built(_) => 0,
             Body::Owned(s) => s.line,
         }
     }
@@ -223,23 +294,26 @@ impl<'n, N: Node<'n>> Rec<'n, N> {
     pub(crate) fn is_empty(&self) -> bool {
         match &self.body {
             Body::Given(n) => n.payload() == PayloadRef::None && n.children().next().is_none(),
+            Body::Built(b) => b.is_empty(),
             Body::Owned(s) => s.payload == Payload::None && s.substructures.is_empty(),
         }
     }
 
     /// The record as an owned structure, as it is.
     fn to_structure(&self) -> Structure {
-        with_node!(self.get(), |n| n.to_owned_structure())
+        let mut scratch = Flat::default();
+        with_node!(self.get(), scratch, |n| n.to_owned_structure())
     }
 
     /// The record, copied first if it is not owned yet.
     fn make_owned(&mut self) -> &mut Structure {
         if !matches!(self.body, Body::Owned(_)) {
             self.body = Body::Owned(Box::new(self.to_structure()));
+            self.built = None;
         }
         match &mut self.body {
             Body::Owned(s) => s,
-            Body::Given(_) => unreachable!("made owned above"),
+            Body::Given(_) | Body::Built(_) => unreachable!("made owned above"),
         }
     }
 
@@ -248,7 +322,7 @@ impl<'n, N: Node<'n>> Rec<'n, N> {
     pub(crate) fn take_structure(&mut self) -> Structure {
         match &mut self.body {
             Body::Owned(s) => std::mem::take(s),
-            Body::Given(_) => self.to_structure(),
+            Body::Given(_) | Body::Built(_) => self.to_structure(),
         }
     }
 
@@ -256,7 +330,7 @@ impl<'n, N: Node<'n>> Rec<'n, N> {
     pub(crate) fn into_structure(self) -> Structure {
         match self.body {
             Body::Owned(s) => *s,
-            Body::Given(_) => self.to_structure(),
+            Body::Given(_) | Body::Built(_) => self.to_structure(),
         }
     }
 }
@@ -293,6 +367,11 @@ struct Conformer<'n> {
     tables: &'static TypeTables,
     /// The type of each substructure, by tag.
     picker: Picker,
+    /// Room for a record that writes itself ([`Build`]), kept from pass to
+    /// pass.
+    scratch: Flat<'n>,
+    /// The structures of records that write themselves kept so far.
+    kept: usize,
 }
 
 /// A required substructure: its tag, its minimum and the first
@@ -479,6 +558,8 @@ impl<'n> Conformer<'n> {
             pass_start: 0,
             tables: TypeTables::of(schema),
             picker: Picker::of(rules),
+            scratch: Flat::default(),
+            kept: 0,
         }
     }
 
@@ -488,9 +569,10 @@ impl<'n> Conformer<'n> {
         self.pass_start = self.repairs.len();
         self.header_and_trailer(records);
         let quiet = quiet && self.repairs.len() == self.pass_start;
+        let mut scratch = std::mem::take(&mut self.scratch);
         let head = records.first().filter(|r| r.tag() == "HEAD");
         let aliases = match head.map(Rec::get) {
-            Some(h) => with_node!(h, |h| Aliases::of(Some(h), self.schema)),
+            Some(h) => with_node!(h, scratch, |h| Aliases::of(Some(h), self.schema)),
             None => Aliases::of(None::<&Structure>, self.schema),
         };
         let aliases_changed = aliases != self.aliases;
@@ -534,7 +616,7 @@ impl<'n> Conformer<'n> {
 
         // Which records need a repair, without changing any.
         let head_ty = self.record_of("HEAD");
-        let dirty = self.find_dirty(records, head_ty);
+        let dirty = self.find_dirty(records, head_ty, &mut scratch);
         let any_dirty = !dirty.is_empty();
         // A relocation (7.x) picks an extension tag no record uses yet.
         self.used = (self.family == Family::V7 && any_dirty).then(|| {
@@ -555,6 +637,7 @@ impl<'n> Conformer<'n> {
             self.declare(records);
         }
         self.used = None;
+        self.scratch = scratch;
     }
 
     /// Which records need a repair, found without changing any; their
@@ -563,6 +646,7 @@ impl<'n> Conformer<'n> {
         &mut self,
         records: &mut [Rec<'n, N>],
         head_ty: Option<StructId>,
+        scratch: &mut Flat<'n>,
     ) -> Vec<usize> {
         let mut dirty: Vec<usize> = Vec::new();
         let mut pending = Vec::with_capacity(LOOKUP_BATCH.min(4 * records.len()));
@@ -573,7 +657,7 @@ impl<'n> Conformer<'n> {
                 "HEAD" if i == 0 && r.clean == self.state => true,
                 "HEAD" if i == 0 => {
                     let clean = match head_ty {
-                        Some(ty) => with_node!(r.get(), |h| self.is_clean(h, ty, true)),
+                        Some(ty) => with_node!(r.get(), *scratch, |h| self.is_clean(h, ty, true)),
                         None => true,
                     };
                     if clean {
@@ -590,8 +674,10 @@ impl<'n> Conformer<'n> {
                         record: u32::try_from(i).unwrap_or(u32::MAX),
                         rtype: DATASET,
                     };
+                    r.keep_built(&mut self.kept, scratch);
                     let xref = r.xref();
-                    let clean = with_node!(r.get(), |n| self.is_clean_record(n, xref, &mut walk));
+                    let clean = with_node!(r.get(), *scratch, |n| self
+                        .is_clean_record(n, xref, &mut walk));
                     let (size, rtype) = (walk.size, walk.rtype);
                     if clean {
                         r.clean = self.state;
@@ -856,7 +942,7 @@ impl<'n> Conformer<'n> {
             let tag = r.tag();
             let ok = match (tag, &r.body) {
                 ("HEAD" | "TRLR", _) => true,
-                (_, Body::Given(_)) => r
+                (_, Body::Given(_) | Body::Built(_)) => r
                     .xref
                     .is_none_or(|x| self.take(Cow::Borrowed(x), tag, r.standard)),
                 (_, Body::Owned(s)) => s.xref.as_deref().is_none_or(|x| {
@@ -1688,6 +1774,7 @@ impl<'n> Conformer<'n> {
     /// bring under the limit is left as it is.
     fn record_sizes<N: Node<'n>>(&mut self, records: &mut Vec<Rec<'n, N>>) {
         let mut added = Vec::new();
+        let mut scratch = std::mem::take(&mut self.scratch);
         for rec in records.iter_mut() {
             let Some(ty) = self.record_of_standard(rec.tag(), rec.standard_tag()) else {
                 continue;
@@ -1696,7 +1783,7 @@ impl<'n> Conformer<'n> {
             if rec.size as usize <= MAX_RECORD_BYTES {
                 continue;
             }
-            let mut size = with_node!(rec.get(), |n| encoded_len(n, 0, self.family));
+            let mut size = with_node!(rec.get(), scratch, |n| encoded_len(n, 0, self.family));
             if size <= MAX_RECORD_BYTES {
                 continue;
             }
@@ -1740,6 +1827,7 @@ impl<'n> Conformer<'n> {
             }
             (rec.clean, rec.size) = (0, u32::MAX);
         }
+        self.scratch = scratch;
         if !added.is_empty() {
             let at = records.len().saturating_sub(1);
             records.splice(at..at, added.into_iter().map(Rec::owned));
@@ -1760,7 +1848,8 @@ fn extension_tags<'n, N: Node<'n>>(r: &Rec<'n, N>) -> HashSet<String> {
         }
     }
     let mut out = HashSet::new();
-    with_node!(r.get(), |n| walk(n, &mut out));
+    let mut scratch = Flat::default();
+    with_node!(r.get(), scratch, |n| walk(n, &mut out));
     out
 }
 

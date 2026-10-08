@@ -44,6 +44,39 @@ fn date_to_version(
     phrase: Option<&Text>,
     cx: &WriteCx<'_>,
 ) -> Option<values::Date> {
+    // A date of the commonest shapes is written alike in every version
+    // (5.5.1 reads its month in any case, 7.x in upper case).
+    if time.is_none() && phrase.is_none() {
+        let text = value.as_str(cx.source);
+        let v7 = cx.version.is_v7();
+        if crate::spec::is_simple_date(text, false, !v7) {
+            debug_assert!(convert(value, None, None, cx).is_none(), "{value:?}");
+            return None;
+        }
+        if crate::spec::is_simple_date(text, false, true) {
+            let upper = values::Date {
+                value: Some(text.to_ascii_uppercase()),
+                time: None,
+                phrase: None,
+            };
+            debug_assert_eq!(
+                convert(value, None, None, cx),
+                Some(upper.clone()),
+                "{value:?}"
+            );
+            return Some(upper);
+        }
+    }
+    convert(value, time, phrase, cx)
+}
+
+/// [`date_to_version`], by the grammars.
+fn convert(
+    value: &Text,
+    time: Option<&Text>,
+    phrase: Option<&Text>,
+    cx: &WriteCx<'_>,
+) -> Option<values::Date> {
     let date = values::Date {
         value: owned(Some(value), cx),
         time: owned(time, cx),

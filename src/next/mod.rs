@@ -75,7 +75,8 @@ mod text;
 
 use std::io;
 
-use crate::tree::{head_version, Builder, Escaping, Structure, TagInterner};
+use crate::spec::conform::Build;
+use crate::tree::{head_version, Builder, Escaping, Flat, Structure, TagInterner};
 use crate::version::GedcomVersion;
 use crate::writer::{GedcomWriter, WriteError, WriteReport};
 
@@ -241,8 +242,7 @@ pub fn write<W: io::Write>(
     writer: &GedcomWriter,
     out: W,
 ) -> Result<WriteReport, WriteError> {
-    let version = writer.config().version.unwrap_or(data.version);
-    writer.write_owned(out, data.to_structures_for(version))
+    writer.write_built(out, &data.built(writer))
 }
 
 /// Writes a dataset as text, as [`GedcomWriter::write_to_string`] does.
@@ -252,10 +252,56 @@ pub fn write<W: io::Write>(
 /// [`WriteError::NonConformant`] on the first repair under
 /// [`RepairPolicy::Error`](crate::writer::RepairPolicy::Error).
 pub fn write_string(data: &Dataset, writer: &GedcomWriter) -> Result<String, WriteError> {
-    let version = writer.config().version.unwrap_or(data.version);
     writer
-        .write_owned_to_string(data.to_structures_for(version))
+        .write_built_to_string(&data.built(writer))
         .map(|(text, _)| text)
+}
+
+/// A record of a dataset that writes its structures for the target version
+/// when the writer needs them, into the writer's flat arena: the dataset is
+/// never copied as owned structures.
+struct Built<'d> {
+    record: &'d Generic,
+    cx: WriteCx<'d>,
+}
+
+impl<'d> Build<'d> for Built<'d> {
+    fn tag(&self) -> &'d str {
+        self.cx.source.tag(self.record.tag)
+    }
+
+    fn xref(&self) -> Option<&'d str> {
+        self.record.xref.map(|x| self.cx.source.xref(x))
+    }
+
+    fn is_empty(&self) -> bool {
+        let payload = match &self.record.payload {
+            node::Value::None => true,
+            node::Value::Pointer(_) => false,
+            node::Value::Text(t) => t.as_str(self.cx.source).is_empty(),
+        };
+        payload && self.record.children.is_empty()
+    }
+
+    fn build(&self, out: &mut Flat<'d>) {
+        self.record.to_flat(&self.cx, out);
+    }
+}
+
+impl Dataset {
+    /// The records, to write with `writer`: in its version, unless one is
+    /// configured.
+    fn built(&self, writer: &GedcomWriter) -> Vec<Built<'_>> {
+        let cx = WriteCx {
+            source: &self.source,
+            version: writer.config().version.unwrap_or(self.version),
+            convert: true,
+        };
+        self.records
+            .iter()
+            .map(|record| Built { record, cx })
+            .collect()
+    }
 }
 
 /// The declarations of the typed model, for the coverage ledger

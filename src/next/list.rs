@@ -3,7 +3,7 @@
 
 use std::ops::Deref;
 
-use crate::tree::Structure;
+use crate::tree::{Flat, Structure};
 
 use super::driver::{FromNode, NodeRef, ReadCx, Slot, ToNodes, WriteCx};
 
@@ -90,6 +90,12 @@ impl<T: FromNode + ToNodes> Slot for ThinVec<T> {
     fn write(&self, tag: &'static str, cx: &WriteCx<'_>, out: &mut Vec<Structure>) {
         for v in self {
             out.push(v.to_node(tag, cx));
+        }
+    }
+
+    fn to_flat<'s>(&'s self, tag: &'static str, cx: &WriteCx<'s>, out: &mut Flat<'s>) {
+        for v in self {
+            v.to_flat(tag, cx, out);
         }
     }
 

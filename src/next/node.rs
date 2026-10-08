@@ -2,7 +2,9 @@
 
 use std::ops::Deref;
 
-use crate::tree::{Payload, Structure, Tag, Xref};
+use std::borrow::Cow;
+
+use crate::tree::{Flat, FlatPayload, Payload, Structure, Tag, Xref};
 
 use super::driver::WriteCx;
 use super::text::{Source, TagId, Text, XrefId};
@@ -66,6 +68,31 @@ impl Node {
             line: 0,
         }
     }
+
+    /// [`Node::to_structure`], into a flat arena, borrowing the texts.
+    pub(crate) fn to_flat<'s>(&'s self, source: &'s Source, out: &mut Flat<'s>) {
+        let payload = match &self.payload {
+            Value::None => FlatPayload::None,
+            Value::Pointer(p) => FlatPayload::Pointer(Cow::Borrowed(source.xref(*p))),
+            Value::Text(t) => match t.as_str(source) {
+                "" => FlatPayload::None,
+                s => FlatPayload::Text(Cow::Borrowed(s)),
+            },
+        };
+        let standard = u16::try_from(self.tag.get())
+            .ok()
+            .filter(|&t| usize::from(t) < crate::tree::STANDARD_TAGS.len());
+        let at = out.open_standard(
+            Cow::Borrowed(source.tag(self.tag)),
+            standard,
+            self.xref.map(|x| Cow::Borrowed(source.xref(x))),
+            payload,
+        );
+        for c in &self.children {
+            c.to_flat(source, out);
+        }
+        out.close(at);
+    }
 }
 
 /// The substructures of a typed structure that no field holds, in order.
@@ -92,6 +119,13 @@ impl Extra {
     pub(crate) fn write(&self, cx: &WriteCx<'_>, out: &mut Vec<Structure>) {
         for n in self {
             out.push(n.to_structure(cx.source));
+        }
+    }
+
+    /// Writes the nodes into a flat arena.
+    pub(crate) fn write_flat<'s>(&'s self, cx: &WriteCx<'s>, out: &mut Flat<'s>) {
+        for n in self {
+            n.to_flat(cx.source, out);
         }
     }
 }

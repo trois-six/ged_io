@@ -1,6 +1,6 @@
 //! Source and repository citations.
 
-use crate::tree::Payload;
+use crate::tree::{FlatPayload, Payload};
 
 use super::dates::Date;
 use super::driver::{gedcom_struct, NodeRef, PayloadField, ReadCx, WriteCx};
@@ -38,6 +38,13 @@ impl PayloadField for CitationSource {
         match self {
             CitationSource::Pointer(id) => cx.pointer(*id),
             CitationSource::Description(t) => cx.text(t),
+        }
+    }
+
+    fn payload<'s>(&'s self, cx: &WriteCx<'s>) -> FlatPayload<'s> {
+        match self {
+            CitationSource::Pointer(id) => cx.pointer_flat(*id),
+            CitationSource::Description(t) => cx.text_flat(t),
         }
     }
 }
