@@ -24,7 +24,7 @@
 //! Each such rewrite is reported as a [`Repair`].
 
 use std::borrow::Cow;
-use std::fmt::Write as _;
+use std::fmt::{self, Write as _};
 use std::io;
 
 use super::{OutputEncoding, Repair, RepairKind, RepairPolicy, Unencodable, WriteError};
@@ -71,11 +71,9 @@ impl<'w> LineSink<'w> {
         encoding: OutputEncoding,
         policy: RepairPolicy,
     ) -> Self {
-        let capacity = if writer.is_some() {
-            FLUSH_AT + 4096
-        } else {
-            256
-        };
+        // The buffer grows to its size as lines come: a small file needs
+        // no large one.
+        let capacity = if writer.is_some() { 4096 } else { 256 };
         let (text, buf) = if encoding == OutputEncoding::Utf8 {
             (String::with_capacity(capacity), Vec::new())
         } else {
@@ -144,14 +142,20 @@ impl<'w> LineSink<'w> {
     }
 
     /// The length of the open line so far, in bytes.
+    #[inline]
     fn line_len(&self) -> usize {
         self.text.len() - self.line_start
     }
 
     /// Ends the open line: adds its terminator, and encodes it for an
     /// encoding other than UTF-8.
+    #[inline]
     fn end_line(&mut self) -> Result<(), WriteError> {
-        self.text.push_str(self.eol);
+        if self.eol == "\n" {
+            self.text.push('\n');
+        } else {
+            self.text.push_str(self.eol);
+        }
         let line = &self.text[self.line_start..];
         match self.encoding {
             OutputEncoding::Utf8 => {}
@@ -233,6 +237,7 @@ impl<'w> LineSink<'w> {
     }
 
     /// Starts a line: `{level}[ {xref}] {tag}`.
+    #[inline]
     fn start(&mut self, level: usize, xref: Option<&str>, tag: &str) {
         match u8::try_from(level) {
             Ok(digit @ 0..=9) => self.text.push(char::from(b'0' + digit)),
@@ -259,41 +264,53 @@ pub(crate) fn emit(
     tag: &str,
     payload: PayloadRef<'_>,
 ) -> Result<(), WriteError> {
+    emit_tagged(rules, sink, level, xref, tag, false, payload)
+}
+
+/// [`emit`], told whether `tag` is a standard tag (one of every version's
+/// grammar, which only `CONT` and `CONC` do not leave as it is).
+pub(crate) fn emit_tagged(
+    rules: &VersionRules,
+    sink: &mut LineSink<'_>,
+    level: usize,
+    xref: Option<&str>,
+    tag: &str,
+    standard: bool,
+    payload: PayloadRef<'_>,
+) -> Result<(), WriteError> {
     let level = if level > rules.max_level {
-        let detail = format!(
-            "output line {}: a structure at level {level} written at level {}",
-            sink.line_no(),
-            rules.max_level
-        );
-        sink.repair_here(RepairKind::Level, detail)?;
-        rules.max_level
+        level_repair(rules, sink, level)?
     } else {
         level
     };
-    let tag = structure_tag(rules, tag);
+    let tag = if standard && !matches!(tag, "CONT" | "CONC") {
+        Cow::Borrowed(tag)
+    } else {
+        structure_tag(rules, tag)
+    };
     if let Cow::Owned(to) = &tag {
-        let detail = format!(
-            "output line {}: tag {tag:?} written as {to}",
-            sink.line_no()
-        );
-        sink.repair_here(RepairKind::Misplaced, detail)?;
+        repair(
+            sink,
+            RepairKind::Misplaced,
+            format_args!("tag {tag:?} written as {to}"),
+        )?;
     }
     let xref = match xref {
         Some(x) if level > 0 => {
-            let detail = format!(
-                "output line {}: identifier {x} of a substructure left out",
-                sink.line_no()
-            );
-            sink.repair_here(RepairKind::Xref, detail)?;
+            repair(
+                sink,
+                RepairKind::Xref,
+                format_args!("identifier {x} of a substructure left out"),
+            )?;
             None
         }
         Some(x) if !rules.is_valid_xref(x) => {
             let to = candidate_xref(rules, x);
-            let detail = format!(
-                "output line {}: identifier {x} written as {to}",
-                sink.line_no()
-            );
-            sink.repair_here(RepairKind::Xref, detail)?;
+            repair(
+                sink,
+                RepairKind::Xref,
+                format_args!("identifier {x} written as {to}"),
+            )?;
             Some(Cow::Owned(to))
         }
         Some(x) => Some(Cow::Borrowed(x)),
@@ -303,18 +320,17 @@ pub(crate) fn emit(
     match payload {
         PayloadRef::None => sink.end_line(),
         PayloadRef::Pointer(p) => {
+            sink.text.push(' ');
             if is_valid_pointer(rules, p) {
-                sink.text.push(' ');
                 sink.text.push_str(p);
             } else {
                 let to = candidate_xref(rules, p);
-                sink.text.push(' ');
                 sink.text.push_str(&to);
-                let detail = format!(
-                    "output line {}: pointer {p} written as {to}",
-                    sink.line_no()
-                );
-                sink.repair_here(RepairKind::Xref, detail)?;
+                repair(
+                    sink,
+                    RepairKind::Xref,
+                    format_args!("pointer {p} written as {to}"),
+                )?;
             }
             sink.end_line()
         }
@@ -322,9 +338,67 @@ pub(crate) fn emit(
     }
 }
 
+/// Reports a repair of the line being written: `output line n: what`.
+#[cold]
+#[inline(never)]
+fn repair(
+    sink: &mut LineSink<'_>,
+    kind: RepairKind,
+    what: fmt::Arguments<'_>,
+) -> Result<(), WriteError> {
+    let detail = format!("output line {}: {what}", sink.line_no());
+    sink.repair_here(kind, detail)
+}
+
+/// The deepest level, for a structure deeper: reported.
+#[cold]
+#[inline(never)]
+fn level_repair(
+    rules: &VersionRules,
+    sink: &mut LineSink<'_>,
+    level: usize,
+) -> Result<usize, WriteError> {
+    repair(
+        sink,
+        RepairKind::Level,
+        format_args!(
+            "a structure at level {level} written at level {}",
+            rules.max_level
+        ),
+    )?;
+    Ok(rules.max_level)
+}
+
 /// Writes the text payload of a started line, with its `CONT` and `CONC`
 /// lines.
 fn emit_text(
+    rules: &VersionRules,
+    sink: &mut LineSink<'_>,
+    level: usize,
+    text: &str,
+) -> Result<(), WriteError> {
+    // Nearly all text is lines of characters that are never banned (LF
+    // line breaks at most): each line is escaped and wrapped as it is.
+    let special = special_bytes(text);
+    let at_signs = special & AT_SIGN != 0;
+    match special & !AT_SIGN {
+        0 => plain_line(rules, sink, level, text, at_signs),
+        LINE_FEED => {
+            for (i, part) in text.split('\n').enumerate() {
+                if i > 0 {
+                    sink.start(level + 1, None, "CONT");
+                }
+                plain_line(rules, sink, level, part, at_signs)?;
+            }
+            Ok(())
+        }
+        _ => emit_text_general(rules, sink, level, text),
+    }
+}
+
+/// [`emit_text`] of any text: line breaks of every kind, tabs and banned
+/// characters.
+fn emit_text_general(
     rules: &VersionRules,
     sink: &mut LineSink<'_>,
     level: usize,
@@ -374,7 +448,7 @@ fn emit_text(
         };
         if !part.is_empty() {
             if let Some(max) = sink.max_line {
-                wrapped(rules, sink, level, &part, found.at_signs, max)?;
+                wrapped(rules, sink, level, &part, Some(found.at_signs), max)?;
             } else {
                 sink.text.push(' ');
                 escape_into(rules.at_escape, &part, &mut sink.text);
@@ -411,6 +485,96 @@ struct Scan {
     tabs: bool,
     /// The number of `@`: an upper bound of what escaping adds.
     at_signs: usize,
+}
+
+/// Bits of [`special_bytes`]: a line feed.
+pub(crate) const LINE_FEED: u8 = 1;
+/// A carriage return.
+pub(crate) const CARRIAGE_RETURN: u8 = 2;
+/// A tab.
+pub(crate) const TAB: u8 = 4;
+/// Any other C0 control.
+pub(crate) const CONTROL: u8 = 8;
+/// DEL, or the lead byte of a C1 control (`C2`) or of U+FFFE and U+FFFF
+/// (`EF`).
+pub(crate) const MAYBE_BANNED: u8 = 16;
+/// An `@`, which text may have to escape.
+pub(crate) const AT_SIGN: u8 = 32;
+
+/// What `text` holds of the bytes that can start a line break, a tab or a
+/// banned character, or that escaping changes (`@`), as bits. Eight bytes
+/// are tested at a time, and only a word that holds one is looked at byte
+/// by byte.
+#[inline]
+pub(crate) fn special_bytes(text: &str) -> u8 {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    const HIGH: u64 = 0x8080_8080_8080_8080;
+    // Whether a byte of the word is zero; whether one is below `n` (at
+    // most 128). Exact, as booleans.
+    let zero = |v: u64| v.wrapping_sub(ONES) & !v & HIGH;
+    let below = |v: u64, n: u64| v.wrapping_sub(ONES * n) & !v & HIGH;
+    let class = |c: u8| match c {
+        b'\n' => LINE_FEED,
+        b'\r' => CARRIAGE_RETURN,
+        b'\t' => TAB,
+        0..=0x1F => CONTROL,
+        0x7F | 0xC2 | 0xEF => MAYBE_BANNED,
+        b'@' => AT_SIGN,
+        _ => 0,
+    };
+    let word = |w: [u8; 8]| {
+        let x = u64::from_le_bytes(w);
+        let hit = below(x, 0x20)
+            | zero(x ^ (ONES * 0x7F))
+            | zero(x ^ (ONES * 0xC2))
+            | zero(x ^ (ONES * 0xEF))
+            | zero(x ^ (ONES * u64::from(b'@')));
+        if hit == 0 {
+            0
+        } else {
+            w.iter().fold(0, |f, &c| f | class(c))
+        }
+    };
+    let (words, rest) = text.as_bytes().as_chunks::<8>();
+    let mut found = words.iter().fold(0, |f, &w| f | word(w));
+    // The last bytes, padded with a byte of no class.
+    if !rest.is_empty() {
+        let mut w = [b'a'; 8];
+        for (slot, &b) in w.iter_mut().zip(rest) {
+            *slot = b;
+        }
+        found |= word(w);
+    }
+    found
+}
+
+/// Writes one line of text without special bytes ([`special_bytes`]) on
+/// the started line, escaped and wrapped, and ends it.
+#[inline]
+/// `at_signs`: whether it may hold an `@` (none: it is written as it is).
+fn plain_line(
+    rules: &VersionRules,
+    sink: &mut LineSink<'_>,
+    level: usize,
+    text: &str,
+    at_signs: bool,
+) -> Result<(), WriteError> {
+    if !text.is_empty() {
+        match sink.max_line {
+            Some(max) => {
+                wrapped(rules, sink, level, text, (!at_signs).then_some(0), max)?;
+            }
+            None if !at_signs => {
+                sink.text.push(' ');
+                sink.text.push_str(text);
+            }
+            None => {
+                sink.text.push(' ');
+                escape_into(rules.at_escape, text, &mut sink.text);
+            }
+        }
+    }
+    sink.end_line()
 }
 
 /// Scans `text` once, in blocks the compiler vectorises.
@@ -457,18 +621,27 @@ fn has_banned(rules: &VersionRules, text: &str) -> bool {
 
 /// Writes `part` (no line break, not empty) on the started line and as many
 /// `CONC` lines as the line length requires; the last line is left open.
+/// `at_signs` is the number of `@` of `part`, when known.
 fn wrapped(
     rules: &VersionRules,
     sink: &mut LineSink<'_>,
     level: usize,
     part: &str,
-    at_signs: usize,
+    at_signs: Option<usize>,
     max: usize,
 ) -> Result<(), WriteError> {
-    // Most payloads fit: an upper bound of their escaped length tells.
-    if sink.line_len() + 1 + part.len() + at_signs + sink.eol.len() <= max {
+    // Most payloads fit: an upper bound of their escaped length tells (an
+    // `@` is at most doubled, so twice the length is a bound too).
+    let fixed = sink.line_len() + 1 + part.len() + sink.eol.len();
+    let fits = fixed + part.len() <= max
+        || fixed + at_signs.unwrap_or_else(|| part.bytes().filter(|&b| b == b'@').count()) <= max;
+    if fits {
         sink.text.push(' ');
-        escape_into(rules.at_escape, part, &mut sink.text);
+        if at_signs == Some(0) {
+            sink.text.push_str(part);
+        } else {
+            escape_into(rules.at_escape, part, &mut sink.text);
+        }
         return Ok(());
     }
     let mut pos = 0;
@@ -627,6 +800,7 @@ fn is_combining(c: char) -> bool {
 }
 
 /// Appends `text` (one line, no line break) escaped for the version.
+#[inline]
 pub(crate) fn escape_into(escape: AtEscape, text: &str, out: &mut String) {
     match escape {
         AtEscape::LeadingOnly => {
@@ -881,6 +1055,85 @@ mod tests {
             lines(&V70, 1, "NOTE", PayloadRef::Text(&text)),
             format!("1 NOTE {text}\n")
         );
+    }
+
+    /// Eight bytes at a time, the classes are those of each byte.
+    #[test]
+    fn special_bytes_by_words() {
+        let reference = |t: &str| {
+            t.bytes().fold(0, |f, c| {
+                f | match c {
+                    b'\n' => LINE_FEED,
+                    b'\r' => CARRIAGE_RETURN,
+                    b'\t' => TAB,
+                    0..=0x1F => CONTROL,
+                    0x7F | 0xC2 | 0xEF => MAYBE_BANNED,
+                    b'@' => AT_SIGN,
+                    _ => 0,
+                }
+            })
+        };
+        for c in (0..=0x7F_u8)
+            .map(char::from)
+            .chain(['\u{80}', '\u{9f}', 'é', '\u{fffe}', '\u{ffff}', '€'])
+        {
+            for at in 0..20 {
+                let text = format!("{}{c}{}", "a".repeat(at), "b".repeat(20 - at));
+                assert_eq!(special_bytes(&text), reference(&text), "{c:?} at {at}");
+            }
+        }
+    }
+
+    /// The paths for common text write what the general one writes.
+    #[test]
+    fn plain_text_paths_write_as_the_general_one() {
+        let pieces = [
+            "a",
+            "word ",
+            "@",
+            "@@",
+            "@#DJULIAN@",
+            "\n",
+            "é",
+            "e\u{301}",
+            " ",
+            "\t",
+            "\r",
+            "\u{7}",
+            "ç",
+            "z",
+        ];
+        let mut seed = 0x9E37_79B9_7F4A_7C15_u64;
+        for _ in 0..4000 {
+            let mut text = String::new();
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let len = (seed % 90) as usize;
+            let mut x = seed;
+            for _ in 0..len {
+                x = x.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                text.push_str(pieces[(x >> 33) as usize % pieces.len()]);
+            }
+            for rules in [&V551, &V70] {
+                for max in [None, Some(40), Some(255)] {
+                    let sink = |rules: &VersionRules| {
+                        let mut sink = LineSink::buffer(rules, RepairPolicy::Repair);
+                        if rules.max_line_len.is_some() {
+                            sink.max_line = max;
+                        }
+                        sink
+                    };
+                    let (mut fast, mut general) = (sink(rules), sink(rules));
+                    fast.start(1, None, "NOTE");
+                    emit_text(rules, &mut fast, 1, &text).unwrap();
+                    general.start(1, None, "NOTE");
+                    emit_text_general(rules, &mut general, 1, &text).unwrap();
+                    assert_eq!(fast.repairs, general.repairs, "{text:?}");
+                    assert_eq!(fast.into_string(), general.into_string(), "{text:?}");
+                }
+            }
+        }
     }
 
     #[test]

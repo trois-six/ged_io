@@ -278,6 +278,7 @@ impl VersionRules {
     /// Whether a cross-reference identifier, delimiters included, follows
     /// the grammar of the version.
     #[must_use]
+    #[inline]
     pub fn is_valid_xref(&self, xref: &str) -> bool {
         let Some(id) = xref
             .strip_prefix('@')
@@ -294,9 +295,15 @@ impl VersionRules {
                         .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
             }
             XrefGrammar::V551 { max_len } => {
-                xref.chars().count() <= max_len
+                // Bytes bound characters: most identifiers need no count.
+                let ascii = id.is_ascii();
+                (xref.len() <= max_len || xref.chars().count() <= max_len)
                     && id.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
-                    && !id.chars().any(|c| c == '@' || c.is_control())
+                    && if ascii {
+                        !id.bytes().any(|b| b == b'@' || b.is_ascii_control())
+                    } else {
+                        !id.chars().any(|c| c == '@' || c.is_control())
+                    }
             }
         }
     }
@@ -306,6 +313,7 @@ impl VersionRules {
     /// a letter or `_`, upper case unless it starts with `_`, at most 31
     /// characters (p. 41).
     #[must_use]
+    #[inline]
     pub fn is_valid_tag(&self, tag: &str) -> bool {
         let b = tag.as_bytes();
         let Some(&first) = b.first() else {
@@ -324,10 +332,17 @@ impl VersionRules {
                 }
             }
             XrefGrammar::V551 { .. } => {
+                // One pass: letters, digits and `_`, and whether any letter
+                // is lower case.
+                let (mut ok, mut lower) = (true, false);
+                for c in b {
+                    ok &= c.is_ascii_alphanumeric() || *c == b'_';
+                    lower |= c.is_ascii_lowercase();
+                }
                 b.len() <= MAX_TAG_551
                     && (first == b'_' || first.is_ascii_uppercase())
-                    && b.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'_')
-                    && (first == b'_' || !b.iter().any(u8::is_ascii_lowercase))
+                    && ok
+                    && (first == b'_' || !lower)
                     && (first != b'_' || b.len() > 1)
             }
         }
@@ -339,6 +354,7 @@ impl VersionRules {
     /// character at all, tab included. Line breaks inside text are written
     /// as `CONT` lines, never as characters.
     #[must_use]
+    #[inline]
     pub fn is_banned(&self, c: char) -> bool {
         is_banned(c) || (c == '\t' && self.xref != XrefGrammar::V7)
     }
