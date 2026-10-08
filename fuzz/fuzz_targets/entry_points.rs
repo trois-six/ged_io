@@ -1,14 +1,53 @@
 //! No input may make any entry point panic or hang: every reader (bytes,
 //! text, the deprecated `Gedcom`, streaming, GEDZIP), version detection,
 //! reference validation, the writer in both versions followed by a re-read,
-//! JSON, `Debug`/`Display` and the indexed view.
-//!
-//! The date conversions of the `calendar` feature are left out until their
-//! known hang on far-future Hebrew years is fixed; add them then.
+//! JSON, `Debug`/`Display`, the indexed view, and the date, age and time
+//! grammars with their conversions between versions and calendars.
 #![no_main]
 
-use ged_io::{GedcomBuilder, GedcomWriter};
+use ged_io::types::age::{Age, AgeValue};
+use ged_io::types::date::{Calendar, Date, DateExact, DatePeriod, DateValue, Time};
+use ged_io::{GedcomBuilder, GedcomVersion, GedcomWriter};
 use libfuzzer_sys::fuzz_target;
+
+/// Every grammar, strict and lenient, every conversion, on one payload.
+fn values(text: &str) {
+    let date = Date {
+        value: Some(text.to_string()),
+        time: Some(text.to_string()),
+        phrase: None,
+    };
+    let age = Age {
+        value: Some(text.to_string()),
+        phrase: None,
+    };
+    let value = DateValue::parse(text);
+    for version in [GedcomVersion::V5_5_1, GedcomVersion::V7_0] {
+        let _ = DateValue::parse_strict(text, version.clone());
+        let _ = DatePeriod::parse_strict(text, version.clone());
+        let _ = DateExact::parse_strict(text, version.clone());
+        let _ = Time::parse_strict(text, version.clone());
+        let _ = AgeValue::parse_strict(text, version.clone());
+        let _ = value.to_gedcom(version.clone());
+        let _ = date.to_version(version.clone()).normalize(version.clone());
+        let _ = age.to_version(version.clone());
+        for calendar in [
+            Calendar::Gregorian,
+            Calendar::Julian,
+            Calendar::Hebrew,
+            Calendar::FrenchRepublican,
+        ] {
+            let _ = date.convert_to(&calendar, version.clone());
+        }
+    }
+    for date in value.dates() {
+        let _ = date.ordering_key();
+        let _ = date.weekday();
+        let _ = date.add_days(1_000_000);
+    }
+    let _ = Time::parse(text);
+    let _ = AgeValue::parse(text);
+}
 
 fuzz_target!(|data: &[u8]| {
     if let Ok(d) = GedcomBuilder::new().build_from_bytes(data) {
@@ -32,6 +71,11 @@ fuzz_target!(|data: &[u8]| {
     if let Ok(text) = std::str::from_utf8(data) {
         let _ = GedcomBuilder::new().build_from_str(text);
         let _ = ged_io::detect_version(text);
+        // Each line's payload, after its level and tag, and the whole text.
+        for line in text.lines().take(64) {
+            values(line.splitn(3, ' ').nth(2).unwrap_or(line));
+        }
+        values(text);
         if let Ok(mut g) = ged_io::Gedcom::new(text.chars()) {
             let _ = g.parse_data();
         }
