@@ -630,15 +630,22 @@
 #model lower
 #model upper
 
-### G5-XREF-WITH-SPACE | L | pointer containing a space (test-files xref-case '@NoTe ref@')
+### G5-XREF-WITH-SPACE | C | xref and pointer containing a space: valid 5.5.1 (pointer_char is any non-@, p.13; test-files xref-case '@NoTe ref@')
 0 HEAD
+1 SOUR EXAMPLE_APP
+1 SUBM @U0@
 1 GEDC
 2 VERS 5.5.1
 2 FORM LINEAGE-LINKED
 1 CHAR UTF-8
 0 @I1@ INDI
 1 NOTE @NoTe ref@
+0 @NoTe ref@ NOTE A shared note
+0 @U0@ SUBM
+1 NAME Example Submitter
 0 TRLR
+#want 1 NOTE @NoTe ref@
+#want 0 @NoTe ref@ NOTE A shared note
 
 ### G5-NOTE-LOOKS-LIKE-PTR | L | NOTE record whose text is '@N0@' (gedcom4j issue96)
 0 HEAD

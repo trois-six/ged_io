@@ -305,7 +305,7 @@
 2 CONT b
 0 TRLR
 
-### G7-CONT-WRONG-LEVEL | L | CONT at the note's own level (L, gedcom4j Issue100-like)
+### G7-CONT-WRONG-LEVEL | L | CONT written at the note's own level: the record takes no payload, so the text continues the previous sibling (gedcom4j Issue100-like)
 0 HEAD
 1 GEDC
 2 VERS 7.0
@@ -313,6 +313,9 @@
 1 NOTE a
 1 CONT b
 0 TRLR
+#model a\nb
+#want 1 NOTE a
+#want 2 CONT b
 
 ### G7-NO-HEAD | L | missing HEAD
 0 @I1@ INDI

@@ -122,7 +122,12 @@ pub fn parse_line(line: &str) -> Option<RawLine<'_>> {
     rest = rest.trim_start_matches([' ', '\t']);
     let mut xref = None;
     if rest.starts_with('@') {
-        let end = rest.find([' ', '\t'])?;
+        // A 5.5.1 xref may contain spaces (pointer_char is any non-`@`,
+        // p.13): it ends at its closing `@`, else at the first space.
+        let end = match rest[1..].find('@') {
+            Some(at) if rest[at + 2..].starts_with([' ', '\t']) => at + 2,
+            _ => rest.find([' ', '\t'])?,
+        };
         xref = Some(&rest[..end]);
         rest = rest[end..].trim_start_matches([' ', '\t']);
     }
@@ -144,16 +149,25 @@ pub fn parse_line(line: &str) -> Option<RawLine<'_>> {
     })
 }
 
-/// True when the raw payload has the pointer shape `@X@` (no inner `@` or
-/// space, not an escape such as `@#DJULIAN@` and not a doubled `@@`).
-pub fn is_pointer(raw: &str) -> bool {
-    let b = raw.as_bytes();
-    b.len() >= 3
-        && b[0] == b'@'
-        && b[b.len() - 1] == b'@'
-        && b[1] != b'@'
-        && b[1] != b'#'
-        && !raw[1..raw.len() - 1].contains(['@', ' ', '\t'])
+/// True when the raw payload is a pointer in the grammar of `version`.
+///
+/// * 5.5.1 (p.13): `@`, an alphanumeric, any run of non-`@` characters
+///   (spaces included, as in `@NoTe ref@`), `@`.
+/// * 7.0: `@`, one or more of `A-Z`, `0-9` and `_`, `@`; a payload such as
+///   `@I 1@` is text (an invalid one, kept as read).
+pub fn is_pointer(raw: &str, version: Version) -> bool {
+    let Some(inner) = raw.strip_prefix('@').and_then(|r| r.strip_suffix('@')) else {
+        return false;
+    };
+    let Some(first) = inner.chars().next() else {
+        return false;
+    };
+    match version {
+        Version::V551 => first.is_ascii_alphanumeric() && !inner.contains(['@', '\t']),
+        Version::V70 => inner
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_'),
+    }
 }
 
 /// Decodes the `@@` escapes of one line payload.
@@ -270,20 +284,33 @@ pub fn parse_with(text: &str, version: Version) -> Vec<Node> {
         };
         if (l.tag == "CONT" || l.tag == "CONC") && !records.is_empty() && l.level > 0 {
             let text = l.payload.map(|p| unescape(p, version)).unwrap_or_default();
-            // Continue the open node one level up, else the deepest one.
+            // A continuation belongs to the open structure one level up
+            // (else to the deepest one). When that structure carries no
+            // payload but the previous sibling carries text, the line was
+            // written one level too high (`1 NOTE a` / `1 CONT b`): the
+            // spec gives the text no other home, so it continues the sibling.
             let depth = stack
                 .iter()
                 .rposition(|&(lv, _)| lv + 1 == l.level)
                 .map_or(stack.len(), |d| d + 1);
+            let sibling = stack.get(depth).filter(|&&(lv, _)| lv == l.level).is_some()
+                && node_ref(&records, &stack[..depth]).is_some_and(|n| n.payload == Payload::None)
+                && node_ref(&records, &stack[..=depth])
+                    .is_some_and(|n| matches!(n.payload, Payload::Text(_)));
+            let target = if sibling {
+                &stack[..=depth]
+            } else {
+                &stack[..depth]
+            };
             let sep = if l.tag == "CONT" { "\n" } else { "" };
-            if let Some(n) = node_at(&mut records, &stack[..depth]) {
+            if let Some(n) = node_at(&mut records, target) {
                 append_text(n, &format!("{sep}{text}"));
             }
             continue;
         }
         let payload = match l.payload {
             None => Payload::None,
-            Some(p) if is_pointer(p) => Payload::Pointer(p.to_string()),
+            Some(p) if is_pointer(p, version) => Payload::Pointer(p.to_string()),
             Some(p) => Payload::Text(unescape(p, version)),
         };
         let node = Node {
@@ -315,6 +342,15 @@ fn node_at<'a>(records: &'a mut [Node], stack: &[(u32, usize)]) -> Option<&'a mu
     let mut n = records.get_mut(first)?;
     for &(_, i) in rest {
         n = n.children.get_mut(i)?;
+    }
+    Some(n)
+}
+
+fn node_ref<'a>(records: &'a [Node], stack: &[(u32, usize)]) -> Option<&'a Node> {
+    let (&(_, first), rest) = stack.split_first()?;
+    let mut n = records.get(first)?;
+    for &(_, i) in rest {
+        n = n.children.get(i)?;
     }
     Some(n)
 }
@@ -367,11 +403,47 @@ mod tests {
 
     #[test]
     fn pointer_shape_is_strict() {
-        assert!(is_pointer("@I1@"));
-        assert!(!is_pointer("@@I1@"));
-        assert!(!is_pointer("@#DJULIAN@"));
-        assert!(!is_pointer("@NoTe ref@"));
-        assert!(!is_pointer("@I1@ x"));
+        for v in [Version::V551, Version::V70] {
+            assert!(is_pointer("@I1@", v));
+            assert!(!is_pointer("@@I1@", v));
+            assert!(!is_pointer("@#DJULIAN@", v));
+            assert!(!is_pointer("@I1@ x", v));
+            assert!(!is_pointer("@@", v));
+        }
+        assert!(is_pointer("@NoTe ref@", Version::V551));
+        assert!(!is_pointer("@NoTe ref@", Version::V70));
+        assert!(is_pointer("@I_1@", Version::V70));
+    }
+
+    #[test]
+    fn xrefs_with_spaces_are_read_whole() {
+        let recs = parse_with(
+            "0 @NoTe ref@ NOTE text\n0 @I1@ INDI\n1 NOTE @NoTe ref@",
+            Version::V551,
+        );
+        assert_eq!(recs[0].xref.as_deref(), Some("@NoTe ref@"));
+        assert_eq!(recs[0].payload, Payload::Text("text".into()));
+        assert_eq!(
+            recs[1].children[0].payload,
+            Payload::Pointer("@NoTe ref@".into())
+        );
+    }
+
+    #[test]
+    fn a_continuation_one_level_too_high_continues_the_sibling() {
+        let recs = parse_with(
+            "0 @I1@ INDI\n1 NOTE a\n1 CONT b\n1 CONC c\n1 SEX F",
+            Version::V70,
+        );
+        assert_eq!(recs[0].payload, Payload::None);
+        assert_eq!(recs[0].children[0].payload, Payload::Text("a\nbc".into()));
+        assert_eq!(recs[0].children.len(), 2);
+        // A record with text keeps its continuation, as the grammar says.
+        let recs = parse_with("0 @N1@ NOTE a\n1 SOUR @S1@\n1 CONT b", Version::V551);
+        assert_eq!(recs[0].payload, Payload::Text("a\nb".into()));
+        // Nothing to continue but the record: the text is still kept there.
+        let recs = parse_with("0 @I1@ INDI\n1 CONT orphan", Version::V70);
+        assert_eq!(recs[0].payload, Payload::Text("orphan".into()));
     }
 
     #[test]

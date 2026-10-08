@@ -18,7 +18,11 @@ tools/fetch-corpora.sh into target/corpora/spec/):
   `551-errata.tsv` (this directory), which cites the PDF page of each row.
 
 Usage:
-    tools/spec-tables/gen.py [--inputs target/corpora/spec] [--out PATH] [--check]
+    tools/spec-tables/gen.py [--inputs DIR] [--out PATH] [--check]
+    tools/spec-tables/gen.py [--inputs DIR] --crosscheck-551 REGISTRIES
+
+DIR defaults to $CORPORA_DIR/spec, or target/corpora/spec, as tools/fetch-corpora.sh
+lays it out.
 
 `--check` regenerates in memory and exits 1 when the committed file differs
 (used by the opt-in `spec_tables_are_current` test).
@@ -442,7 +446,7 @@ def generate(inputs_dir):
     return text
 
 
-def crosscheck_551(registries):
+def crosscheck_551(registries, inputs_dir):
     """(superstructure tag, tag, cardinality) facts of GEDCOM-registries'
     5.5.1 structures against the generated 5.5.1 table: returns the
     differences as sorted lines. Nothing from the registries is copied."""
@@ -474,7 +478,7 @@ def crosscheck_551(registries):
         for sub, c in subs.items():
             if tags.get(uri) and tags.get(sub):
                 theirs.add((tags[uri], tags[sub], c.strip('{}')))
-    subs, _, _, _, _ = gen_v551(os.path.join(os.path.dirname(ERRATA), '..', '..', 'target', 'corpora', 'spec', 'gedcom-go-5.5.1'))
+    subs, _, _, _, _ = gen_v551(os.path.join(inputs_dir, 'gedcom-go-5.5.1'))
     def sup_tag(ty):
         return ty.split('.')[-1].split('#')[0]
     ours = set()
@@ -499,13 +503,15 @@ def crosscheck_551(registries):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--inputs', default=os.path.join(ROOT, 'target', 'corpora', 'spec'))
+    # The layout of tools/fetch-corpora.sh: $CORPORA_DIR/spec, else target/corpora/spec.
+    corpora = os.environ.get('CORPORA_DIR') or os.path.join(ROOT, 'target', 'corpora')
+    ap.add_argument('--inputs', default=os.path.join(corpora, 'spec'))
     ap.add_argument('--out', default=DEFAULT_OUT)
     ap.add_argument('--check', action='store_true')
     ap.add_argument('--crosscheck-551', metavar='REGISTRIES', help='compare the 5.5.1 table with a GEDCOM-registries checkout')
     a = ap.parse_args()
     if a.crosscheck_551:
-        for line in crosscheck_551(a.crosscheck_551):
+        for line in crosscheck_551(a.crosscheck_551, a.inputs):
             print(line)
         return 0
     outputs = [(a.out, generate(a.inputs)), (ANSEL_OUT, generate_ansel())]

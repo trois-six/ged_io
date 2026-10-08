@@ -255,6 +255,8 @@ fn spec_tables_are_current() {
 fn spec_551_matches_the_registries() {
     let out = std::process::Command::new("python3")
         .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/spec-tables/gen.py"))
+        .arg("--inputs")
+        .arg(root().join("spec"))
         .arg("--crosscheck-551")
         .arg(root().join("registries"))
         .output()
