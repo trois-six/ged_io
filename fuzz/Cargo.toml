@@ -30,3 +30,10 @@ path = "fuzz_targets/tree.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "writer"
+path = "fuzz_targets/writer.rs"
+test = false
+doc = false
+bench = false
