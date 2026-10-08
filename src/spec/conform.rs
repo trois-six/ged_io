@@ -8,25 +8,43 @@
 //! to (a record that becomes an extension is no longer of its type), the
 //! pass runs again until it changes nothing; each repair moves data towards
 //! extensions only, so this ends, in two passes in practice.
+//!
+//! Most records need no repair. Each pass first looks at every record
+//! without changing it ([`clean`]): a record the repair would leave as it is
+//! stays as it was given — borrowed from a parsed tree, never copied — and
+//! only the others are copied and repaired. A record found so stays so in
+//! the following passes while what it depends on (the record each
+//! identifier names, the renamed identifiers, the aliases) is unchanged.
 
+mod clean;
+
+use clean::Walk;
+
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 
 use super::payload::{self, is_ext_tag, Family};
 use super::schema::{tag_index, Kind, Schema, StructId, DATASET};
+use super::tables::{self, TAGS};
 use super::validate::{
-    bounds, encoded_len, is_external_pointer, pick, xref_error, Aliases, Pick, MAX_RECORD_BYTES,
+    bounds, encoded_len, is_external_pointer, pick, xref_error, Aliases, Pick, Picker,
+    MAX_RECORD_BYTES,
 };
-use crate::tree::{Payload, Structure, Tag, Xref};
+use crate::tree::{Node, Payload, PayloadRef, Structure, Tag, Xref};
 use crate::version::VersionRules;
 use crate::writer::{
     complete_head, extension_tag, needs_submitter, new_xref, numbered_xref, stub_submitter, Repair,
-    RepairKind, PLACEHOLDER,
+    RepairKind, XrefIndex, PLACEHOLDER,
 };
 use crate::GedcomVersion;
 
 /// The most passes [`conform`] makes; each one after the first only follows
 /// up on records that became extensions.
 const MAX_PASSES: usize = 8;
+
+/// The pointers looked up together ([`clean::Walk::pending`]): 2 MB.
+const LOOKUP_BATCH: usize = 1 << 16;
 
 /// Repairs `records` (a whole dataset: header, records and trailer, in
 /// order) so that [`validate`](super::validate) finds nothing for
@@ -41,25 +59,37 @@ const MAX_PASSES: usize = 8;
 ///
 /// [`DeviationKind::RecordSize`]: super::DeviationKind::RecordSize
 pub fn conform(records: &mut Vec<Structure>, version: GedcomVersion) -> Vec<Repair> {
-    let rules = version.rules();
-    let mut c = Conformer {
-        rules,
-        schema: rules.spec,
-        family: Family::of(rules),
-        repairs: Vec::new(),
-        taken: HashSet::new(),
-        renamed: HashMap::new(),
-        types: HashMap::new(),
-        schma: Vec::new(),
-        path: Vec::new(),
-        submitter: None,
-        new_records: Vec::new(),
-        aliases: Aliases::default(),
-        used: HashSet::new(),
-    };
+    let mut recs: Vec<Rec<'_, &Structure>> = records.drain(..).map(Rec::owned).collect();
+    let repairs = conform_records(&mut recs, version).repairs;
+    records.extend(recs.into_iter().map(Rec::into_structure));
+    repairs
+}
+
+/// What [`conform_records`] did, and the identifiers it left.
+pub(crate) struct Conformed<'n> {
+    /// The repairs, in the order they were made.
+    pub(crate) repairs: Vec<Repair>,
+    xrefs: XrefIndex<'n, Option<StructId>>,
+}
+
+impl Conformed<'_> {
+    /// Whether a record has this identifier. Every record identifier is
+    /// valid and unique once repaired.
+    pub(crate) fn knows(&self, xref: &str) -> bool {
+        self.xrefs.contains_key(xref)
+    }
+}
+
+/// [`conform`] on records as they are given ([`Rec`]): only the records
+/// that need a repair are copied.
+pub(crate) fn conform_records<'n, N: Node<'n>>(
+    records: &mut Vec<Rec<'n, N>>,
+    version: GedcomVersion,
+) -> Conformed<'n> {
+    let mut c = Conformer::new(version);
     for pass in 0..MAX_PASSES {
         let before = c.repairs.len();
-        c.pass(records);
+        c.pass(records, pass);
         if pass == 0 && c.family == Family::V551 {
             c.record_sizes(records);
         }
@@ -67,21 +97,180 @@ pub fn conform(records: &mut Vec<Structure>, version: GedcomVersion) -> Vec<Repa
             break;
         }
     }
-    c.repairs
+    Conformed {
+        repairs: c.repairs,
+        xrefs: c.xrefs,
+    }
 }
 
-struct Conformer {
+/// A record of a dataset being repaired: as it was given (a node of a
+/// parsed tree, a borrowed structure), as long as the repair leaves it so,
+/// or an owned copy, which the repair changes.
+pub(crate) struct Rec<'n, N> {
+    body: Body<N>,
+    /// The tag and identifier of a record as given (read once: they are
+    /// asked for pass after pass, and a tree finds an identifier by a
+    /// search), and the tag's index among the standard tags.
+    tag: &'n str,
+    xref: Option<&'n str>,
+    standard: Option<u16>,
+    /// The generation of what the record depends on ([`Conformer::state`])
+    /// under which it was found to need no repair; 0 when it was not.
+    clean: u32,
+    /// Its record type then (the dataset's type for none), which counts
+    /// towards the records of that type the dataset permits.
+    rtype: StructId,
+    /// An upper bound of its size as written, from its last look (5.5.1
+    /// records over 32K: [`Conformer::record_sizes`]); `u32::MAX` when
+    /// unknown.
+    size: u32,
+}
+
+enum Body<N> {
+    Given(N),
+    Owned(Box<Structure>),
+}
+
+/// A record, borrowed: given or owned.
+pub(crate) enum RecRef<'b, N> {
+    Given(N),
+    Owned(&'b Structure),
+}
+
+/// Runs `$body` with `$n` bound to record `$rec` as a node: as given or as
+/// owned.
+macro_rules! with_node {
+    ($rec:expr, |$n:ident| $body:expr) => {
+        match $rec {
+            RecRef::Given($n) => $body,
+            RecRef::Owned($n) => $body,
+        }
+    };
+}
+
+impl<'n, N: Node<'n>> Rec<'n, N> {
+    /// A record as it is given.
+    pub(crate) fn given(node: N) -> Self {
+        Self::of(
+            node.tag(),
+            node.xref(),
+            node.standard_tag(),
+            Body::Given(node),
+        )
+    }
+
+    /// An owned record.
+    pub(crate) fn owned(s: Structure) -> Self {
+        Self::of("", None, None, Body::Owned(Box::new(s)))
+    }
+
+    fn of(tag: &'n str, xref: Option<&'n str>, standard: Option<u16>, body: Body<N>) -> Self {
+        Self {
+            body,
+            tag,
+            xref,
+            standard,
+            clean: 0,
+            rtype: DATASET,
+            size: u32::MAX,
+        }
+    }
+
+    /// The record, borrowed.
+    pub(crate) fn get(&self) -> RecRef<'_, N> {
+        match &self.body {
+            Body::Given(n) => RecRef::Given(*n),
+            Body::Owned(s) => RecRef::Owned(s),
+        }
+    }
+
+    pub(crate) fn tag<'b>(&'b self) -> &'b str
+    where
+        'n: 'b,
+    {
+        match &self.body {
+            Body::Given(_) => self.tag,
+            Body::Owned(s) => s.tag.as_str(),
+        }
+    }
+
+    pub(crate) fn xref<'b>(&'b self) -> Option<&'b str>
+    where
+        'n: 'b,
+    {
+        match &self.body {
+            Body::Given(_) => self.xref,
+            Body::Owned(s) => s.xref.as_deref(),
+        }
+    }
+
+    /// The index of the tag among the standard tags.
+    fn standard_tag(&self) -> Option<u16> {
+        match &self.body {
+            Body::Given(_) => self.standard,
+            Body::Owned(s) => s.tag.standard_index(),
+        }
+    }
+
+    fn line(&self) -> u32 {
+        match &self.body {
+            Body::Given(n) => n.line(),
+            Body::Owned(s) => s.line,
+        }
+    }
+
+    /// Whether the record has neither payload nor substructure.
+    pub(crate) fn is_empty(&self) -> bool {
+        match &self.body {
+            Body::Given(n) => n.payload() == PayloadRef::None && n.children().next().is_none(),
+            Body::Owned(s) => s.payload == Payload::None && s.substructures.is_empty(),
+        }
+    }
+
+    /// The record as an owned structure, as it is.
+    fn to_structure(&self) -> Structure {
+        with_node!(self.get(), |n| n.to_owned_structure())
+    }
+
+    /// The record, copied first if it is not owned yet.
+    fn make_owned(&mut self) -> &mut Structure {
+        if !matches!(self.body, Body::Owned(_)) {
+            self.body = Body::Owned(Box::new(self.to_structure()));
+        }
+        match &mut self.body {
+            Body::Owned(s) => s,
+            Body::Given(_) => unreachable!("made owned above"),
+        }
+    }
+
+    /// The record as an owned structure, taken out (an owned record is
+    /// left empty).
+    pub(crate) fn take_structure(&mut self) -> Structure {
+        match &mut self.body {
+            Body::Owned(s) => std::mem::take(s),
+            Body::Given(_) => self.to_structure(),
+        }
+    }
+
+    /// The record as an owned structure.
+    pub(crate) fn into_structure(self) -> Structure {
+        match self.body {
+            Body::Owned(s) => *s,
+            Body::Given(_) => self.to_structure(),
+        }
+    }
+}
+
+struct Conformer<'n> {
     rules: &'static VersionRules,
     schema: &'static Schema,
     family: Family,
     repairs: Vec<Repair>,
-    /// Every record identifier in use.
-    taken: HashSet<Box<str>>,
+    /// Every record identifier in use, with the type of the record it
+    /// names as the pass found it (`None` for extension records).
+    xrefs: XrefIndex<'n, Option<StructId>>,
     /// The new identifier of each identifier that was invalid.
     renamed: HashMap<Box<str>, Box<str>>,
-    /// The type of the record each identifier names, as the pass found it:
-    /// `None` for extension records.
-    types: HashMap<Box<str>, Option<StructId>>,
     /// Extension tags of relocated standard structures, with their URIs.
     schma: Vec<(String, String)>,
     /// The tags from the record to the structure being repaired.
@@ -92,8 +281,90 @@ struct Conformer {
     new_records: Vec<Structure>,
     /// The aliases `HEAD.SCHMA` declares (7.x).
     aliases: Aliases,
-    /// Every extension tag of the dataset.
-    used: HashSet<String>,
+    /// Every extension tag of the dataset as the pass began, when a repair
+    /// may need it (7.x relocations).
+    used: Option<HashSet<String>>,
+    /// The generation of what a record found clean depends on: the types
+    /// in `xrefs`, `renamed` and `aliases`. It changes when they do.
+    state: u32,
+    /// The number of repairs when the last pass began.
+    pass_start: usize,
+    /// What the check needs of each type, computed once per version.
+    tables: &'static TypeTables,
+    /// The type of each substructure, by tag.
+    picker: Picker,
+}
+
+/// A required substructure: its tag, its minimum and the first
+/// substructure type with that tag.
+type Required = (u8, u8, StructId);
+
+/// What the check needs of each structure type of a version's tables.
+struct TypeTables {
+    /// The required substructures of each type: (tag, minimum, the first
+    /// substructure type with that tag), in the order of the tables.
+    required: Box<[Box<[Required]>]>,
+    /// The types whose rules the tables cannot state: 7.x `NOTE-TRAN` and
+    /// `MIME`.
+    note_tran: Box<[StructId]>,
+    mime: Box<[StructId]>,
+    /// The record type of each tag of the tables ([`Schema::record`]), 0
+    /// for none.
+    records: Box<[StructId]>,
+}
+
+impl TypeTables {
+    fn of(schema: &'static Schema) -> &'static TypeTables {
+        static TABLES: [OnceLock<TypeTables>; 3] = [const { OnceLock::new() }; 3];
+        static OTHER: OnceLock<TypeTables> = OnceLock::new();
+        let slot = [&tables::V551, &tables::V70, &tables::V71]
+            .into_iter()
+            .position(|s| std::ptr::eq(s, schema))
+            .and_then(|i| TABLES.get(i))
+            .unwrap_or(&OTHER);
+        slot.get_or_init(|| TypeTables::build(schema))
+    }
+
+    fn build(schema: &Schema) -> TypeTables {
+        let ids = || (0..schema.structs.len()).filter_map(|i| StructId::try_from(i).ok());
+        let required = ids()
+            .map(|ty| {
+                let mut seen: Vec<u8> = Vec::new();
+                let mut req: Vec<Required> = Vec::new();
+                for sub in schema.subs(ty) {
+                    let Some(t) = schema.tag_id(sub.id) else {
+                        continue;
+                    };
+                    if seen.contains(&t) {
+                        continue;
+                    }
+                    seen.push(t);
+                    let (min, _) = bounds(schema, ty, t);
+                    if min > 0 {
+                        req.push((t, min, sub.id));
+                    }
+                }
+                req.into_boxed_slice()
+            })
+            .collect();
+        let named = |name: &str| -> Box<[StructId]> {
+            if schema.version.starts_with('7') {
+                ids().filter(|&ty| schema.name(ty) == name).collect()
+            } else {
+                Box::default()
+            }
+        };
+        let records = TAGS
+            .iter()
+            .map(|tag| schema.record(tag).unwrap_or(DATASET))
+            .collect();
+        TypeTables {
+            required,
+            note_tran: named("NOTE-TRAN"),
+            mime: named("MIME"),
+            records,
+        }
+    }
 }
 
 /// What becomes of a structure after its repair.
@@ -168,7 +439,7 @@ fn extension(path: &str) -> String {
         .unwrap_or_default()
 }
 
-impl Conformer {
+impl<'n> Conformer<'n> {
     fn repair(&mut self, line: u32, kind: RepairKind, detail: String) {
         self.repairs.push(Repair {
             line,
@@ -187,59 +458,239 @@ impl Conformer {
         p
     }
 
-    fn pass(&mut self, records: &mut Vec<Structure>) {
-        self.header_and_trailer(records);
-        self.xrefs(records);
-        self.aliases = Aliases::of(records.first().filter(|r| r.tag == "HEAD"), self.schema);
-        self.used.clear();
-        let mut stack: Vec<&Structure> = records.iter().collect();
-        while let Some(n) = stack.pop() {
-            if n.tag.as_str().starts_with('_') {
-                self.used.insert(n.tag.as_str().to_string());
-            }
-            stack.extend(&n.substructures);
+    fn new(version: GedcomVersion) -> Self {
+        let rules = version.rules();
+        let schema = rules.spec;
+        let family = Family::of(rules);
+        Conformer {
+            rules,
+            schema,
+            family,
+            repairs: Vec::new(),
+            xrefs: XrefIndex::default(),
+            renamed: HashMap::new(),
+            schma: Vec::new(),
+            path: Vec::new(),
+            submitter: None,
+            new_records: Vec::new(),
+            aliases: Aliases::default(),
+            used: None,
+            state: 1,
+            pass_start: 0,
+            tables: TypeTables::of(schema),
+            picker: Picker::of(rules),
         }
-        let types: HashMap<Box<str>, Option<StructId>> = records
-            .iter()
-            .chain(&self.new_records)
-            .filter_map(|r| {
-                let x = r.xref.as_deref()?;
-                Some((x.into(), self.record_type(r.tag.as_str())))
-            })
-            .collect();
-        self.types = types;
+    }
+
+    fn pass<N: Node<'n>>(&mut self, records: &mut Vec<Rec<'n, N>>, pass: usize) {
+        // Whether nothing was repaired since the last pass began.
+        let quiet = pass > 0 && self.repairs.len() == self.pass_start;
+        self.pass_start = self.repairs.len();
+        self.header_and_trailer(records);
+        let quiet = quiet && self.repairs.len() == self.pass_start;
+        let head = records.first().filter(|r| r.tag() == "HEAD");
+        let aliases = match head.map(Rec::get) {
+            Some(h) => with_node!(h, |h| Aliases::of(Some(h), self.schema)),
+            None => Aliases::of(None::<&Structure>, self.schema),
+        };
+        let aliases_changed = aliases != self.aliases;
+        self.aliases = aliases;
+        // The identifiers and the types they name only change with a
+        // repair: after a pass that repaired nothing, they are as they were
+        // (the records it added are in `xrefs` already).
+        if !quiet || aliases_changed {
+            let renamed = self.renamed.len();
+            let previous = std::mem::take(&mut self.xrefs);
+            self.xrefs(records);
+            if pass == 0
+                || aliases_changed
+                || previous != self.xrefs
+                || self.renamed.len() != renamed
+            {
+                self.state += 1;
+            }
+        }
         self.submitter = self.submitter.take().or_else(|| {
             records
                 .iter()
-                .chain(&self.new_records)
-                .find(|r| r.tag == "SUBM" && r.xref.is_some())
-                .and_then(|r| r.xref.as_deref().map(Box::from))
+                .find(|r| r.tag() == "SUBM" && r.xref().is_some())
+                .and_then(|r| r.xref().map(Box::from))
         });
-        self.complete_head(records);
+        // The extension tags of the header before it is completed (as the
+        // pass begins), for relocations.
+        let head_tags = if self.family == Family::V7 {
+            records
+                .first()
+                .filter(|r| r.tag() == "HEAD")
+                .map(|h| extension_tags(h))
+        } else {
+            None
+        };
+        // Completing the header twice changes nothing: after a quiet pass,
+        // it is complete.
+        if !quiet {
+            self.complete_head(records);
+        }
+
+        // Which records need a repair, without changing any.
+        let head_ty = self.record_of("HEAD");
+        let dirty = self.find_dirty(records, head_ty);
+        let any_dirty = !dirty.is_empty();
+        // A relocation (7.x) picks an extension tag no record uses yet.
+        self.used = (self.family == Family::V7 && any_dirty).then(|| {
+            let mut used: HashSet<String> = head_tags.unwrap_or_default();
+            for r in records.iter().skip(1) {
+                used.extend(extension_tags(r));
+            }
+            used
+        });
+
+        self.repair_dirty(records, head_ty, dirty);
+        self.path.clear();
+        if !self.new_records.is_empty() {
+            let at = records.len().saturating_sub(1);
+            records.splice(at..at, self.new_records.drain(..).map(Rec::owned));
+        }
+        if self.family == Family::V7 {
+            self.declare(records);
+        }
+        self.used = None;
+    }
+
+    /// Which records need a repair, found without changing any; their
+    /// pointers are looked up in batches. In record order.
+    fn find_dirty<N: Node<'n>>(
+        &mut self,
+        records: &mut [Rec<'n, N>],
+        head_ty: Option<StructId>,
+    ) -> Vec<usize> {
+        let mut dirty: Vec<usize> = Vec::new();
+        let mut pending = Vec::with_capacity(LOOKUP_BATCH.min(4 * records.len()));
+        let mut failed = Vec::new();
+        for (i, r) in records.iter_mut().enumerate() {
+            let clean = match r.tag() {
+                "TRLR" => true,
+                "HEAD" if i == 0 && r.clean == self.state => true,
+                "HEAD" if i == 0 => {
+                    let clean = match head_ty {
+                        Some(ty) => with_node!(r.get(), |h| self.is_clean(h, ty, true)),
+                        None => true,
+                    };
+                    if clean {
+                        r.clean = self.state;
+                    }
+                    clean
+                }
+                _ if r.clean == self.state => true,
+                _ => {
+                    let mark = pending.len();
+                    let mut walk = Walk {
+                        size: 0,
+                        pending: Some(&mut pending),
+                        record: u32::try_from(i).unwrap_or(u32::MAX),
+                        rtype: DATASET,
+                    };
+                    let xref = r.xref();
+                    let clean = with_node!(r.get(), |n| self.is_clean_record(n, xref, &mut walk));
+                    let (size, rtype) = (walk.size, walk.rtype);
+                    if clean {
+                        r.clean = self.state;
+                        r.rtype = rtype;
+                        r.size = u32::try_from(size).unwrap_or(u32::MAX);
+                    } else {
+                        pending.truncate(mark);
+                    }
+                    if pending.len() >= LOOKUP_BATCH {
+                        self.look_up(&mut pending, &mut failed);
+                    }
+                    clean
+                }
+            };
+            if !clean {
+                dirty.push(i);
+            }
+        }
+        self.look_up(&mut pending, &mut failed);
+        if !failed.is_empty() {
+            for &i in &failed {
+                if let Some(r) = records.get_mut(i as usize) {
+                    r.clean = 0;
+                }
+            }
+            dirty.extend(failed.iter().map(|&i| i as usize));
+            dirty.sort_unstable();
+            dirty.dedup();
+        }
+        dirty
+    }
+
+    /// The repairs, in record order: the dirty records repaired, the others
+    /// counted.
+    fn repair_dirty<N: Node<'n>>(
+        &mut self,
+        records: &mut [Rec<'n, N>],
+        head_ty: Option<StructId>,
+        dirty: Vec<usize>,
+    ) {
         let mut counts: Vec<(u8, u32)> = Vec::new();
-        for r in records.iter_mut() {
-            match r.tag.as_str() {
+        let mut next_dirty = dirty.into_iter().peekable();
+        for (i, r) in records.iter_mut().enumerate() {
+            let is_dirty = next_dirty.next_if_eq(&i).is_some();
+            match r.tag() {
                 "TRLR" => continue,
-                "HEAD" => {
-                    if let Some(head) = self.schema.record("HEAD") {
+                "HEAD" if i == 0 => {
+                    if let (Some(head), true) = (head_ty, is_dirty) {
                         self.path.clear();
-                        let _ = self.fix(r, head, true);
+                        r.clean = 0;
+                        let _ = self.fix(r.make_owned(), head, true);
                     }
                     continue;
                 }
                 _ => {}
             }
             self.path.clear();
-            self.record(r, &mut counts);
+            if is_dirty {
+                (r.clean, r.size) = (0, u32::MAX);
+                self.record(r.make_owned(), &mut counts);
+                continue;
+            }
+            #[cfg(debug_assertions)]
+            self.assert_clean(r);
+            // A clean record of a standard type still counts towards the
+            // records of its type the dataset permits.
+            if r.rtype != DATASET {
+                let t = self.schema.tag_id(r.rtype).unwrap_or(0);
+                let n = bump(&mut counts, t);
+                if self
+                    .picker
+                    .max(DATASET, t)
+                    .is_some_and(|max| n > u32::from(max))
+                {
+                    if let Some((_, n)) = counts.iter_mut().find(|(k, _)| *k == t) {
+                        *n -= 1;
+                    }
+                    (r.clean, r.size) = (0, u32::MAX);
+                    self.record(r.make_owned(), &mut counts);
+                }
+            }
         }
+    }
+
+    /// Checks, in debug builds, that a record found clean is one the repair
+    /// leaves as it is.
+    #[cfg(debug_assertions)]
+    fn assert_clean<N: Node<'n>>(&mut self, r: &Rec<'n, N>) {
+        let original = r.to_structure();
+        let mut copy = original.clone();
+        let before = self.repairs.len();
+        let mut counts = Vec::new();
+        self.record(&mut copy, &mut counts);
         self.path.clear();
-        if !self.new_records.is_empty() {
-            let at = records.len().saturating_sub(1);
-            records.splice(at..at, self.new_records.drain(..));
-        }
-        if self.family == Family::V7 {
-            self.declare(records);
-        }
+        assert!(
+            self.repairs.len() == before && copy == original,
+            "a record found clean is repaired: {:?}",
+            self.repairs.get(before..)
+        );
     }
 
     /// (i) Completes the header as the writer does for the version
@@ -248,17 +699,17 @@ impl Conformer {
     /// none), without an identifier; 7.x drops `CHAR` and `GEDC.FORM`,
     /// which describe the bytes and the form of the input. The writer
     /// rewrites the header of every file it writes, so this is no repair.
-    fn complete_head(&mut self, records: &mut [Structure]) {
-        let Some(head) = records.first_mut().filter(|r| r.tag == "HEAD") else {
+    fn complete_head<N: Node<'n>>(&mut self, records: &mut [Rec<'n, N>]) {
+        let Some(head) = records.first_mut().filter(|r| r.tag() == "HEAD") else {
             return;
         };
+        head.clean = 0;
+        let head = head.make_owned();
         let submitter = needs_submitter(head, self.rules).then(|| {
             if let Some(x) = &self.submitter {
                 return x.to_string();
             }
-            let x = self.fresh("U");
-            self.types
-                .insert(x.as_str().into(), self.schema.record("SUBM"));
+            let x = self.fresh("U", self.record_of("SUBM"));
             self.new_records.push(stub_submitter(x.clone()));
             self.submitter = Some(x.as_str().into());
             x
@@ -266,14 +717,15 @@ impl Conformer {
         complete_head(head, self.rules, "UTF-8", submitter);
     }
 
-    /// The first `@<prefix>n@` no record holds; taken.
-    fn fresh(&mut self, prefix: &str) -> String {
+    /// The first `@<prefix>n@` no record holds; taken, for a record of type
+    /// `ty`.
+    fn fresh(&mut self, prefix: &str, ty: Option<StructId>) -> String {
         let mut n = 0_usize;
         loop {
             n += 1;
             let candidate = format!("@{prefix}{n}@");
-            if !self.taken.contains(candidate.as_str()) {
-                self.taken.insert(candidate.as_str().into());
+            if !self.xrefs.contains_key(candidate.as_str()) {
+                self.xrefs.insert(Cow::Owned(candidate.clone()), ty);
                 return candidate;
             }
         }
@@ -290,7 +742,7 @@ impl Conformer {
                 }
                 let t = self.schema.tag_id(ty).unwrap_or(0);
                 let n = bump(counts, t);
-                if let Some(max) = bounds(self.schema, DATASET, t).1 {
+                if let Some(max) = self.picker.max(DATASET, t) {
                     if n > u32::from(max) {
                         self.repair(
                             r.line,
@@ -323,31 +775,31 @@ impl Conformer {
     }
 
     /// (i) One `HEAD` first, one empty `TRLR` last.
-    fn header_and_trailer(&mut self, records: &mut Vec<Structure>) {
-        match records.iter().position(|r| r.tag == "HEAD") {
+    fn header_and_trailer<N: Node<'n>>(&mut self, records: &mut Vec<Rec<'n, N>>) {
+        match records.iter().position(|r| r.tag() == "HEAD") {
             None => {
-                records.insert(0, Structure::new("HEAD"));
+                records.insert(0, Rec::owned(Structure::new("HEAD")));
                 self.repair(0, RepairKind::Header, "HEAD added".into());
             }
             Some(0) => {}
             Some(at) => {
                 let head = records.remove(at);
-                self.repair(head.line, RepairKind::Header, "HEAD moved first".into());
+                self.repair(head.line(), RepairKind::Header, "HEAD moved first".into());
                 records.insert(0, head);
             }
         }
-        for r in records.iter_mut().skip(1).filter(|r| r.tag == "HEAD") {
-            r.tag = Tag::new("_HEAD");
+        for r in records.iter_mut().skip(1).filter(|r| r.tag() == "HEAD") {
+            r.make_owned().tag = Tag::new("_HEAD");
             self.repair(
-                r.line,
+                r.line(),
                 RepairKind::Header,
                 "a second HEAD written as a _HEAD record".into(),
             );
         }
-        if let Some(head) = records.first_mut() {
-            if let Some(x) = head.xref.take() {
+        if let Some(head) = records.first_mut().filter(|h| h.xref().is_some()) {
+            if let Some(x) = head.make_owned().xref.take() {
                 self.repair(
-                    head.line,
+                    head.line(),
                     RepairKind::Xref,
                     format!("identifier {x} of HEAD left out"),
                 );
@@ -356,14 +808,14 @@ impl Conformer {
         let trailers: Vec<usize> = records
             .iter()
             .enumerate()
-            .filter(|(_, r)| r.tag == "TRLR")
+            .filter(|(_, r)| r.tag() == "TRLR")
             .map(|(i, _)| i)
             .collect();
         let well_formed = trailers.len() == 1
             && trailers.first() == Some(&(records.len() - 1))
-            && records.last().is_some_and(|t| {
-                t.substructures.is_empty() && t.payload == Payload::None && t.xref.is_none()
-            });
+            && records
+                .last()
+                .is_some_and(|t| t.is_empty() && t.xref().is_none());
         if well_formed {
             return;
         }
@@ -372,10 +824,11 @@ impl Conformer {
             let Some(t) = records.get_mut(i) else {
                 continue;
             };
-            line = t.line;
-            if t.substructures.is_empty() && t.payload == Payload::None {
+            line = t.line();
+            if t.is_empty() {
                 records.remove(i);
             } else {
+                let t = t.make_owned();
                 t.tag = Tag::new("_TRLR");
                 t.xref = None;
                 self.repair(
@@ -385,7 +838,7 @@ impl Conformer {
                 );
             }
         }
-        records.push(Structure::new("TRLR"));
+        records.push(Rec::owned(Structure::new("TRLR")));
         self.repair(
             line,
             RepairKind::Header,
@@ -394,27 +847,38 @@ impl Conformer {
     }
 
     /// (h) Valid, unique identifiers on records; invalid ones renamed.
-    fn xrefs(&mut self, records: &mut [Structure]) {
-        self.taken.clear();
+    /// Fills `xrefs` with every identifier and the type of its record.
+    fn xrefs<N: Node<'n>>(&mut self, records: &mut [Rec<'n, N>]) {
+        self.xrefs.clear();
+        self.xrefs.reserve(records.len());
         let mut keep = Vec::with_capacity(records.len());
         for r in records.iter() {
-            let ok = matches!(r.tag.as_str(), "HEAD" | "TRLR")
-                || r.xref.as_deref().is_none_or(|x| {
-                    xref_error(x, self.rules).is_none() && self.taken.insert(x.into())
-                });
+            let tag = r.tag();
+            let ok = match (tag, &r.body) {
+                ("HEAD" | "TRLR", _) => true,
+                (_, Body::Given(_)) => r
+                    .xref
+                    .is_none_or(|x| self.take(Cow::Borrowed(x), tag, r.standard)),
+                (_, Body::Owned(s)) => s.xref.as_deref().is_none_or(|x| {
+                    self.take(Cow::Owned(x.to_string()), tag, s.tag.standard_index())
+                }),
+            };
             keep.push(ok);
         }
         for r in &self.new_records {
             if let Some(x) = r.xref.as_deref() {
-                self.taken.insert(x.into());
+                let ty = self.record_type(r.tag.as_str());
+                self.xrefs.insert(Cow::Owned(x.to_string()), ty);
             }
         }
         for (r, ok) in records.iter_mut().zip(keep) {
             if ok {
                 continue;
             }
+            let r = r.make_owned();
             let Some(old) = r.xref.take() else { continue };
-            let new = self.unique(&new_xref(self.rules, &old));
+            let ty = self.record_type(r.tag.as_str());
+            let new = self.unique(&new_xref(self.rules, &old), ty);
             if xref_error(&old, self.rules).is_some() && !self.renamed.contains_key(old.as_str()) {
                 self.renamed
                     .insert(old.as_str().into(), new.as_str().into());
@@ -428,25 +892,57 @@ impl Conformer {
         }
     }
 
+    /// Takes `xref`, the valid identifier of a record tagged `tag`, unless
+    /// a record holds it already.
+    fn take(&mut self, xref: Cow<'n, str>, tag: &str, standard: Option<u16>) -> bool {
+        if xref_error(&xref, self.rules).is_some() {
+            return false;
+        }
+        let ty = self.record_type_of(tag, standard);
+        self.xrefs.insert_new(xref, ty)
+    }
+
     /// `candidate`, or `candidate` with the first free `_2`, `_3`… suffix;
-    /// taken.
-    fn unique(&mut self, candidate: &str) -> String {
+    /// taken, for a record of type `ty`.
+    fn unique(&mut self, candidate: &str, ty: Option<StructId>) -> String {
         let mut new = candidate.to_string();
         let mut n = 1_usize;
-        while self.taken.contains(new.as_str()) {
+        while self.xrefs.contains_key(new.as_str()) {
             n += 1;
             new = numbered_xref(self.rules, candidate, n);
         }
-        self.taken.insert(new.as_str().into());
+        self.xrefs.insert(Cow::Owned(new.clone()), ty);
         new
     }
 
     /// The type of the record tagged `tag`: a standard one, or one an alias
     /// stands for.
     fn record_type(&self, tag: &str) -> Option<StructId> {
-        self.schema
-            .record(tag)
+        self.record_type_of(tag, crate::tree::node::standard_index(tag))
+    }
+
+    /// [`Conformer::record_type`] of a tag whose standard index is known.
+    fn record_type_of(&self, tag: &str, standard: Option<u16>) -> Option<StructId> {
+        self.record_of_standard(tag, standard)
             .or_else(|| self.aliases.structs.get(tag).copied())
+    }
+
+    /// The type of the record tagged `tag` the version defines
+    /// ([`Schema::record`], from a table).
+    fn record_of(&self, tag: &str) -> Option<StructId> {
+        self.record_of_standard(tag, crate::tree::node::standard_index(tag))
+    }
+
+    fn record_of_standard(&self, tag: &str, standard: Option<u16>) -> Option<StructId> {
+        match standard.and_then(|t| self.picker.spec_tag(t)) {
+            Some(t) => self
+                .tables
+                .records
+                .get(usize::from(t))
+                .copied()
+                .filter(|&ty| ty != DATASET),
+            None => self.schema.record(tag),
+        }
     }
 
     /// The extension tag a structure tagged `tag` is written with when it
@@ -479,7 +975,7 @@ impl Conformer {
             let ours = self.aliases.structs.get(&candidate) == Some(&ty)
                 || self.schma.iter().any(|(t, u)| *t == candidate && *u == uri);
             let free = !self.aliases.structs.contains_key(&candidate)
-                && !self.used.contains(&candidate)
+                && !self.used.as_ref().is_some_and(|u| u.contains(&candidate))
                 && !self.schma.iter().any(|(t, _)| *t == candidate);
             if ours || free {
                 if free {
@@ -560,7 +1056,7 @@ impl Conformer {
         if self.family == Family::V7 && p == "@VOID@" || is_external_pointer(&p, self.family) {
             return Ok(None);
         }
-        match self.types.get(p.as_str()) {
+        match self.xrefs.get(p.as_str()) {
             Some(ty) => Ok(*ty),
             None => Err(()),
         }
@@ -664,15 +1160,21 @@ impl Conformer {
         let schema = self.schema;
         let is_ptr = matches!(c.payload, Payload::Pointer(_));
         let tag = c.tag.as_str().to_string();
-        match pick(self.rules, ty, &tag, is_ptr) {
+        match self.picker.pick(ty, &*c, is_ptr) {
             Pick::Type(cty) => {
-                match self.fix(c, cty, false) {
+                // A substructure that needs nothing is left as it is.
+                let fate = if self.is_clean(&*c, cty, false) {
+                    Fate::Keep
+                } else {
+                    self.fix(c, cty, false)
+                };
+                match fate {
                     Fate::Remove => return false,
                     Fate::Extension => self.make_extension(c),
                     Fate::Keep => {
                         let t = schema.tag_id(cty).unwrap_or(0);
                         let n = bump(counts, t);
-                        if let Some(max) = bounds(schema, ty, t).1.filter(|&m| n > u32::from(m)) {
+                        if let Some(max) = self.picker.max(ty, t).filter(|&m| n > u32::from(m)) {
                             let here = self.here(&tag);
                             let (new, declared) = self.relocate(c, Some(cty));
                             self.repair(
@@ -687,11 +1189,13 @@ impl Conformer {
             // A documented alias of a standard structure is that structure,
             // wherever it is (7.x §1.5.1: relocated).
             Pick::Extension => match self.aliases.structs.get(&tag).copied() {
+                Some(aty) if self.is_clean(&*c, aty, false) => {}
                 Some(aty) => match self.fix(c, aty, false) {
                     Fate::Keep => {}
                     Fate::Remove => return false,
                     Fate::Extension => self.make_extension(c),
                 },
+                None if self.is_clean_extension(&*c) => {}
                 None => self.extension(c),
             },
             other => {
@@ -746,13 +1250,15 @@ impl Conformer {
     }
 
     /// Adds the `HEAD.SCHMA.TAG` declarations of relocated structures.
-    fn declare(&mut self, records: &mut [Structure]) {
+    fn declare<N: Node<'n>>(&mut self, records: &mut [Rec<'n, N>]) {
         if self.schma.is_empty() {
             return;
         }
-        let Some(head) = records.first_mut().filter(|h| h.tag == "HEAD") else {
+        let Some(head) = records.first_mut().filter(|h| h.tag() == "HEAD") else {
             return;
         };
+        head.clean = 0;
+        let head = head.make_owned();
         let at = head
             .substructures
             .iter()
@@ -1083,23 +1589,19 @@ impl Conformer {
     /// (g) Required substructures.
     fn required(&mut self, s: &mut Structure, ty: StructId, counts: &[(u8, u32)]) -> Fate {
         let schema = self.schema;
-        let mut seen: Vec<u8> = Vec::new();
-        for sub in schema.subs(ty) {
-            let Some(t) = schema.tag_id(sub.id) else {
-                continue;
-            };
-            if seen.contains(&t) {
-                continue;
-            }
-            seen.push(t);
-            let (min, _) = bounds(schema, ty, t);
+        let required = self
+            .tables
+            .required
+            .get(usize::from(ty))
+            .map_or(&[][..], |r| r);
+        for &(t, min, sub) in required {
             let found = counts.iter().find(|(k, _)| *k == t).map_or(0, |(_, n)| *n);
             if found >= u32::from(min) {
                 continue;
             }
-            let tag = schema.tag(sub.id);
+            let tag = schema.tag(sub);
             let here = self.here(s.tag.as_str());
-            let Some(made) = self.synthesise(s, sub.id) else {
+            let Some(made) = self.synthesise(s, sub) else {
                 let new = self.plain_tag(s.tag.as_str());
                 self.repair(
                     s.line,
@@ -1184,16 +1686,21 @@ impl Conformer {
     /// (j) Moves inline notes out of 5.5.1 records over 32K, longest first,
     /// until the record fits; a record that moving every note would not
     /// bring under the limit is left as it is.
-    fn record_sizes(&mut self, records: &mut Vec<Structure>) {
+    fn record_sizes<N: Node<'n>>(&mut self, records: &mut Vec<Rec<'n, N>>) {
         let mut added = Vec::new();
-        for r in records.iter_mut() {
-            let Some(ty) = self.schema.record(r.tag.as_str()) else {
+        for rec in records.iter_mut() {
+            let Some(ty) = self.record_of_standard(rec.tag(), rec.standard_tag()) else {
                 continue;
             };
-            let mut size = encoded_len(&*r, 0, self.family);
+            // The bound the last look found, when there is one.
+            if rec.size as usize <= MAX_RECORD_BYTES {
+                continue;
+            }
+            let mut size = with_node!(rec.get(), |n| encoded_len(n, 0, self.family));
             if size <= MAX_RECORD_BYTES {
                 continue;
             }
+            let r = rec.make_owned();
             let mut notes = Vec::new();
             movable_notes(self.rules, r, ty, &mut Vec::new(), &mut notes);
             // The bytes each move saves: the note's lines, less the pointer
@@ -1210,7 +1717,7 @@ impl Conformer {
                     break;
                 }
                 size = size.saturating_sub(saved(note));
-                let xref = self.unique("@N1@");
+                let xref = self.unique("@N1@", self.record_of("NOTE"));
                 let Some(at) = node_at(r, &note.1) else {
                     continue;
                 };
@@ -1224,8 +1731,6 @@ impl Conformer {
                     substructures: std::mem::take(&mut at.substructures),
                     ..Structure::new("NOTE")
                 };
-                self.types
-                    .insert(xref.as_str().into(), self.schema.record("NOTE"));
                 self.repair(
                     line,
                     RepairKind::RecordSize,
@@ -1233,12 +1738,30 @@ impl Conformer {
                 );
                 added.push(moved);
             }
+            (rec.clean, rec.size) = (0, u32::MAX);
         }
         if !added.is_empty() {
             let at = records.len().saturating_sub(1);
-            records.splice(at..at, added);
+            records.splice(at..at, added.into_iter().map(Rec::owned));
         }
     }
+}
+
+/// The extension tags of a record and its substructures.
+fn extension_tags<'n, N: Node<'n>>(r: &Rec<'n, N>) -> HashSet<String> {
+    fn walk<'a, M: Node<'a>>(n: M, out: &mut HashSet<String>) {
+        let mut stack = vec![n];
+        while let Some(n) = stack.pop() {
+            let tag = n.tag();
+            if tag.starts_with('_') && !out.contains(tag) {
+                out.insert(tag.to_string());
+            }
+            stack.extend(n.children());
+        }
+    }
+    let mut out = HashSet::new();
+    with_node!(r.get(), |n| walk(n, &mut out));
+    out
 }
 
 /// The spelling of `value` in `set`: 5.5.1 matches without regard to case

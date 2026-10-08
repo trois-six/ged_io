@@ -192,6 +192,7 @@ pub(crate) fn tag_index(tag: &str) -> Option<u8> {
 }
 
 impl Schema {
+    #[inline]
     fn def(&self, id: StructId) -> Option<&StructDef> {
         self.structs.get(usize::from(id))
     }
@@ -217,12 +218,14 @@ impl Schema {
     }
 
     /// The index of the tag of a structure type in `TAGS`.
+    #[inline]
     pub(crate) fn tag_id(&self, id: StructId) -> Option<u8> {
         self.def(id).filter(|_| id != DATASET).map(|d| d.tag)
     }
 
     /// The payload type of a structure type and its argument: the record
     /// type of a pointer, the enumeration set of an enumeration.
+    #[inline]
     pub(crate) fn kind(&self, id: StructId) -> (Kind, u16) {
         self.def(id).map_or((Kind::None, 0), |d| (d.kind, d.arg))
     }
@@ -239,6 +242,7 @@ impl Schema {
     }
 
     /// The permitted substructures of a structure type.
+    #[inline]
     pub(crate) fn subs(&self, id: StructId) -> &'static [SubDef] {
         self.def(id).map_or(&[], |d| {
             let start = usize::from(d.subs);
@@ -262,6 +266,7 @@ impl Schema {
     }
 
     /// The enumeration set `index`.
+    #[inline]
     pub(crate) fn enum_set(&self, index: u16) -> Option<&'static EnumSet> {
         self.enums.get(usize::from(index))
     }

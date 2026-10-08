@@ -164,6 +164,14 @@ impl Tag {
         Self(Repr::Standard(index))
     }
 
+    /// The index of a standard tag in the table of standard tags.
+    pub(crate) fn standard_index(&self) -> Option<u16> {
+        match self.0 {
+            Repr::Standard(i) => Some(i),
+            Repr::Other(_) => None,
+        }
+    }
+
     /// The tag's text.
     #[must_use]
     pub fn as_str(&self) -> &str {

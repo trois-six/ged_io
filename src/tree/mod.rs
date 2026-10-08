@@ -61,7 +61,7 @@
 
 mod arena;
 mod lexer;
-mod node;
+pub(crate) mod node;
 mod reader;
 mod tag;
 mod write;
@@ -233,10 +233,11 @@ impl Tree {
     pub fn to_gedcom(&self) -> String {
         let mut out = String::with_capacity(self.segments.iter().map(|s| s.text.len()).sum());
         for segment in &self.segments {
-            for index in 0..segment.nodes.len() {
+            for (index, node) in segment.nodes.iter().enumerate() {
                 let node = StructureRef {
                     tree: self,
                     segment,
+                    node,
                     index: u32::try_from(index).unwrap_or(u32::MAX),
                 };
                 write::line(
@@ -311,6 +312,7 @@ pub struct Records<'t> {
 impl<'t> Iterator for Records<'t> {
     type Item = StructureRef<'t>;
 
+    #[inline]
     fn next(&mut self) -> Option<StructureRef<'t>> {
         loop {
             let segment = self.tree.segments.get(self.segment)?;
@@ -320,6 +322,7 @@ impl<'t> Iterator for Records<'t> {
                 return Some(StructureRef {
                     tree: self.tree,
                     segment,
+                    node,
                     index,
                 });
             }
@@ -334,6 +337,8 @@ impl<'t> Iterator for Records<'t> {
 pub struct StructureRef<'t> {
     tree: &'t Tree,
     segment: &'t Segment,
+    /// The node at `index`, found once.
+    node: &'t RawNode,
     index: u32,
 }
 
@@ -352,6 +357,7 @@ pub enum PayloadRef<'t> {
 impl<'t> PayloadRef<'t> {
     /// The pointer or the text; `None` when there is no payload.
     #[must_use]
+    #[inline]
     pub fn as_str(self) -> Option<&'t str> {
         match self {
             PayloadRef::None => None,
@@ -371,6 +377,7 @@ impl<'t> PayloadRef<'t> {
 }
 
 impl<'t> StructureRef<'t> {
+    #[inline]
     fn view(self) -> arena::View<'t> {
         arena::View {
             text: &self.segment.text,
@@ -381,17 +388,21 @@ impl<'t> StructureRef<'t> {
         }
     }
 
-    fn node(self) -> &'t RawNode {
-        // The index comes from the arena itself, so it is in range.
-        &self.segment.nodes[self.index as usize]
+    /// The tag's index: in the standard tags, or past them in the tree's
+    /// other tags.
+    #[inline]
+    pub(crate) fn raw_tag(self) -> u32 {
+        self.node().tag
     }
 
-    fn at(self, index: u32) -> Self {
-        Self { index, ..self }
+    #[inline]
+    fn node(self) -> &'t RawNode {
+        self.node
     }
 
     /// The tag; empty for a line that had no level number.
     #[must_use]
+    #[inline]
     pub fn tag(self) -> &'t str {
         self.view().tag(self.node())
     }
@@ -404,12 +415,17 @@ impl<'t> StructureRef<'t> {
 
     /// The cross-reference identifier, delimiters included.
     #[must_use]
+    #[inline]
     pub fn xref(self) -> Option<&'t str> {
+        if !self.node.has_xref {
+            return None;
+        }
         self.view().xref(self.index as usize)
     }
 
     /// The payload.
     #[must_use]
+    #[inline]
     pub fn payload(self) -> PayloadRef<'t> {
         self.view().payload(self.node())
     }
@@ -440,12 +456,14 @@ impl<'t> StructureRef<'t> {
 
     /// The 1-based line the structure starts on in the source text.
     #[must_use]
+    #[inline]
     pub fn line(self) -> u32 {
         self.node().line
     }
 
     /// The substructures, in order.
     #[must_use]
+    #[inline]
     pub fn substructures(self) -> Substructures<'t> {
         Substructures {
             parent: self,
@@ -490,12 +508,18 @@ pub struct Substructures<'t> {
 impl<'t> Iterator for Substructures<'t> {
     type Item = StructureRef<'t>;
 
+    #[inline]
     fn next(&mut self) -> Option<StructureRef<'t>> {
         if self.next >= self.end {
             return None;
         }
-        let child = self.parent.at(self.next);
-        self.next = child.node().end.max(self.next + 1);
+        let node = self.parent.segment.nodes.get(self.next as usize)?;
+        let child = StructureRef {
+            node,
+            index: self.next,
+            ..self.parent
+        };
+        self.next = node.end.max(self.next + 1);
         Some(child)
     }
 }

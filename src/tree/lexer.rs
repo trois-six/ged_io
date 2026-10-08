@@ -53,6 +53,7 @@ impl Span {
         }
     }
 
+    #[inline]
     pub(crate) fn get(self, buffer: &str) -> &str {
         let start = self.start as usize;
         buffer
