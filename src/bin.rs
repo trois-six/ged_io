@@ -1,5 +1,4 @@
 use ged_io::Gedcom;
-use ged_io::GedcomBuilder;
 use ged_io::GedcomError;
 use std::env;
 use std::fmt;
@@ -64,8 +63,11 @@ OPTIONS:\n\
   --individual <XREF>               Display a single individual (e.g. @I1@)\n\
   --individual-lastname <LASTNAME>  Filter individuals by last name (case-insensitive)\n\
   --individual-firstname <FIRSTNAME> Filter individuals by first name (case-insensitive)\n\
-  --validate                        Validate GEDCOM compliance and output a report\n\
-  --validation-level <LEVEL>        Validation level: strict or lenient (default: lenient)\n\
+  --validate                        Check the file against the GEDCOM specification of the\n\
+                                    version it declares (5.5.1, 7.0 or 7.1) and list every\n\
+                                    deviation with its line\n\
+  --validation-level <LEVEL>        strict: deviations are errors (exit code 2);\n\
+                                    lenient (default): they are warnings (exit code 0)\n\
 \n\
 NOTES:\n\
   If both --individual-lastname and --individual-firstname are set,\n\
@@ -226,8 +228,6 @@ fn run() -> Result<RunOutcome, CliError> {
         .as_deref()
         .ok_or_else(|| CliError::Usage("Missing filename.".to_string()))?;
 
-    let contents = read_relative(filename)?;
-
     if !args.validate && args.validation_level.is_some() {
         return Err(CliError::Usage(
             "--validation-level requires --validate".to_string(),
@@ -244,33 +244,27 @@ fn run() -> Result<RunOutcome, CliError> {
             ));
         }
 
+        // Every deviation from the specification of the version the file
+        // declares, with its line. Lenient reading accepts all of them, so
+        // they are warnings; in strict mode they are errors.
+        let bytes = fs::read(fs::canonicalize(PathBuf::from(filename))?)?;
+        let deviations: Vec<String> = ged_io::spec::validate_bytes(&bytes)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
         let validation_level = args.validation_level.unwrap_or(ValidationLevel::Lenient);
-        let builder = match validation_level {
-            ValidationLevel::Strict => GedcomBuilder::new()
-                .strict_mode(true)
-                .validate_references(true)
-                .ignore_unknown_tags(false)
-                .date_validation(true),
-            ValidationLevel::Lenient => GedcomBuilder::new()
-                .strict_mode(false)
-                .validate_references(true)
-                .ignore_unknown_tags(true)
-                .date_validation(false),
+        let (errors, warnings) = match validation_level {
+            ValidationLevel::Strict => (deviations, Vec::new()),
+            ValidationLevel::Lenient => (Vec::new(), deviations),
         };
-
-        let mut errors = Vec::new();
-        let warnings: Vec<String> = Vec::new();
-
-        if let Err(err) = builder.build_from_str(&contents) {
-            errors.push(err.to_string());
-        }
-
         print_validation_report(validation_level, &errors, &warnings);
         if errors.is_empty() {
             return Ok(RunOutcome::Success);
         }
         return Ok(RunOutcome::ValidationFailed);
     }
+
+    let contents = read_relative(filename)?;
 
     let mut doc = Gedcom::new(contents.chars())?;
     let data = doc.parse_data()?;
