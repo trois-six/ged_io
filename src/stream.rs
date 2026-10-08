@@ -31,10 +31,13 @@
 //! `GedcomStreamParser` only buffers one record at a time. For files with many small
 //! records, memory usage stays constant regardless of file size.
 //!
-//! # UTF-8 Requirement
+//! # Encodings and line terminators
 //!
-//! The streaming parser requires UTF-8 encoded input. For files with other encodings,
-//! either convert them to UTF-8 first, or use the in-memory parser with encoding detection.
+//! The input may use any encoding and any line terminator the in-memory
+//! reader accepts: it is decoded on the fly by [`DecodeReader`], with the
+//! same rules (see [`crate::encoding`]).
+//!
+//! [`DecodeReader`]: crate::encoding::DecodeReader
 
 use std::io::BufRead;
 
@@ -42,7 +45,9 @@ use std::io::BufRead;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    encoding::DecodeReader,
     tokenizer::Tokenizer,
+    tree::{lex_line, normalize_eol, Line, RecordSplitter},
     types::{
         custom::UserDefinedTag, family::Family, header::Header, individual::Individual,
         multimedia::Multimedia, repository::Repository, shared_note::SharedNote, source::Source,
@@ -284,14 +289,12 @@ impl GedcomRecord {
 ///     .unwrap();
 /// ```
 pub struct GedcomStreamParser<R: BufRead> {
-    reader: R,
-    /// Buffer for the current record's text
-    record_buffer: String,
-    /// Buffer for reading lines
-    line_buffer: String,
-    /// The next line we've peeked (starts with level 0)
-    peeked_line: Option<String>,
-    /// Current line number for error reporting
+    splitter: RecordSplitter<DecodeReader<R>>,
+    /// The current record's lines.
+    record: String,
+    /// The text handed to the token-based parser: the record and a `TRLR`.
+    document: String,
+    /// The line the current record starts on, for error reporting.
     line_number: u32,
     /// Whether we've finished parsing
     finished: bool,
@@ -300,13 +303,12 @@ pub struct GedcomStreamParser<R: BufRead> {
 impl<R: BufRead> GedcomStreamParser<R> {
     /// Creates a new streaming parser from a buffered reader.
     ///
-    /// The reader must provide UTF-8 encoded data.
+    /// The input may use any encoding: the first 64 KiB are read to choose
+    /// the decoding.
     ///
     /// # Errors
     ///
-    /// Returns a `GedcomError` if:
-    /// - The input has a UTF-16 BOM (streaming requires UTF-8)
-    /// - An I/O error occurs while reading
+    /// Returns a `GedcomError` if an I/O error occurs while reading.
     ///
     /// # Example
     ///
@@ -319,127 +321,56 @@ impl<R: BufRead> GedcomStreamParser<R> {
     /// let reader = BufReader::new(file);
     /// let parser = GedcomStreamParser::new(reader).unwrap();
     /// ```
-    pub fn new(mut reader: R) -> Result<Self, GedcomError> {
-        // Read first line to check for BOM
-        let mut first_line = String::new();
-        match reader.read_line(&mut first_line) {
-            Ok(0) => {
-                // Empty file
-                return Ok(Self {
-                    reader,
-                    record_buffer: String::with_capacity(4096),
-                    line_buffer: String::with_capacity(256),
-                    peeked_line: None,
-                    line_number: 0,
-                    finished: true,
-                });
-            }
-            Ok(_) => {}
-            Err(e) => {
-                // If read_line fails with invalid UTF-8, it's likely a non-UTF-8 encoding
-                // (e.g., UTF-16). Provide a helpful error message.
-                if e.kind() == std::io::ErrorKind::InvalidData {
-                    return Err(GedcomError::EncodingError(
-                        "Streaming parser requires UTF-8 input; file appears to use a different encoding (possibly UTF-16)".to_string(),
-                    ));
-                }
-                return Err(GedcomError::IoError(e.to_string()));
-            }
-        }
-
-        // Check for UTF-8 BOM that might look like UTF-16 BOM after decoding (shouldn't happen, but be safe)
-        let bytes = first_line.as_bytes();
-        if bytes.len() >= 2
-            && ((bytes[0] == 0xFF && bytes[1] == 0xFE) || (bytes[0] == 0xFE && bytes[1] == 0xFF))
-        {
-            return Err(GedcomError::EncodingError(
-                "Streaming parser requires UTF-8 input; UTF-16 BOM detected".to_string(),
-            ));
-        }
-
-        // Skip UTF-8 BOM if present
-        let first_line = if first_line.starts_with('\u{FEFF}') {
-            first_line['\u{FEFF}'.len_utf8()..].to_string()
-        } else {
-            first_line
-        };
-
+    pub fn new(reader: R) -> Result<Self, GedcomError> {
+        let decoder = DecodeReader::new(reader).map_err(|e| GedcomError::IoError(e.to_string()))?;
         Ok(Self {
-            reader,
-            record_buffer: String::with_capacity(4096),
-            line_buffer: String::with_capacity(256),
-            peeked_line: Some(first_line),
-            line_number: 1,
+            splitter: RecordSplitter::new(decoder),
+            record: String::with_capacity(4096),
+            document: String::with_capacity(4096),
+            line_number: 0,
             finished: false,
         })
     }
 
-    /// Reads the next complete record from the stream.
-    ///
-    /// Returns the record text and whether we hit TRLR or EOF.
-    fn read_next_record(&mut self) -> Result<Option<String>, GedcomError> {
-        self.record_buffer.clear();
+    /// The encoding the input is decoded with.
+    #[must_use]
+    pub fn encoding(&self) -> crate::GedcomEncoding {
+        self.splitter.get_ref().encoding()
+    }
 
-        // Start with peeked line or read a new one
-        let first_line = if let Some(line) = self.peeked_line.take() {
-            line
-        } else {
-            self.line_buffer.clear();
-            match self.reader.read_line(&mut self.line_buffer) {
-                Ok(0) => return Ok(None),
-                Ok(_) => {
-                    self.line_number += 1;
-                    std::mem::take(&mut self.line_buffer)
-                }
-                Err(e) => return Err(GedcomError::IoError(e.to_string())),
-            }
+    /// Reads the next record's lines; `None` at `TRLR` or at the end of the input.
+    fn read_next_record(&mut self) -> Result<Option<()>, GedcomError> {
+        let Some(line) = self
+            .splitter
+            .next_record(&mut self.record)
+            .map_err(|e| GedcomError::IoError(e.to_string()))?
+        else {
+            return Ok(None);
         };
-
-        // Check if this is TRLR
-        let trimmed = first_line.trim();
-        if trimmed == "0 TRLR" || trimmed.starts_with("0 TRLR ") {
-            return Ok(None); // End of file
-        }
-
-        // Start accumulating the record
-        self.record_buffer.push_str(&first_line);
-
-        // Read until we hit another level 0 line or EOF
-        loop {
-            self.line_buffer.clear();
-            match self.reader.read_line(&mut self.line_buffer) {
-                Ok(0) => break, // EOF
-                Ok(_) => {
-                    self.line_number += 1;
-
-                    // Check if this line starts a new level 0 record
-                    let trimmed = self.line_buffer.trim_start();
-                    if trimmed.starts_with('0') && trimmed.len() > 1 {
-                        let second_char = trimmed.chars().nth(1).unwrap_or('x');
-                        if second_char.is_whitespace() {
-                            // This is a new level 0 record - save it for next iteration
-                            self.peeked_line = Some(std::mem::take(&mut self.line_buffer));
-                            break;
-                        }
-                    }
-
-                    // Add to current record
-                    self.record_buffer.push_str(&self.line_buffer);
-                }
-                Err(e) => return Err(GedcomError::IoError(e.to_string())),
+        self.line_number = line;
+        let first = self.record.lines().next().unwrap_or_default();
+        if let Line::Structure {
+            level: 0,
+            tag: (s, e),
+            ..
+        } = lex_line(first)
+        {
+            if first.get(s..e) == Some("TRLR") {
+                return Ok(None);
             }
         }
-
-        Ok(Some(std::mem::take(&mut self.record_buffer)))
+        Ok(Some(()))
     }
 
     /// Parses a record text into a `GedcomRecord`.
-    fn parse_record_text(&self, text: &str) -> Result<GedcomRecord, GedcomError> {
+    fn parse_record_text(&mut self) -> Result<GedcomRecord, GedcomError> {
         use crate::tokenizer::Token;
 
-        let doc_text = format!("{text}0 TRLR\n");
+        self.document.clear();
+        self.document.push_str(&normalize_eol(&self.record));
+        self.document.push_str("0 TRLR\n");
 
-        let mut tokenizer = Tokenizer::new(doc_text.chars());
+        let mut tokenizer = Tokenizer::new(self.document.chars());
         tokenizer.next_token()?;
 
         let Token::Level(level) = tokenizer.current_token else {
@@ -530,7 +461,7 @@ impl<R: BufRead> Iterator for GedcomStreamParser<R> {
         }
 
         match self.read_next_record() {
-            Ok(Some(text)) => match self.parse_record_text(&text) {
+            Ok(Some(())) => match self.parse_record_text() {
                 Ok(record) => Some(Ok(record)),
                 Err(e) => {
                     self.finished = true;
@@ -642,23 +573,31 @@ mod tests {
     }
 
     #[test]
-    fn test_stream_parser_utf16_rejected() {
-        // UTF-16 LE BOM - read_line will fail with invalid UTF-8 error
-        // which we convert to an EncodingError
-        let bytes: &[u8] = &[0xFF, 0xFE, b'0', 0, b' ', 0];
-        let reader = BufReader::new(bytes);
-        let result = GedcomStreamParser::new(reader);
+    fn test_stream_parser_reads_utf16() {
+        let text = "0 HEAD\r\n1 CHAR UNICODE\r\n0 @I1@ INDI\r\n1 NAME Zoë /Example/\r\n0 TRLR\r\n";
+        let mut bytes = vec![0xFF, 0xFE];
+        bytes.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+        let parser = GedcomStreamParser::new(BufReader::new(bytes.as_slice())).unwrap();
+        assert_eq!(parser.encoding(), crate::GedcomEncoding::Utf16Le);
+        let data: GedcomData = parser.collect::<Result<_, _>>().unwrap();
+        assert_eq!(
+            data.individuals[0].names[0].value.as_deref(),
+            Some("Zoë /Example/")
+        );
+    }
 
-        assert!(result.is_err());
-        if let Err(GedcomError::EncodingError(msg)) = result {
-            // Message should indicate non-UTF-8 encoding (possibly UTF-16)
-            assert!(
-                msg.contains("UTF-8") || msg.contains("UTF-16"),
-                "Expected encoding error message, got: {msg}"
-            );
-        } else {
-            panic!("Expected EncodingError");
-        }
+    #[test]
+    fn test_stream_parser_reads_cr_terminators_and_ansel() {
+        let bytes: &[u8] =
+            b"0 HEAD\r1 CHAR ANSEL\r\r0 @I1@ INDI\r1 NAME Ren\xE2ee /Example/\r0 TRLR\r";
+        let data: GedcomData = GedcomStreamParser::new(BufReader::new(bytes))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            data.individuals[0].names[0].value.as_deref(),
+            Some("Renée /Example/")
+        );
     }
 
     #[test]

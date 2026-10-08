@@ -109,7 +109,6 @@ case/G7-AGE-OVERFLOW	roundtrip	TS14	DIFF	-	- INDI#0/CHR/AGE = "1y 30m 100w 400d"
 case/G7-AT-ONLY-FIRST	keep	TS20	LOST	-	missing line `0 @N1@ SNOTE @@@@@ has four`
 case/G7-AT-ONLY-FIRST	roundtrip	TS20	DIFF	-	- SNOTE#0 = "@@@@ has four"; + SNOTE#0 = "@@@ has four"
 case/G7-BANNED-C0	output:banned-char	TS22	NONCONFORMANT	-	line 6: banned-char: U+0007
-case/G7-BLANK-LINE	parse	TS5	FATAL	-	Parse error at line 4: Expected digit for level number
 case/G7-CONT-AFTER-SUB	roundtrip	TS16	LOST	-	tag LANG (x1); text b (x1); text en (x1)
 case/G7-CONT-ORPHAN	output:cont-position	TS16	NONCONFORMANT	-	line 7: cont-position: after another substructure
 case/G7-CONT-ORPHAN	output:payload-enum	TS16	NONCONFORMANT	-	line 6: payload-enum: SEX "F\norphan text": not in enumset-SEX
@@ -129,7 +128,6 @@ case/G7-ENUM-EXT	parse	TS3	FATAL	-	Parse error at line 5: Unknown gender value _
 case/G7-ENUM-UPPER	keep	TS19	LOST	-	missing line `2 PEDI ADOPTED`; missing line `2 STAT CHALLENGED`
 case/G7-ENUM-UPPER	output:payload-enum	TS34	NONCONFORMANT	-	line 7: payload-enum: PEDI "adopted": not in enumset-PEDI
 case/G7-ENUM-UPPER	roundtrip	TS19	DIFF	-	- INDI@I1@/FAMC/PEDI = "ADOPTED"; - INDI@I1@/FAMC/STAT = "CHALLENGED"; + INDI@I1@/FAMC/PEDI = "adopted"; + INDI@I1@/FAMC/STAT = "challenged"
-case/G7-EOL-CR	parse	TS1	FATAL	-	Parse error at line 1: Tokenization error! LineValue("1 GEDC")
 case/G7-EXID-TYPE	keep	TS13	LOST	-	missing line `2 TYPE http://example.com`
 case/G7-EXID-TYPE	roundtrip	TS13	DIFF	-	- INDI#0/EXID/TYPE = "http://example.com"
 case/G7-EXT-UNDER-STD	keep	TS13	LOST	-	missing line `3 _EXT kept`
@@ -255,26 +253,26 @@ encoding/*	output:eol-final	TS32	NONCONFORMANT	-	every output of the family
 encoding/*	output:head-required	TS33	NONCONFORMANT	-	every output of the family
 encoding/*	output:v7-gedc-form	TS17	NONCONFORMANT	-	every output of the family
 encoding/ansel-conc-diacritic	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ANSEL for UTF-8 output
-encoding/ansel-cr	parse	TS1	FATAL	-	Parse error at line 1: Tokenization error! LineValue("1 SOUR EXAMPLE_APP")
+encoding/ansel-cr	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ANSEL for UTF-8 output
+encoding/ansel-cr	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Exemple"
 encoding/ansel-lf	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ANSEL for UTF-8 output
 encoding/ansel-lf	roundtrip	TS30	DIFF	-	- INDI#0/NAME = "André /Exemple/"; + INDI#0/NAME = "Andre\u{301} /Exemple/"; + INDI#0/NAME/SURN = "Exemple"
 encoding/ansi-cp1252	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ANSI for UTF-8 output
 encoding/ascii-declared-latin1-bytes	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ASCII for UTF-8 output
 encoding/cp1252-lower-case-label	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: cp1252 for UTF-8 output
 encoding/eol-lfcr	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Exemple"
-encoding/eol-mixed-cr-lf	keep	TS11	LOST	-	model lacks `Ann /Example/`
-encoding/eol-mixed-cr-lf	roundtrip	TS11	LOST	-	tag NAME (x1); text Ann /Example/ (x1)
 encoding/ibmpc-cp437	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: IBMPC for UTF-8 output
 encoding/latin1-declared	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ISO-8859-1 for UTF-8 output
 encoding/latin9-euro	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ISO-8859-15 for UTF-8 output
 encoding/macintosh	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: MACINTOSH for UTF-8 output
 encoding/utf16be-crlf	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
 encoding/utf16be-crlf	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Exemple"
-encoding/utf16le-cr	parse	TS1	FATAL	-	Parse error at line 1: Tokenization error! LineValue("1 SOUR EXAMPLE_APP")
+encoding/utf16le-cr	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
+encoding/utf16le-cr	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Exemple"
 encoding/utf16le-nobom	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
 encoding/utf16le-nobom	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Exemple"
 encoding/utf8-bom-v7-crlf	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Exemple"
-encoding/utf8-cr	parse	TS1	FATAL	-	Parse error at line 1: Tokenization error! LineValue("1 SOUR EXAMPLE_APP")
+encoding/utf8-cr	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Exemple"
 encoding/utf8-mislabel-unicode	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
 encoding/windows-1252-euro	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: WINDOWS-1252 for UTF-8 output
 enum551/*	output:eol-final	TS32	NONCONFORMANT	-	every output of the family
@@ -458,7 +456,6 @@ feature/*	output:head-required	TS33	NONCONFORMANT	-	every output of the family
 feature/*	output:v7-char	TS17	NONCONFORMANT	-	every output of the family
 feature/*	output:v7-gedc-form	TS17	NONCONFORMANT	-	every output of the family
 feature/read/extensions70	parse	TS3	FATAL	-	Parse error at line 21: Unrecognized FamilyLink.pedigree code: _ENUMVAL
-feature/streaming/test-files-5-char_utf16le-2	parse	TS9	FATAL	-	Encoding error: Streaming parser requires UTF-8 input; file appears to use a different encoding (possibly UTF-16)
 feature/write-551/test-files-5-char_utf16le-2	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
 feature/write-551/test-files-7-date-all	output:payload-date	TS25	NONCONFORMANT	-	line 1007: payload-date: DATE "BET 1950 AND 302 BCE": not in the date grammar
 feature/write-551/test-files-7-date-all	output:record-size	TS27	NONCONFORMANT	-	line 4876: record-size: 128973 bytes
@@ -476,26 +473,28 @@ fixture/*	output:eol-final	TS32	NONCONFORMANT	-	every output of the family
 fixture/extensions70	parse	TS3	FATAL	-	Parse error at line 21: Unrecognized FamilyLink.pedigree code: _ENUMVAL
 fixture/maximal551	roundtrip	TS13	DIFF	-	- FAM#21/OBJE/FILE = "Value FILE A"; - FAM#21/OBJE/FILE[1] = "Value FILE A"; - FAM#21/OBJE/FILE[1]/FORM = "bmp"; - FAM#21/OBJE/FILE[2] = "Value FILE B"; - FA...
 matrix/*	output:eol-final	TS32	NONCONFORMANT	-	every output of the family
-matrix/ansel-cr	parse	TS1	FATAL	-	Parse error at line 1: Tokenization error! LineValue("1 SOUR EXAMPLE_APP")
+matrix/ansel-cr	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ANSEL for UTF-8 output
 matrix/ansel-crlf	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ANSEL for UTF-8 output
 matrix/ansel-lf	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ANSEL for UTF-8 output
-matrix/latin1-cr	parse	TS1	FATAL	-	Parse error at line 1: Tokenization error! LineValue("1 SOUR EXAMPLE_APP")
+matrix/latin1-cr	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ISO-8859-1 for UTF-8 output
 matrix/latin1-crlf	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ISO-8859-1 for UTF-8 output
 matrix/latin1-lf	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: ISO-8859-1 for UTF-8 output
-matrix/utf16be-cr	parse	TS1	FATAL	-	Parse error at line 1: Tokenization error! LineValue("1 SOUR EXAMPLE_APP")
+matrix/utf16be-cr	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
+matrix/utf16be-cr	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Пример"
 matrix/utf16be-crlf	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
 matrix/utf16be-crlf	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Пример"
 matrix/utf16be-lf	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
 matrix/utf16be-lf	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Пример"
-matrix/utf16le-cr	parse	TS1	FATAL	-	Parse error at line 1: Tokenization error! LineValue("1 SOUR EXAMPLE_APP")
+matrix/utf16le-cr	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
+matrix/utf16le-cr	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Пример"
 matrix/utf16le-crlf	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
 matrix/utf16le-crlf	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Пример"
 matrix/utf16le-lf	output:char-mismatch	TS18	NONCONFORMANT	-	line 5: char-mismatch: UNICODE for UTF-8 output
 matrix/utf16le-lf	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Пример"
-matrix/utf8-bom-cr	parse	TS1	FATAL	-	Parse error at line 1: Tokenization error! LineValue("1 SOUR EXAMPLE_APP")
+matrix/utf8-bom-cr	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Пример"
 matrix/utf8-bom-crlf	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Пример"
 matrix/utf8-bom-lf	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Пример"
-matrix/utf8-cr	parse	TS1	FATAL	-	Parse error at line 1: Tokenization error! LineValue("1 SOUR EXAMPLE_APP")
+matrix/utf8-cr	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Пример"
 matrix/utf8-crlf	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Пример"
 matrix/utf8-lf	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Пример"
 payload/*	output:eol-final	TS32	NONCONFORMANT	-	every output of the family

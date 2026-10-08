@@ -27,7 +27,6 @@ use crate::{
     types::GedcomData,
     GedcomError,
 };
-use std::str::Chars;
 
 /// Configuration options for GEDCOM parsing.
 ///
@@ -322,14 +321,12 @@ impl GedcomBuilder {
         &self.config
     }
 
-    /// Builds the parser and parses the GEDCOM data from a character iterator.
+    /// Parses decoded GEDCOM text, with any line terminators. Unlike
+    /// [`build_from_str`](Self::build_from_str), it does not check
+    /// `max_file_size`.
     ///
     /// This method consumes the builder and returns the parsed `GedcomData`
     /// or an error if parsing fails.
-    ///
-    /// # Arguments
-    ///
-    /// * `chars` - A character iterator over the GEDCOM content
     ///
     /// # Errors
     ///
@@ -346,12 +343,15 @@ impl GedcomBuilder {
     /// let source = "0 HEAD\n1 GEDC\n2 VERS 5.5\n0 TRLR";
     /// let data = GedcomBuilder::new()
     ///     .strict_mode(false)
-    ///     .build(source.chars())?;
+    ///     .build(source)?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn build(self, chars: Chars<'_>) -> Result<GedcomData, GedcomError> {
-        let mut tokenizer = Tokenizer::new(chars);
+    pub fn build(self, text: &str) -> Result<GedcomData, GedcomError> {
+        // Every line terminator becomes LF and blank lines go, so that the
+        // token-based parser reads CR-only, mixed and spaced-out files.
+        let text = crate::tree::normalize_eol(text);
+        let mut tokenizer = Tokenizer::new(text.chars());
         tokenizer.next_token()?;
 
         let data = GedcomData::new(&mut tokenizer, 0)?;
@@ -405,7 +405,7 @@ impl GedcomBuilder {
         }
 
         let content = decode(bytes).text;
-        self.build(content.chars())
+        self.build(&content)
     }
 
     /// Builds the parser and parses the GEDCOM data from raw bytes with a specific encoding.
@@ -451,7 +451,7 @@ impl GedcomBuilder {
         }
 
         let content = decode_as(bytes, encoding);
-        self.build(content.chars())
+        self.build(&content)
     }
 
     /// Builds the parser and parses the GEDCOM data from a string.
@@ -489,7 +489,7 @@ impl GedcomBuilder {
             }
         }
 
-        self.build(content.chars())
+        self.build(content)
     }
 
     /// Builds the parser and parses the GEDCOM data from a GEDZIP archive.

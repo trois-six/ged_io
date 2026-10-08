@@ -373,7 +373,11 @@ impl fmt::Display for Note {
             // Truncate long notes for display
             const MAX_LEN: usize = 100;
             if value.len() > MAX_LEN {
-                write!(f, "{}...", &value[..MAX_LEN])?;
+                write!(
+                    f,
+                    "{}...",
+                    crate::util::truncate_to_char_boundary(value, MAX_LEN)
+                )?;
             } else {
                 write!(f, "{value}")?;
             }

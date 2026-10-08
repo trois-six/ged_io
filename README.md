@@ -22,7 +22,7 @@ Whether you're building a genealogy application, migrating data between platform
 | **Read & Write** | Parse GEDCOM files into Rust structs, modify them, and write back |
 | **Streaming Parser** | Memory-efficient iterator-based parsing for large files |
 | **GEDZIP Support** | Read/write `.gdz` archives bundling GEDCOM data with media files |
-| **Multiple Encodings** | UTF-8, UTF-16, ISO-8859-1, ISO-8859-15 (Latin-9), ANSEL |
+| **Multiple Encodings** | UTF-8, UTF-16 (with or without BOM), ANSEL (to Unicode NFC), ASCII, Windows-1252 (`ANSI`), ISO-8859-1, ISO-8859-15, IBM PC (cp437), Macintosh; in memory and streaming |
 | **JSON Export** | Optional serde integration for JSON serialization |
 | **Type Safe** | Strongly-typed Rust structs for all GEDCOM record types |
 | **Compatible** | Relax rules to be compatible with most of GEDCOM files |
@@ -239,9 +239,13 @@ let data: GedcomData = parser
     .collect();
 ```
 
-Note: The streaming parser requires UTF-8 input. For files with other encodings,
-read and convert to UTF-8 first, or use `GedcomBuilder::build_from_str()` which
-handles encoding detection automatically.
+The streaming parser reads any encoding and any line terminator the in-memory
+parser reads, with the same rules: it decodes on the fly with
+`ged_io::encoding::DecodeReader`, keeping memory bounded by the largest record.
+
+For a lossless view of a file — every line as a structure, nothing
+interpreted — use `ged_io::tree::Tree` (in memory) or `ged_io::tree::TreeReader`
+(streaming).
 
 ---
 
@@ -271,7 +275,7 @@ let data = GedcomBuilder::new()
 ```
 
 Lenient parsing policy (default):
-- Accepts common real-world quirks (UTF-8 BOM, CRLF line endings, trailing newline at EOF).
+- Accepts common real-world quirks: a UTF-8 BOM, CR, LF, CR LF or LF CR line terminators (mixed or not), blank lines, a trailing newline at EOF, and bytes that contradict `HEAD.CHAR` (the bytes win; nothing fails to decode).
 - Allows missing `HEAD` and/or `TRLR` records (the parser stops cleanly at EOF).
 - Keeps writing strict: the writer always emits valid GEDCOM output (including `0 TRLR` without a final newline and using `CONT`/`CONC` for multiline text).
 
@@ -599,12 +603,17 @@ All standard GEDCOM date formats are preserved:
 
 ### Character Encodings
 
+Decoding never fails: a byte order mark, then a UTF-16 NUL pattern, then
+valid UTF-8 decide, before the `HEAD.CHAR` declaration (see
+`ged_io::encoding`).
+
 - UTF-8 (with/without BOM)
-- UTF-16 LE/BE
-- ANSEL (Z39.47, legacy GEDCOM 5.x encoding)
-- ISO-8859-1 (Latin-1)
-- ISO-8859-15 (Latin-9)
+- UTF-16 LE/BE (with or without BOM)
+- ANSEL (Z39.47, legacy GEDCOM 5.x encoding), composed to Unicode NFC
 - ASCII
+- Windows-1252 (`CHAR ANSI`, `WINDOWS-1252`), also used for ISO-8859-1 (Latin-1)
+- ISO-8859-15 (Latin-9)
+- IBM PC code page 437 (`CHAR IBMPC`) and Mac OS Roman (`CHAR MACINTOSH`)
 
 ---
 

@@ -362,7 +362,13 @@ impl fmt::Debug for NoteDebug<'_> {
             // Truncate long notes in debug output
             const MAX_LEN: usize = 50;
             if value.len() > MAX_LEN {
-                debug.field("value", &format!("{}...", &value[..MAX_LEN]));
+                debug.field(
+                    "value",
+                    &format!(
+                        "{}...",
+                        crate::util::truncate_to_char_boundary(value, MAX_LEN)
+                    ),
+                );
             } else {
                 debug.field("value", value);
             }
