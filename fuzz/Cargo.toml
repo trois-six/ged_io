@@ -44,3 +44,10 @@ path = "fuzz_targets/spec.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "model"
+path = "fuzz_targets/model.rs"
+test = false
+doc = false
+bench = false
