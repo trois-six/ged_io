@@ -30,6 +30,17 @@ use std::path::{Path, PathBuf};
 
 const LOCK: &str = include_str!("../fixtures/corpora.lock.tsv");
 const BASELINE: &str = include_str!("../fixtures/conformance/corpora_baseline.tsv");
+/// The same for the pipeline under construction (`RATCHET_TIER=next`).
+const BASELINE_NEXT: &str = include_str!("../fixtures/conformance/corpora_baseline_next.tsv");
+
+/// The baseline of the tier under test, and its file name.
+fn baseline() -> (&'static str, &'static str) {
+    if crate::support::ratchet::tier() == "next" {
+        (BASELINE_NEXT, "corpora_baseline_next.tsv")
+    } else {
+        (BASELINE, "corpora_baseline.tsv")
+    }
+}
 
 fn root() -> PathBuf {
     std::env::var_os("CORPORA_DIR")
@@ -172,14 +183,16 @@ fn measure(bytes: &[u8]) -> Measure {
     }
 }
 
-/// gedcom4j and Gramps samples against `corpora_baseline.tsv`. A file that
-/// does better than its baseline fails too, so the baseline only goes down;
+/// gedcom4j and Gramps samples against `corpora_baseline.tsv` (the `next`
+/// tier: `corpora_baseline_next.tsv`). A file that does better than its
+/// baseline fails too, so the baseline only goes down;
 /// `CORPORA_BASELINE_WRITE=1` rewrites it.
 #[test]
 #[ignore = "opt-in: run tools/fetch-corpora.sh, then cargo test --all-features --test conformance -- --ignored"]
 fn real_world_dialects() {
+    let (baseline, baseline_file) = baseline();
     let mut base: BTreeMap<String, Measure> = BTreeMap::new();
-    for l in BASELINE
+    for l in baseline
         .lines()
         .filter(|l| !l.starts_with('#') && !l.starts_with("file\t") && !l.is_empty())
     {
@@ -217,7 +230,7 @@ fn real_world_dialects() {
         for (k, m) in &now {
             s += &format!("{k}\t{}\t{}\t{}\n", m.outcome, m.lost, m.rules.join(","));
         }
-        std::fs::write(crate::support::fixture("corpora_baseline.tsv"), s).unwrap();
+        std::fs::write(crate::support::fixture(baseline_file), s).unwrap();
         return;
     }
     let mut diffs = Vec::new();
@@ -228,7 +241,7 @@ fn real_world_dialects() {
             _ => {}
         }
     }
-    assert!(diffs.is_empty(), "{} files differ from corpora_baseline.tsv (regenerate it if every change is an improvement):\n{}", diffs.len(), diffs.join("\n"));
+    assert!(diffs.is_empty(), "{} files differ from {baseline_file} (regenerate it if every change is an improvement):\n{}", diffs.len(), diffs.join("\n"));
 }
 
 /// The committed tables are what the generator makes of the pinned inputs.

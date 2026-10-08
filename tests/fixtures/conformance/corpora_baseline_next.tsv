@@ -1,0 +1,96 @@
+file	outcome	lost	rules
+# Per-file baseline of the opt-in real-world corpora (gedcom4j, Gramps): read outcome (OK, FATAL,
+# PANIC, REPARSE: the written output does not read back), number of input payloads and structures
+# missing from the written output, and the output-checker rules the output violates. Regenerate
+# with CORPORA_BASELINE_WRITE=1; every change must be an improvement.
+gedcom4j/sample/5.5.1 sample 1.ged	OK	105	payload-date,record-size
+gedcom4j/sample/5.5.1 sample 2.ged	OK	0	payload-date
+gedcom4j/sample/5.5.1 sample 3.ged	OK	35	payload-date
+gedcom4j/sample/5.5.1 sample 4.ged	OK	0	payload-date
+gedcom4j/sample/5.5.1 sample 5.ged	OK	0	payload-date
+gedcom4j/sample/ANSEL.GED	OK	66	
+gedcom4j/sample/Bad_custom_tag.ged	OK	0	payload-date
+gedcom4j/sample/Event Tag Test.ged	OK	0	
+gedcom4j/sample/Harry_Potter.ged	OK	0	
+gedcom4j/sample/Issue 63.ged	OK	0	
+gedcom4j/sample/Issue 64.ged	OK	0	
+gedcom4j/sample/Issue 80.ged	OK	0	
+gedcom4j/sample/Issue157.ged	OK	0	
+gedcom4j/sample/Issue166.ged	OK	0	
+gedcom4j/sample/Issue87.ged	OK	0	payload-date
+gedcom4j/sample/RelationshipTest.ged	OK	0	
+gedcom4j/sample/RelationshipTestExtended.ged	OK	0	
+gedcom4j/sample/Sopranos.ged	OK	0	
+gedcom4j/sample/TGC551.ged	OK	160	payload-date
+gedcom4j/sample/TGC551LF.ged	OK	160	payload-date
+gedcom4j/sample/TGC55C.ged	OK	160	payload-date
+gedcom4j/sample/TGC55CLF.ged	OK	160	payload-date
+gedcom4j/sample/a31486.ged	OK	1	
+gedcom4j/sample/allged.ged	OK	0	
+gedcom4j/sample/customtagstorture.ged	OK	0	payload-date
+gedcom4j/sample/famhistcustomtags.ged	OK	0	
+gedcom4j/sample/famhistnocustomtags.ged	OK	0	
+gedcom4j/sample/ftmcustomtags.ged	OK	0	
+gedcom4j/sample/issue102_100levels.ged	OK	0	
+gedcom4j/sample/issue102_99levels.ged	OK	0	
+gedcom4j/sample/issue32.ged	OK	1	
+gedcom4j/sample/issue81.ged	OK	11	
+gedcom4j/sample/issue95.ged	OK	0	
+gedcom4j/sample/issue96.ged	OK	0	
+gedcom4j/sample/john_of_sea_20101009.ged	OK	0	
+gedcom4j/sample/legacycustomtags.ged	OK	2	payload-date
+gedcom4j/sample/legacynocustomtags.ged	OK	2	payload-date
+gedcom4j/sample/minimal55.ged	OK	0	
+gedcom4j/sample/minimal55indented.ged	OK	0	
+gedcom4j/sample/problemFile.ged	OK	3	
+gedcom4j/sample/superlongline-ansel.ged	OK	0	
+gedcom4j/sample/unicode-littleendian-crlf.ged	OK	0	
+gedcom4j/sample/unicode-littleendian-cronly.ged	OK	0	
+gedcom4j/sample/utf16be.ged	OK	0	
+gedcom4j/sample/utf16le.ged	OK	0	
+gedcom4j/sample/utf8.ged	OK	0	
+gedcom4j/sample/utf8_cr_nobom.ged	OK	0	
+gedcom4j/sample/utf8_crlf_bom.ged	OK	0	
+gedcom4j/sample/utf8_crlf_nobom.ged	OK	0	
+gedcom4j/sample/utf8_lf_nobom.ged	OK	0	
+gedcom4j/sample/validatesOk.ged	OK	0	
+gedcom4j/sample/willis-ansel.ged	OK	33	
+gedcom4j/sample/willis-ascii.ged	OK	29	
+gedcom4j/sample/willis-unicode-bigendian.ged	OK	29	
+gedcom4j/sample/willis-unicode-littleendian.ged	OK	29	
+gedcom4j/sample/willis.ged	OK	1	
+gramps/data/tests/exp_sample_ged.ged	OK	3	
+gramps/data/tests/imp_ANSEL_CR.ged	OK	66	
+gramps/data/tests/imp_ANSEL_CRLF.ged	OK	66	
+gramps/data/tests/imp_ANSEL_LF.ged	OK	66	
+gramps/data/tests/imp_CustTags.ged	OK	0	
+gramps/data/tests/imp_FTM_16dec2015a-mod1.ged	OK	1	
+gramps/data/tests/imp_FTM_LINK.ged	OK	0	
+gramps/data/tests/imp_FTM_OCCU_bug.ged	OK	0	
+gramps/data/tests/imp_FTM_PHOTO.ged	OK	0	
+gramps/data/tests/imp_Latin_1_CR.ged	OK	0	
+gramps/data/tests/imp_Latin_1_CRLF.ged	OK	0	
+gramps/data/tests/imp_Latin_1_LF.ged	OK	0	
+gramps/data/tests/imp_MediaTest.ged	OK	0	
+gramps/data/tests/imp_MixInlineXrefNote.ged	OK	0	
+gramps/data/tests/imp_Paris.ged	OK	0	
+gramps/data/tests/imp_PhonFax_dfs.ged	OK	0	
+gramps/data/tests/imp_UTF_16_BE_BOM_CR.ged	OK	0	
+gramps/data/tests/imp_UTF_16_BE_BOM_CRLF.ged	OK	0	
+gramps/data/tests/imp_UTF_16_BE_BOM_LF.ged	OK	0	
+gramps/data/tests/imp_UTF_16_LE_BOM_CR.ged	OK	0	
+gramps/data/tests/imp_UTF_16_LE_BOM_CRLF.ged	OK	0	
+gramps/data/tests/imp_UTF_16_LE_BOM_LF.ged	OK	0	
+gramps/data/tests/imp_UTF_8_BOM_CR.ged	OK	0	
+gramps/data/tests/imp_UTF_8_BOM_CRLF.ged	OK	0	
+gramps/data/tests/imp_UTF_8_BOM_LF.ged	OK	0	
+gramps/data/tests/imp_UTF_8_NOBOM_CR.ged	OK	0	
+gramps/data/tests/imp_UTF_8_NOBOM_CRLF.ged	OK	0	
+gramps/data/tests/imp_UTF_8_NOBOM_LF.ged	OK	0	
+gramps/data/tests/imp_bug_8322_test.ged	OK	0	
+gramps/data/tests/imp_cp1252_CR.ged	OK	25	
+gramps/data/tests/imp_cp1252_CRLF.ged	OK	25	
+gramps/data/tests/imp_cp1252_LF.ged	OK	25	
+gramps/data/tests/imp_notetest_dfs.ged	OK	1	payload-date
+gramps/data/tests/imp_sample.ged	OK	6	
+gramps/data/tests/imp_test_FTM_CONC.ged	OK	0	
