@@ -1,6 +1,6 @@
 //! Notes, texts and their translations.
 
-use crate::tree::Payload;
+use crate::tree::{FlatPayload, Payload};
 
 use super::citation::Citation;
 use super::driver::{gedcom_struct, NodeRef, PayloadField, ReadCx, WriteCx};
@@ -36,6 +36,13 @@ impl PayloadField for NoteContent {
         match self {
             NoteContent::Text(t) => cx.text(t),
             NoteContent::Shared(id) => cx.pointer(*id),
+        }
+    }
+
+    fn payload<'s>(&'s self, cx: &WriteCx<'s>) -> FlatPayload<'s> {
+        match self {
+            NoteContent::Text(t) => cx.text_flat(t),
+            NoteContent::Shared(id) => cx.pointer_flat(*id),
         }
     }
 }

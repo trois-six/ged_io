@@ -10,12 +10,14 @@
 //! lost: a node that does not fit its type stays generic.
 
 use std::any::Any;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::OnceLock;
 
 use crate::spec::schema::{tag_index, Kind, Schema, StructId, DATASET};
-use crate::tree::{Structure, Tag, Xref, STANDARD_TAGS};
+
+use crate::tree::{Flat, FlatPayload, Structure, Tag, Xref, STANDARD_TAGS};
 use crate::version::GedcomVersion;
 
 use super::driver::{FromNode, NodeRef, ReadCx, SpecNames, Struct, ToNodes, WriteCx};
@@ -82,6 +84,7 @@ impl fmt::Debug for Typed {
 /// A typed value behind [`Typed`].
 trait TypedValue {
     fn write(&self, tag: &'static str, cx: &WriteCx<'_>) -> Structure;
+    fn write_flat<'s>(&'s self, tag: &'static str, cx: &WriteCx<'s>, out: &mut Flat<'s>);
     fn as_any(&self) -> &dyn Any;
     fn fmt_dyn(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
@@ -89,6 +92,10 @@ trait TypedValue {
 impl<T: ToNodes + fmt::Debug + 'static> TypedValue for T {
     fn write(&self, tag: &'static str, cx: &WriteCx<'_>) -> Structure {
         self.to_node(tag, cx)
+    }
+
+    fn write_flat<'s>(&'s self, tag: &'static str, cx: &WriteCx<'s>, out: &mut Flat<'s>) {
+        self.to_flat(tag, cx, out);
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -390,6 +397,32 @@ impl Generic {
                 .collect(),
             line: 0,
         }
+    }
+
+    /// [`Generic::to_structure`], into a flat arena, borrowing the texts.
+    pub(crate) fn to_flat<'s>(&'s self, cx: &WriteCx<'s>, out: &mut Flat<'s>) {
+        let source: &'s Source = cx.source;
+        let payload = match &self.payload {
+            Value::None => FlatPayload::None,
+            Value::Pointer(p) => cx.pointer_flat(*p),
+            Value::Text(t) => cx.text_flat(t),
+        };
+        let standard = u16::try_from(self.tag.get())
+            .ok()
+            .filter(|&t| usize::from(t) < crate::tree::STANDARD_TAGS.len());
+        let at = out.open_standard(
+            Cow::Borrowed(source.tag(self.tag)),
+            standard,
+            self.xref.map(|x| Cow::Borrowed(source.xref(x))),
+            payload,
+        );
+        for c in &self.children {
+            match c {
+                Child::Typed(t) => t.value.write_flat(static_tag(t.tag), cx, out),
+                Child::Generic(g) => g.to_flat(cx, out),
+            }
+        }
+        out.close(at);
     }
 }
 

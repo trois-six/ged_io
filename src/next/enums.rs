@@ -18,7 +18,7 @@
 //! Languages are not an enumeration here: 7.x tags them in BCP 47, an open
 //! grammar, and 5.5.1's `LANGUAGE_ID` names are kept as text too.
 
-use crate::tree::{Payload, Structure};
+use crate::tree::{Flat, FlatPayload, Payload, Structure};
 use crate::version::GedcomVersion;
 
 use super::driver::{gedcom_struct, NodeRef, PayloadField, ReadCx, WriteCx};
@@ -83,6 +83,18 @@ pub(crate) fn write_enum<E: Enumeration>(value: &E, cx: &WriteCx<'_>) -> Payload
         (Some(s), _) => WriteCx::str(s),
         (None, Some(t)) => cx.text(t),
         (None, None) => Payload::None,
+    }
+}
+
+/// [`write_enum`], borrowed.
+pub(crate) fn write_enum_flat<'s, E: Enumeration>(
+    value: &'s E,
+    cx: &WriteCx<'s>,
+) -> FlatPayload<'s> {
+    match (value.spelling(cx.version), value.unknown()) {
+        (Some(s), _) => WriteCx::static_flat(s),
+        (None, Some(t)) => cx.text_flat(t),
+        (None, None) => FlatPayload::None,
     }
 }
 
@@ -187,6 +199,10 @@ macro_rules! gedcom_enum {
 
             fn write(&self, cx: &WriteCx<'_>) -> Payload {
                 write_enum(self, cx)
+            }
+
+            fn payload<'s>(&'s self, cx: &WriteCx<'s>) -> FlatPayload<'s> {
+                write_enum_flat(self, cx)
             }
         }
 
@@ -779,6 +795,14 @@ impl<E: Enumeration> super::driver::Fields for Phrased<E> {
     fn write_fields(&self, cx: &WriteCx<'_>, out: &mut Vec<Structure>) {
         super::driver::Slot::write(&self.phrase, "PHRASE", cx, out);
     }
+
+    fn write_payload_flat<'s>(&'s self, cx: &WriteCx<'s>) -> FlatPayload<'s> {
+        write_enum_flat(&self.value, cx)
+    }
+
+    fn write_fields_flat<'s>(&'s self, cx: &WriteCx<'s>, out: &mut Flat<'s>) {
+        super::driver::Slot::to_flat(&self.phrase, "PHRASE", cx, out);
+    }
 }
 
 impl<E: Enumeration + Clone + PartialEq + std::fmt::Debug> super::driver::FromNode for Phrased<E> {
@@ -790,6 +814,10 @@ impl<E: Enumeration + Clone + PartialEq + std::fmt::Debug> super::driver::FromNo
 impl<E: Enumeration> super::driver::ToNodes for Phrased<E> {
     fn to_node(&self, tag: &'static str, cx: &WriteCx<'_>) -> Structure {
         super::driver::write(self, tag, cx)
+    }
+
+    fn to_flat<'s>(&'s self, tag: &'static str, cx: &WriteCx<'s>, out: &mut Flat<'s>) {
+        super::driver::write_flat(self, tag, cx, out);
     }
 }
 

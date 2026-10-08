@@ -20,7 +20,11 @@
 //! - [`write`] turns a structure back into a [`Structure`]: payload, fields
 //!   in declaration order, then `extra`.
 
-use crate::tree::{Payload, RawKind, RawNode, RawSpan, Structure, Tag, Xref, STANDARD_TAGS};
+use std::borrow::Cow;
+
+use crate::tree::{
+    Flat, FlatPayload, Payload, RawKind, RawNode, RawSpan, Structure, Tag, Xref, STANDARD_TAGS,
+};
 use crate::version::GedcomVersion;
 
 use super::node::{Extra, Node, Value};
@@ -208,12 +212,7 @@ impl<'s> ReadCx<'s> {
     }
 
     fn intern(&mut self, arena: Arena<'_>, span: RawSpan) -> Option<XrefId> {
-        let text = span.get(arena.text);
-        let input = self.input;
-        let start = arena.base + span.start as usize;
-        self.xrefs.intern(text, input, self.side, || {
-            Text::input(input, start, span.len as usize)
-        })
+        self.xrefs.intern(span.get(arena.text))
     }
 
     /// A node without its substructures, untyped.
@@ -268,7 +267,7 @@ pub(crate) struct WriteCx<'s> {
     pub(crate) convert: bool,
 }
 
-impl WriteCx<'_> {
+impl<'a> WriteCx<'a> {
     /// A text payload; none when empty.
     pub(crate) fn text(&self, text: &Text) -> Payload {
         let s = text.as_str(self.source);
@@ -282,6 +281,33 @@ impl WriteCx<'_> {
     /// A pointer payload.
     pub(crate) fn pointer(&self, id: XrefId) -> Payload {
         Payload::Pointer(Xref::new(self.source.xref(id)))
+    }
+
+    /// [`WriteCx::text`], borrowed.
+    pub(crate) fn text_flat<'s>(&self, text: &'s Text) -> FlatPayload<'s>
+    where
+        'a: 's,
+    {
+        let s = text.as_str(self.source);
+        if s.is_empty() {
+            FlatPayload::None
+        } else {
+            FlatPayload::Text(Cow::Borrowed(s))
+        }
+    }
+
+    /// [`WriteCx::pointer`], borrowed.
+    pub(crate) fn pointer_flat(&self, id: XrefId) -> FlatPayload<'a> {
+        FlatPayload::Pointer(Cow::Borrowed(self.source.xref(id)))
+    }
+
+    /// [`WriteCx::str`] of static characters, borrowed.
+    pub(crate) fn static_flat(s: &'static str) -> FlatPayload<'static> {
+        if s.is_empty() {
+            FlatPayload::None
+        } else {
+            FlatPayload::Text(Cow::Borrowed(s))
+        }
     }
 
     /// A text payload from static or computed characters.
@@ -305,6 +331,13 @@ pub(crate) trait FromNode: Sized {
 pub(crate) trait ToNodes {
     /// The structure, tagged `tag` unless the type chooses its own tag.
     fn to_node(&self, tag: &'static str, cx: &WriteCx<'_>) -> Structure;
+
+    /// The same structure, written into `out` with its texts borrowed from
+    /// the model and its source where they can be: what the writer checks
+    /// and emits. By default, [`ToNodes::to_node`]'s structure.
+    fn to_flat<'s>(&'s self, tag: &'static str, cx: &WriteCx<'s>, out: &mut Flat<'s>) {
+        out.push_structure(self.to_node(tag, cx));
+    }
 }
 
 /// The payload of a structure.
@@ -313,6 +346,12 @@ pub(crate) trait PayloadField: Sized {
     fn read(node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> Option<Self>;
     /// The payload to write.
     fn write(&self, cx: &WriteCx<'_>) -> Payload;
+
+    /// The same payload, borrowed where it can be. By default,
+    /// [`PayloadField::write`]'s.
+    fn payload<'s>(&'s self, cx: &WriteCx<'s>) -> FlatPayload<'s> {
+        self.write(cx).into()
+    }
 }
 
 impl PayloadField for Text {
@@ -322,6 +361,10 @@ impl PayloadField for Text {
 
     fn write(&self, cx: &WriteCx<'_>) -> Payload {
         cx.text(self)
+    }
+
+    fn payload<'s>(&'s self, cx: &WriteCx<'s>) -> FlatPayload<'s> {
+        cx.text_flat(self)
     }
 }
 
@@ -337,6 +380,10 @@ impl PayloadField for Option<XrefId> {
     fn write(&self, cx: &WriteCx<'_>) -> Payload {
         self.map_or(Payload::None, |id| cx.pointer(id))
     }
+
+    fn payload<'s>(&'s self, cx: &WriteCx<'s>) -> FlatPayload<'s> {
+        self.map_or(FlatPayload::None, |id| cx.pointer_flat(id))
+    }
 }
 
 /// A field: how many occurrences of its substructure it holds.
@@ -348,6 +395,14 @@ pub(crate) trait Slot {
     fn accept(&mut self, node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> bool;
     /// Writes the occurrences.
     fn write(&self, tag: &'static str, cx: &WriteCx<'_>, out: &mut Vec<Structure>);
+    /// Writes the occurrences into a flat arena ([`ToNodes::to_flat`]).
+    fn to_flat<'s>(&'s self, tag: &'static str, cx: &WriteCx<'s>, out: &mut Flat<'s>) {
+        let mut owned = Vec::new();
+        self.write(tag, cx, &mut owned);
+        for s in owned {
+            out.push_structure(s);
+        }
+    }
     /// Releases spare capacity once the structure is read.
     fn finish(&mut self) {}
 }
@@ -366,6 +421,12 @@ impl<T: FromNode + ToNodes> Slot for Option<T> {
     fn write(&self, tag: &'static str, cx: &WriteCx<'_>, out: &mut Vec<Structure>) {
         if let Some(v) = self {
             out.push(v.to_node(tag, cx));
+        }
+    }
+
+    fn to_flat<'s>(&'s self, tag: &'static str, cx: &WriteCx<'s>, out: &mut Flat<'s>) {
+        if let Some(v) = self {
+            v.to_flat(tag, cx, out);
         }
     }
 }
@@ -403,6 +464,12 @@ impl<T: FromNode + ToNodes> Slot for Vec<T> {
         }
     }
 
+    fn to_flat<'s>(&'s self, tag: &'static str, cx: &WriteCx<'s>, out: &mut Flat<'s>) {
+        for v in self {
+            v.to_flat(tag, cx, out);
+        }
+    }
+
     fn finish(&mut self) {
         if self.capacity() > self.len() {
             self.shrink_to_fit();
@@ -419,6 +486,10 @@ impl<T: FromNode> FromNode for Box<T> {
 impl<T: ToNodes> ToNodes for Box<T> {
     fn to_node(&self, tag: &'static str, cx: &WriteCx<'_>) -> Structure {
         (**self).to_node(tag, cx)
+    }
+
+    fn to_flat<'s>(&'s self, tag: &'static str, cx: &WriteCx<'s>, out: &mut Flat<'s>) {
+        (**self).to_flat(tag, cx, out);
     }
 }
 
@@ -438,6 +509,16 @@ pub(crate) fn write_leaf<T: PayloadField>(
     cx: &WriteCx<'_>,
 ) -> Structure {
     leaf_structure(tag, value.write(cx))
+}
+
+/// A leaf's structure, into a flat arena.
+pub(crate) fn write_leaf_flat<'s, T: PayloadField>(
+    value: &'s T,
+    tag: &'static str,
+    cx: &WriteCx<'s>,
+    out: &mut Flat<'s>,
+) {
+    out.leaf(Cow::Borrowed(tag), value.payload(cx));
 }
 
 /// A structure with a tag and a payload.
@@ -469,6 +550,15 @@ macro_rules! leaf {
             ) -> $crate::tree::Structure {
                 $crate::next::driver::write_leaf(self, tag, cx)
             }
+
+            fn to_flat<'s>(
+                &'s self,
+                tag: &'static str,
+                cx: &$crate::next::driver::WriteCx<'s>,
+                out: &mut $crate::tree::Flat<'s>,
+            ) {
+                $crate::next::driver::write_leaf_flat(self, tag, cx, out);
+            }
         }
     )*};
 }
@@ -483,6 +573,10 @@ impl PayloadField for XrefId {
 
     fn write(&self, cx: &WriteCx<'_>) -> Payload {
         cx.pointer(*self)
+    }
+
+    fn payload<'s>(&'s self, cx: &WriteCx<'s>) -> FlatPayload<'s> {
+        cx.pointer_flat(*self)
     }
 }
 
@@ -576,6 +670,18 @@ pub(crate) trait Fields {
     fn write_payload(&self, cx: &WriteCx<'_>) -> Payload;
     /// The fields' structures, in order.
     fn write_fields(&self, cx: &WriteCx<'_>, out: &mut Vec<Structure>);
+    /// [`Fields::write_payload`], borrowed where it can be.
+    fn write_payload_flat<'s>(&'s self, cx: &WriteCx<'s>) -> FlatPayload<'s> {
+        self.write_payload(cx).into()
+    }
+    /// [`Fields::write_fields`], into a flat arena.
+    fn write_fields_flat<'s>(&'s self, cx: &WriteCx<'s>, out: &mut Flat<'s>) {
+        let mut owned = Vec::new();
+        self.write_fields(cx, &mut owned);
+        for s in owned {
+            out.push_structure(s);
+        }
+    }
 }
 
 /// A typed structure, as `gedcom_struct!` declares it: its fields and the
@@ -614,6 +720,19 @@ fn read_into(s: &mut dyn Fields, node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> bool
     }
     s.finish();
     true
+}
+
+/// [`write`] into a flat arena.
+pub(crate) fn write_flat<'s>(
+    s: &'s dyn Fields,
+    tag: &'static str,
+    cx: &WriteCx<'s>,
+    out: &mut Flat<'s>,
+) {
+    let at = out.open(Cow::Borrowed(tag), None, s.write_payload_flat(cx));
+    s.write_fields_flat(cx, out);
+    s.extra().write_flat(cx, out);
+    out.close(at);
 }
 
 /// Writes a typed structure as `tag`: its payload, its fields in order,
@@ -745,6 +864,22 @@ macro_rules! gedcom_struct {
             ) {
                 $($crate::next::driver::Slot::write(&self.$field, $tag, cx, out);)*
             }
+
+            fn write_payload_flat<'s>(
+                &'s self,
+                cx: &$crate::next::driver::WriteCx<'s>,
+            ) -> $crate::tree::FlatPayload<'s> {
+                gedcom_struct!(@payload_flat self cx $($pfield $pty)?)
+            }
+
+            #[allow(unused_variables)]
+            fn write_fields_flat<'s>(
+                &'s self,
+                cx: &$crate::next::driver::WriteCx<'s>,
+                out: &mut $crate::tree::Flat<'s>,
+            ) {
+                $($crate::next::driver::Slot::to_flat(&self.$field, $tag, cx, out);)*
+            }
         }
 
         impl $crate::next::driver::FromNode for $name {
@@ -770,6 +905,23 @@ macro_rules! gedcom_struct {
                 )?
                 $crate::next::driver::write(self, tag, cx)
             }
+
+            fn to_flat<'s>(
+                &'s self,
+                tag: &'static str,
+                cx: &$crate::next::driver::WriteCx<'s>,
+                out: &mut $crate::tree::Flat<'s>,
+            ) {
+                $(let tag = $tagfn(self, tag, cx);)?
+                $(
+                    // A converted structure is a temporary: owned.
+                    if let Some(converted) = cx.convert.then(|| $convfn(self, cx)).flatten() {
+                        out.push_structure($crate::next::driver::write(&converted, tag, cx));
+                        return;
+                    }
+                )?
+                $crate::next::driver::write_flat(self, tag, cx, out);
+            }
         }
     };
     (@read_payload $self:ident $node:ident $cx:ident) => {{
@@ -791,6 +943,13 @@ macro_rules! gedcom_struct {
     }};
     (@write_payload $self:ident $cx:ident $pfield:ident $pty:ty) => {
         $crate::next::driver::PayloadField::write(&$self.$pfield, $cx)
+    };
+    (@payload_flat $self:ident $cx:ident) => {{
+        let _ = $cx;
+        $crate::tree::FlatPayload::None
+    }};
+    (@payload_flat $self:ident $cx:ident $pfield:ident $pty:ty) => {
+        $crate::next::driver::PayloadField::payload(&$self.$pfield, $cx)
     };
 }
 pub(crate) use gedcom_struct;

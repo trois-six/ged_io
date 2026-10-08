@@ -226,13 +226,19 @@ impl TagId {
 
 /// The identifiers of a dataset: their texts, by id, and a hash index from
 /// text to id. Identifiers that hash alike are chained.
+///
+/// The texts are copied together into one buffer, a few bytes each: a
+/// writer resolving every pointer reads them there, not across the whole
+/// input.
 #[derive(Clone, Default)]
 pub(crate) struct XrefTable {
-    names: Vec<Text>,
+    /// The texts, one after the other.
+    names: String,
+    /// For each id, the end of its text in `names`, and the previous id
+    /// with the same hash (0: none).
+    entries: Vec<(usize, u32)>,
     /// Hash of a text to the most recent id with that hash.
     index: HashMap<u64, u32, BuildHasherDefault<IdHasher>>,
-    /// For each id, the previous id with the same hash (0: none).
-    chain: Vec<u32>,
 }
 
 /// The hasher of [`XrefTable::index`], whose keys are hashes already.
@@ -262,54 +268,47 @@ fn hash(text: &str) -> u64 {
 }
 
 impl XrefTable {
-    fn find(&self, text: &str, input: &str, side: &str) -> Option<XrefId> {
+    /// The text of the identifier at `index`.
+    fn name(&self, index: usize) -> Option<&str> {
+        let end = self.entries.get(index)?.0;
+        let start = index
+            .checked_sub(1)
+            .map_or(0, |i| self.entries.get(i).map_or(0, |e| e.0));
+        self.names.get(start..end)
+    }
+
+    fn find(&self, text: &str) -> Option<XrefId> {
         let mut id = *self.index.get(&hash(text))?;
         while id != 0 {
             let i = id as usize - 1;
-            let name = self.names.get(i)?;
-            if resolve(name, input, side) == text {
+            if self.name(i)? == text {
                 return XrefId::from_index(i);
             }
-            id = self.chain.get(i).copied().unwrap_or(0);
+            id = self.entries.get(i).map_or(0, |e| e.1);
         }
         None
     }
 
-    /// The id of `text`; a new one, holding `make()`, when it has none.
-    pub(crate) fn intern(
-        &mut self,
-        text: &str,
-        input: &str,
-        side: &str,
-        make: impl FnOnce() -> Text,
-    ) -> Option<XrefId> {
-        if let Some(id) = self.find(text, input, side) {
+    /// The id of `text`; a new one when it has none.
+    pub(crate) fn intern(&mut self, text: &str) -> Option<XrefId> {
+        if let Some(id) = self.find(text) {
             return Some(id);
         }
-        let id = XrefId::from_index(self.names.len())?;
-        self.names.push(make());
+        let id = XrefId::from_index(self.entries.len())?;
+        self.names.push_str(text);
         let previous = self.index.insert(hash(text), id.0.get()).unwrap_or(0);
-        self.chain.push(previous);
+        self.entries.push((self.names.len(), previous));
         Some(id)
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.names.len()
+        self.entries.len()
     }
 
     pub(crate) fn shrink(&mut self) {
         self.names.shrink_to_fit();
-        self.chain.shrink_to_fit();
+        self.entries.shrink_to_fit();
         self.index.shrink_to_fit();
-    }
-}
-
-/// The characters of a text, given the buffers of its source.
-fn resolve<'a>(text: &'a Text, input: &'a str, side: &'a str) -> &'a str {
-    match &text.0 {
-        Repr::Input { start, len } => span(input, *start, *len),
-        Repr::Side { start, len } => span(side, *start, *len),
-        Repr::Owned(owned) => &owned.0,
     }
 }
 
@@ -359,23 +358,19 @@ impl Source {
     /// The text of an identifier, delimiters included: `@I1@`.
     #[must_use]
     pub fn xref(&self, id: XrefId) -> &str {
-        self.xrefs
-            .names
-            .get(id.index())
-            .map_or("", |t| resolve(t, &self.input, &self.side))
+        self.xrefs.name(id.index()).unwrap_or("")
     }
 
     /// The id of an identifier, if the dataset has it.
     #[must_use]
     pub fn find_xref(&self, xref: &str) -> Option<XrefId> {
-        self.xrefs.find(xref, &self.input, &self.side)
+        self.xrefs.find(xref)
     }
 
     /// The id of an identifier, made when the dataset does not have it
     /// yet. `None` only when four billion identifiers are taken.
     pub fn intern_xref(&mut self, xref: &str) -> Option<XrefId> {
-        self.xrefs
-            .intern(xref, &self.input, &self.side, || Text::new(xref))
+        self.xrefs.intern(xref)
     }
 
     /// The number of identifiers, pointers to no record included.
@@ -416,8 +411,8 @@ impl Source {
     pub fn heap_size(&self) -> usize {
         self.input.capacity()
             + self.side.capacity()
-            + self.xrefs.names.capacity() * std::mem::size_of::<Text>()
-            + self.xrefs.chain.capacity() * 4
+            + self.xrefs.names.capacity()
+            + self.xrefs.entries.capacity() * std::mem::size_of::<(usize, u32)>()
             + self.xrefs.index.capacity() * 16
             + self.tags.iter().map(|t| t.len() + 16).sum::<usize>()
     }
