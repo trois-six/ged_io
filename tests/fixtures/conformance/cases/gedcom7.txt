@@ -1,0 +1,511 @@
+# GEDCOM 7.0 extensions, enumerations, records and values.
+#
+# Format: `### ID | C|L | purpose (origin)`, then the GEDCOM input, then directives:
+#   #want LINE    the written output contains this line
+#   #model TEXT   the parsed model keeps this text (newline written \n)
+#   #lacks TEXT   the written output does not contain this text
+#   #target VERS  write as 5.5.1, 7.0 or 7.1 instead of the input's version
+# Tokens: <CR> / <CRLF> end a line with that terminator, <NOEOL> ends the input without one,
+# <TAB>, <BOM> and <U+XXXX> stand for those characters. Every name, place and value is fictitious.
+
+### G7-SCHMA-TAG | C | documented extension round-trips with its SCHMA declaration
+0 HEAD
+1 GEDC
+2 VERS 7.0
+1 SCHMA
+2 TAG _SKYPEID http://xmlns.com/foaf/0.1/skypeID
+0 @I0@ INDI
+1 _SKYPEID example.person
+0 TRLR
+#want 2 TAG _SKYPEID http://xmlns.com/foaf/0.1/skypeID
+#want 1 _SKYPEID example.person
+
+### G7-UNDOC-EXT | C | undocumented extension kept
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 _UNDOCUMENTED x
+2 _SUB y
+0 TRLR
+#want 1 _UNDOCUMENTED x
+#want 2 _SUB y
+
+### G7-EXT-RECORD | C | extension record with xref and pointer to it
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 _LOC @P1@
+0 @P1@ _LOC
+1 NAME Somewhere
+0 TRLR
+#want 1 _LOC @P1@
+#want 0 @P1@ _LOC
+
+### G7-EXT-UNDER-STD | C | extension below standard substructure (registry: ext anywhere)
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 BIRT
+2 DATE 1 JAN 1900
+3 _EXT kept
+0 TRLR
+#want 3 _EXT kept
+
+### G7-STD-UNDER-EXT | C | standard tag under extension is opaque and kept
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 _X
+2 TAG _Y http://example.com/y
+0 TRLR
+#want 2 TAG _Y http://example.com/y
+
+### G7-ENUM-EXT | C | extension enum values (SEX, PEDI, QUAY, STAT, MEDI) kept
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 SEX _EXTVAL
+1 FAMC @F1@
+2 PEDI _ENUMVAL
+2 STAT _EX
+0 @F1@ FAM
+1 CHIL @I1@
+0 TRLR
+#want 1 SEX _EXTVAL
+#want 2 PEDI _ENUMVAL
+#want 2 STAT _EX
+
+### G7-ENUM-UPPER | C | 7.0 enum values written upper case
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 FAMC @F1@
+2 PEDI ADOPTED
+2 STAT CHALLENGED
+0 @F1@ FAM
+1 CHIL @I1@
+0 TRLR
+#want 2 PEDI ADOPTED
+#want 2 STAT CHALLENGED
+
+### G7-PEDI-OTHER-PHRASE | C | PEDI OTHER + PHRASE
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 FAMC @F1@
+2 PEDI OTHER
+3 PHRASE Guardian
+0 @F1@ FAM
+1 CHIL @I1@
+0 TRLR
+#want 2 PEDI OTHER
+#want 3 PHRASE Guardian
+
+### G7-NO-GEDC-FORM | C | 7.0 output must not contain HEAD.GEDC.FORM or CHAR
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 TRLR
+#lacks FORM LINEAGE
+#lacks CHAR
+
+### G7-RESN-LIST | C | RESN list enum
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 RESN CONFIDENTIAL, LOCKED
+0 TRLR
+#want 1 RESN CONFIDENTIAL, LOCKED
+
+### G7-NO-CENS | C | NO structure with DATE/NOTE
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 NO CENS
+2 DATE FROM 1900 TO 1910
+0 TRLR
+#want 1 NO CENS
+#want 2 DATE FROM 1900 TO 1910
+
+### G7-NAME-PIECES-MULTI | C | repeated name pieces {0:M} (Armidale name-pieces-multiple)
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 NAME givn1 givn2 /surn1 surn2/
+2 GIVN givn1
+2 GIVN givn2
+2 SURN surn1
+2 SURN surn2
+0 TRLR
+#want 2 GIVN givn1
+#want 2 GIVN givn2
+#want 2 SURN surn1
+#want 2 SURN surn2
+
+### G7-NAME-NO-INVENTED-PIECES | C | writer must not add SURN/GIVN absent from input
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 NAME John /Doe/
+0 TRLR
+#lacks SURN
+
+### G7-NOTE-VS-SNOTE | C | inline NOTE vs SNOTE kept distinct (Armidale note/snote)
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 NOTE A single-use note
+1 SNOTE @N1@
+0 @N1@ SNOTE A shared note
+0 TRLR
+#want 1 NOTE A single-use note
+#want 1 SNOTE @N1@
+#want 0 @N1@ SNOTE A shared note
+
+### G7-NOTE-TRAN | C | NOTE with MIME, LANG, TRAN
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 NOTE <b>x</b>
+2 MIME text/html
+2 LANG en
+2 TRAN y
+3 LANG fr
+0 TRLR
+#want 2 MIME text/html
+#want 2 TRAN y
+#want 3 LANG fr
+
+### G7-SNOTE-CHAN | C | SNOTE record with CHAN/CREA
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @N1@ SNOTE text
+1 CHAN
+2 DATE 25 MAY 2021
+1 CREA
+2 DATE 1 JAN 2020
+0 TRLR
+#want 2 DATE 25 MAY 2021
+#want 1 CREA
+
+### G7-OBJE-MULTI-FILE | C | OBJE record with two FILE + FORM/MEDI + TITL
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @O1@ OBJE
+1 FILE a.jpg
+2 FORM image/jpeg
+3 MEDI PHOTO
+2 TITL First
+1 FILE b.jpg
+2 FORM image/jpeg
+0 TRLR
+#want 1 FILE a.jpg
+#want 1 FILE b.jpg
+#want 3 MEDI PHOTO
+#want 2 TITL First
+
+### G7-FILE-URI | C | FILE URI reference forms kept verbatim (filename-1)
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @O1@ OBJE
+1 FILE file:///unix/absolute
+2 FORM image/jpeg
+1 FILE most/paths%3Fget%23escaped
+2 FORM image/jpeg
+0 TRLR
+#want 1 FILE file:///unix/absolute
+#want 1 FILE most/paths%3Fget%23escaped
+
+### G7-FILE-EMPTY | C | empty FILE payload (python test_empty_line_value)
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @O1@ OBJE
+1 FILE
+2 FORM image/jpeg
+0 TRLR
+#want 2 FORM image/jpeg
+
+### G7-OBJE-LINK-TITL-CROP | C | OBJE link with TITL and CROP
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 OBJE @O1@
+2 TITL party
+2 CROP
+3 TOP 0
+3 LEFT 0
+3 HEIGHT 10
+3 WIDTH 10
+0 @O1@ OBJE
+1 FILE a.jpg
+2 FORM image/jpeg
+0 TRLR
+#want 2 TITL party
+#want 3 WIDTH 10
+
+### G7-AGE-ALL | C | age forms (Armidale valid ages)
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 DEAT
+2 AGE > 79y 1m 1w 1d
+1 BURI
+2 AGE < 1m
+1 CHR
+2 AGE 0y
+3 PHRASE Stillborn
+0 TRLR
+#want 2 AGE > 79y 1m 1w 1d
+#want 2 AGE < 1m
+#want 3 PHRASE Stillborn
+
+### G7-AGE-OVERFLOW | C | '1y 30m 100w 400d' legal in 7.0 (age.ged)
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 CHR
+2 AGE 1y 30m 100w 400d
+0 TRLR
+#want 2 AGE 1y 30m 100w 400d
+
+### G7-AGE-INVALID | L | invalid age kept (L) e.g. '79' or '>79y'
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 DEAT
+2 AGE 79
+0 TRLR
+#model 79
+
+### G7-DATE-FORMS | C | date value forms (Armidale)
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 BIRT
+2 DATE BET GREGORIAN 20 BCE AND GREGORIAN 12 BCE
+1 DEAT
+2 DATE FROM HEBREW 1 TSH 1
+1 BURI
+2 DATE EST JULIAN 16 AUG 918
+1 CHR
+2 DATE ABT 3 DEC 2023
+1 CREM
+2 DATE FRENCH_R 1 VEND 1
+0 TRLR
+#want 2 DATE BET GREGORIAN 20 BCE AND GREGORIAN 12 BCE
+#want 2 DATE FROM HEBREW 1 TSH 1
+#want 2 DATE EST JULIAN 16 AUG 918
+#want 2 DATE FRENCH_R 1 VEND 1
+
+### G7-DATE-INVALID | L | invalid date kept (L) e.g. '3 dec 2023', '32 JAN 2000', 'BET 2000'
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 BIRT
+2 DATE 32 JAN 2000
+1 DEAT
+2 DATE BET 2000
+0 TRLR
+#model 32 JAN 2000
+#model BET 2000
+
+### G7-DATE-EXT-CAL | C | extension calendar _CAL
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 BIRT
+2 DATE _MAYAN 1 POP 1
+0 TRLR
+#want 2 DATE _MAYAN 1 POP 1
+
+### G7-DATE-PHRASE-ONLY | C | DATE empty with PHRASE
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 BIRT
+2 DATE
+3 PHRASE Easter
+0 TRLR
+#want 3 PHRASE Easter
+
+### G7-TIME | C | DATE TIME on CHAN
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 CHAN
+2 DATE 1 DEC 2023
+3 TIME 2:50:00.00Z
+0 TRLR
+#want 3 TIME 2:50:00.00Z
+
+### G7-LANG-TAGS | C | BCP47 tags kept (lang.ged), SUBM LANG {0:M}
+0 HEAD
+1 GEDC
+2 VERS 7.0
+1 LANG und-Latn-pinyin
+0 @U1@ SUBM
+1 NAME Sub
+1 LANG en
+1 LANG ja
+0 TRLR
+#want 1 LANG und-Latn-pinyin
+#want 1 LANG ja
+
+### G7-HEAD-PLAC-FORM | C | HEAD.PLAC.FORM
+0 HEAD
+1 GEDC
+2 VERS 7.0
+1 PLAC
+2 FORM City, County, Country
+0 TRLR
+#want 2 FORM City, County, Country
+
+### G7-CORP-CONTACTS | C | HEAD.SOUR.CORP PHON/EMAIL/FAX/WWW
+0 HEAD
+1 GEDC
+2 VERS 7.0
+1 SOUR APP
+2 CORP Example Corp
+3 PHON +1 555 0100
+3 EMAIL a@example.com
+3 FAX +1 555 0101
+3 WWW https://example.com
+0 TRLR
+#want 3 PHON +1 555 0100
+#want 3 EMAIL a@example.com
+#want 3 WWW https://example.com
+
+### G7-NCHI-FAM | C | FAM.NCHI with substructures
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @F1@ FAM
+1 NCHI 2
+2 DATE 1900
+2 TYPE counted
+0 TRLR
+#want 1 NCHI 2
+#want 2 DATE 1900
+
+### G7-EXID-TYPE | C | EXID with TYPE
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 EXID 123
+2 TYPE http://example.com
+0 TRLR
+#want 2 TYPE http://example.com
+
+### G7-UID-MULTI | C | two UID / REFN on a record
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 UID 0b0f2b0a-0000-4000-8000-000000000001
+1 UID 0b0f2b0a-0000-4000-8000-000000000002
+1 REFN a
+1 REFN b
+0 TRLR
+#want 1 UID 0b0f2b0a-0000-4000-8000-000000000001
+#want 1 UID 0b0f2b0a-0000-4000-8000-000000000002
+#want 1 REFN a
+#want 1 REFN b
+
+### G7-LDS-STAT | C | LDS STAT values EXCLUDED/PRE_1970/DNS_CAN
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 INIL
+2 STAT EXCLUDED
+3 DATE 27 MAR 2022
+1 BAPL
+2 STAT PRE_1970
+3 DATE 27 MAR 2022
+0 TRLR
+#want 2 STAT EXCLUDED
+#want 2 STAT PRE_1970
+
+### G7-SOUR-DATA | C | SOUR record DATA EVEN/AGNC
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @S1@ SOUR
+1 DATA
+2 EVEN BIRT, DEAT
+3 DATE FROM 1900 TO 1950
+2 AGNC Agency
+1 TITL T
+0 TRLR
+#want 2 EVEN BIRT, DEAT
+#want 3 DATE FROM 1900 TO 1950
+#want 2 AGNC Agency
+
+### G7-PHRASE-PTRS | C | PHRASE under HUSB/WIFE/CHIL/ALIA
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @F1@ FAM
+1 HUSB @VOID@
+2 PHRASE Unknown father
+1 CHIL @VOID@
+2 PHRASE Stillborn child
+0 TRLR
+#want 2 PHRASE Unknown father
+#want 2 PHRASE Stillborn child
+
+### G7-FAM-SAME-SEX | C | two HUSB-less partners, same-sex marriage
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 SEX F
+1 FAMS @F1@
+0 @I2@ INDI
+1 SEX F
+1 FAMS @F1@
+0 @F1@ FAM
+1 WIFE @I1@
+1 HUSB @I2@
+0 TRLR
+#want 1 WIFE @I1@
+#want 1 HUSB @I2@
+
+### G7-FAM-TWO-HUSB | L | FAM with two HUSB lines (L; maximal70 line 132 fatal today)
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @F1@ FAM
+1 HUSB @I1@
+1 HUSB @I2@
+0 @I1@ INDI
+0 @I2@ INDI
+0 TRLR
+#want 1 HUSB @I1@
