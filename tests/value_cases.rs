@@ -126,7 +126,7 @@ fn test_date_age_and_time_cases() {
 fn test_g5_dates_as_gedcom_7() {
     let data = GedcomBuilder::new().build_from_str(CASES[9].file).unwrap();
     let written = GedcomWriter::new()
-        .gedcom_version("7.0")
+        .gedcom_version(ged_io::GedcomVersion::V7_0)
         .write_to_string(&data)
         .unwrap();
     for want in [

@@ -83,7 +83,7 @@ fn test_write_source_identifiers_per_version() {
     let data = GedcomBuilder::new().build_from_str(original).unwrap();
 
     let v7 = GedcomWriter::new()
-        .gedcom_version("7.0")
+        .gedcom_version(ged_io::GedcomVersion::V7_0)
         .write_to_string(&data)
         .unwrap();
     assert!(
@@ -94,7 +94,7 @@ fn test_write_source_identifiers_per_version() {
 
     // UID and EXID do not exist in GEDCOM 5.5.1.
     let v551 = GedcomWriter::new()
-        .gedcom_version("5.5.1")
+        .gedcom_version(ged_io::GedcomVersion::V5_5_1)
         .write_to_string(&data)
         .unwrap();
     assert!(!v551.contains("UID") && !v551.contains("EXID"), "{v551}");

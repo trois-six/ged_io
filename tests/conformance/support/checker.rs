@@ -329,9 +329,14 @@ fn strict_line(raw: &str) -> Option<StrictLine<'_>> {
 fn tag_ok(tag: &str, v: Version) -> bool {
     let b = tag.as_bytes();
     match v {
+        // `stdTag = ucletter *tagchar`, `extTag = underscore 1*tagchar`,
+        // `tagchar = ucletter / DIGIT / underscore` (7.0 §1.3).
         Version::V70 => {
             if let Some(rest) = tag.strip_prefix('_') {
-                !rest.is_empty() && rest.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+                !rest.is_empty()
+                    && rest
+                        .bytes()
+                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == b'_')
             } else {
                 b[0].is_ascii_uppercase()
                     && b.iter()
@@ -1182,6 +1187,8 @@ mod tests {
             ["level-jump"]
         );
         assert!(rules(&OK7.replace("1 NAME", "1 name"), Target::V70).contains(&"tag-syntax"));
+        assert!(rules(&OK7.replace("1 NAME", "1 _name"), Target::V70).contains(&"tag-syntax"));
+        assert!(!rules(&OK7.replace("1 NAME", "1 _NAME"), Target::V70).contains(&"tag-syntax"));
     }
 
     #[test]

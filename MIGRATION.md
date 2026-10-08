@@ -17,9 +17,8 @@ This guide explains the key differences between GEDCOM 5.5.1 and GEDCOM 7.0, and
 ```rust
 use ged_io::version::GedcomVersion;
 
-let version = GedcomVersion::V7_0;
-assert!(version.requires_utf8());
-assert!(!version.supports_char_encoding());
+let rules = GedcomVersion::V7_0.rules();
+assert!(!rules.has_head_char()); // 7.0 is UTF-8 only: no CHAR
 ```
 
 ### 2. Line Continuation
@@ -34,11 +33,8 @@ assert!(!version.supports_char_encoding());
 ```rust
 use ged_io::version::GedcomVersion;
 
-let v5 = GedcomVersion::V5_5_1;
-let v7 = GedcomVersion::V7_0;
-
-assert!(v5.supports_conc());
-assert!(!v7.supports_conc());
+assert!(GedcomVersion::V5_5_1.rules().uses_conc());
+assert!(!GedcomVersion::V7_0.rules().uses_conc());
 ```
 
 ### 3. @ Sign Escaping
@@ -210,22 +206,21 @@ assert!(ordinance.is_gedcom_7_only());
 The library automatically detects the GEDCOM version:
 
 ```rust
-use ged_io::{detect_version, GedcomVersion, VersionFeatures};
+use ged_io::{detect_version, GedcomVersion};
 
 let content = std::fs::read_to_string("my_file.ged").unwrap();
 let version = detect_version(&content);
 
-match version {
-    GedcomVersion::V5_5_1 => println!("GEDCOM 5.5.1 file"),
-    GedcomVersion::V7_0 => println!("GEDCOM 7.0 file"),
-    GedcomVersion::Unknown(v) => println!("Unknown version: {}", v.0),
+// 7.x declarations read as 7.0 or 7.1; anything else follows 5.5.1.
+if version.is_v7() {
+    println!("GEDCOM {version} file");
+} else {
+    println!("GEDCOM 5.5.1 file");
 }
 
-// Get feature flags for the version
-let features = VersionFeatures::from(version);
-if features.shared_notes_supported {
-    // Handle shared notes
-}
+// The writing rules of the version
+let rules = version.rules();
+println!("longest line: {:?}", rules.max_line_length());
 ```
 
 ## Checking Version Programmatically
@@ -248,14 +243,14 @@ if data.is_gedcom_7() {
 ## Writing Version-Specific Files
 
 ```rust
-use ged_io::GedcomWriter;
+use ged_io::{GedcomVersion, GedcomWriter};
 
-// Write as GEDCOM 5.5.1 (default)
+// Write in the version the data declares (5.5.1 when it declares none)
 let writer = GedcomWriter::new();
 let output_551 = writer.write_to_string(&data)?;
 
 // Write as GEDCOM 7.0
-let writer = GedcomWriter::new().gedcom_version("7.0");
+let writer = GedcomWriter::new().gedcom_version(GedcomVersion::V7_0);
 let output_70 = writer.write_to_string(&data)?;
 ```
 
@@ -282,12 +277,12 @@ data.add_shared_note(shared_note);
 
 ### Handling CONC in 7.0
 
-The library automatically converts `CONC` continuations to `CONT` when writing GEDCOM 7.0:
+Reading joins `CONC` continuations into the text; writing GEDCOM 7.0 never
+splits a payload, so 7.0 output has no `CONC` at all:
 
 ```rust
-// The writer handles this automatically based on version
-let writer = GedcomWriter::new().gedcom_version("7.0");
-// Long text will use CONT only, not CONC
+let writer = GedcomWriter::new().gedcom_version(GedcomVersion::V7_0);
+// Long text stays on one line; line breaks become CONT lines.
 ```
 
 ## Additional Resources

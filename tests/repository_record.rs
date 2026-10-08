@@ -33,7 +33,8 @@ fn test_round_trip_repository_record() {
     let written = GedcomWriter::new().write_to_string(&data1).unwrap();
     for expected in [
         "1 PHON +00 000 000\n1 PHON +00 000 001\n",
-        "1 EMAIL archive@example.org\n",
+        // GEDCOM 5.5.1 doubles every `@` of text.
+        "1 EMAIL archive@@example.org\n",
         "1 FAX +00 000 002\n",
         "1 WWW https://archive.example.org\n",
         "1 NOTE Closed on Mondays\n",

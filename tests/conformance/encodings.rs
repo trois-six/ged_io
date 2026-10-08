@@ -476,7 +476,10 @@ fn ansel_repertoire() {
     }
     for &(m, _, _) in MARKS {
         let words: Vec<&str> = COMPOSED.iter().filter(|r| r.0 == m).map(|r| r.2).collect();
-        let line = format!("mark {m:02X}: {}", words.join(" "));
+        // Commas, not spaces: in ANSEL a mark comes before its base, so a
+        // long line of one-letter words would have no place to continue
+        // with `CONC` (it never splits at a space) and break at a space.
+        let line = format!("mark {m:02X}: {}", words.join(","));
         body += &format!("1 NOTE {line}\n");
         expect.push((format!("mark-{m:02X}"), line));
     }
@@ -524,10 +527,11 @@ fn ansel_repertoire() {
     let run = cases::run("ansel", &c);
     failures.extend(run.failures);
     if let Some(out) = run.output {
-        let back =
-            adapter::encode_ansel(&out).and_then(|b| adapter::read(&b).map(|m| adapter::dump(&m)));
+        // The records only: the header names each output's own encoding.
+        let back = adapter::write_ansel(&model)
+            .and_then(|b| adapter::read(&b).map(|m| adapter::dump_records(&m)));
         match back {
-            Ok(d) if d == adapter::dump(&adapter::read(out.as_bytes()).unwrap()) => {}
+            Ok(d) if d == adapter::dump_records(&adapter::read(out.as_bytes()).unwrap()) => {}
             Ok(_) => failures.push(Failure::new(
                 "ansel/file",
                 "ansel-write",

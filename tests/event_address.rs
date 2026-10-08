@@ -33,7 +33,8 @@ fn test_round_trip_event_and_attribute_address_and_associations() {
 
     let written = GedcomWriter::new().write_to_string(&data1).unwrap();
     for expected in [
-        "2 ADDR 1 Example Road\n3 CITY Sampletown\n2 PHON +00 000 001\n2 EMAIL clinic@example.org\n",
+        // GEDCOM 5.5.1 doubles every `@` of text.
+        "2 ADDR 1 Example Road\n3 CITY Sampletown\n2 PHON +00 000 001\n2 EMAIL clinic@@example.org\n",
         "2 ADDR 2 Example Road\n2 PHON +00 000 002\n2 WWW https://mill.example.org\n",
         "2 ASSO @I2@\n3 RELA Employer\n",
     ] {

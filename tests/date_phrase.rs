@@ -27,7 +27,7 @@ fn test_write_date_phrase_per_version() {
     // GEDCOM 5.5.1 has no PHRASE: the phrase moves into the 5.5.1 date
     // phrase forms, or is left out next to a range.
     let v551 = GedcomWriter::new()
-        .gedcom_version("5.5.1")
+        .gedcom_version(ged_io::GedcomVersion::V5_5_1)
         .write_to_string(&data)
         .unwrap();
     for expected in [
@@ -78,7 +78,7 @@ fn test_write_gedcom_5_date_phrases_as_gedcom_7() {
 
     // GEDCOM 7.0 has neither form: the text becomes a PHRASE.
     let v7 = GedcomWriter::new()
-        .gedcom_version("7.0")
+        .gedcom_version(ged_io::GedcomVersion::V7_0)
         .write_to_string(&data)
         .unwrap();
     for expected in [

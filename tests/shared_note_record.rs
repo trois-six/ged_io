@@ -10,7 +10,7 @@ fn test_round_trip_multi_line_shared_note_record() {
 
     for version in ["5.5.1", "7.0"] {
         let written = GedcomWriter::new()
-            .gedcom_version(version)
+            .gedcom_version(ged_io::GedcomVersion::from_version_str(version))
             .write_to_string(&data1)
             .unwrap();
         // Every line of the file is a GEDCOM line.

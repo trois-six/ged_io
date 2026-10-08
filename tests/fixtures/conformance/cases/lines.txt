@@ -88,14 +88,15 @@
 0 TRLR
 #want 1 NAME John /Doe/
 
-### G7-LOWERCASE-TAG | L | lower-case tag kept as-is
+### G7-LOWERCASE-TAG | L | lower-case extension tag read and kept; written upper case, the only 7.0 extTag form
 0 HEAD
 1 GEDC
 2 VERS 7.0
 0 @I1@ INDI
 1 _x lower
 0 TRLR
-#want 1 _x lower
+#model _x
+#want 1 _X lower
 
 ### G7-BLANK-LINE | L | blank line between lines (L; gedcom4j Issue64)
 0 HEAD

@@ -175,7 +175,13 @@ pub struct VersionRules {
     pub(crate) gedc_form: Option<&'static str>,
     /// Whether `HEAD.CHAR` exists (it must then name the output encoding).
     pub(crate) head_char: bool,
+    /// Whether `HEAD.SOUR` and `HEAD.SUBM` are required.
+    pub(crate) head_sour_subm: bool,
     pub(crate) xref: XrefGrammar,
+    /// The deepest level a structure is written at: one less than the
+    /// deepest level of the version (5.5.1: two digits; 7.x: the 255 levels
+    /// readers nest), so that its `CONT` lines fit.
+    pub(crate) max_level: usize,
 }
 
 /// GEDCOM 5.5.1.
@@ -187,7 +193,9 @@ pub static V551: VersionRules = VersionRules {
     at_escape: AtEscape::AllAtSigns,
     gedc_form: Some("LINEAGE-LINKED"),
     head_char: true,
+    head_sour_subm: true,
     xref: XrefGrammar::V551 { max_len: 22 },
+    max_level: 98,
 };
 
 /// GEDCOM 7.0.
@@ -199,7 +207,9 @@ pub static V70: VersionRules = VersionRules {
     at_escape: AtEscape::LeadingOnly,
     gedc_form: None,
     head_char: false,
+    head_sour_subm: false,
     xref: XrefGrammar::V7,
+    max_level: 254,
 };
 
 /// GEDCOM 7.1, whose line grammar and header rules are those of 7.0.
@@ -218,7 +228,9 @@ const V70_LINES: VersionRules = VersionRules {
     at_escape: AtEscape::LeadingOnly,
     gedc_form: None,
     head_char: false,
+    head_sour_subm: false,
     xref: XrefGrammar::V7,
+    max_level: 254,
 };
 
 impl VersionRules {
@@ -271,6 +283,7 @@ impl VersionRules {
     /// Whether a cross-reference identifier, delimiters included, follows
     /// the grammar of the version.
     #[must_use]
+    #[inline]
     pub fn is_valid_xref(&self, xref: &str) -> bool {
         let Some(id) = xref
             .strip_prefix('@')
@@ -287,9 +300,25 @@ impl VersionRules {
                         .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
             }
             XrefGrammar::V551 { max_len } => {
-                xref.chars().count() <= max_len
-                    && id.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
-                    && !id.chars().any(|c| c == '@' || c.is_control())
+                let bytes = id.as_bytes();
+                let first = bytes
+                    .first()
+                    .is_some_and(|&b| b.is_ascii_alphanumeric() || b == b'_');
+                // One pass over the bytes of an ASCII identifier, as nearly
+                // all are; bytes bound characters, so it needs no count.
+                let mut ascii = true;
+                for &b in bytes {
+                    if b == b'@' || b.is_ascii_control() {
+                        return false;
+                    }
+                    ascii &= b.is_ascii();
+                }
+                first
+                    && if ascii {
+                        xref.len() <= max_len
+                    } else {
+                        xref.chars().count() <= max_len && !id.chars().any(char::is_control)
+                    }
             }
         }
     }
@@ -299,6 +328,7 @@ impl VersionRules {
     /// a letter or `_`, upper case unless it starts with `_`, at most 31
     /// characters (p. 41).
     #[must_use]
+    #[inline]
     pub fn is_valid_tag(&self, tag: &str) -> bool {
         let b = tag.as_bytes();
         let Some(&first) = b.first() else {
@@ -317,10 +347,17 @@ impl VersionRules {
                 }
             }
             XrefGrammar::V551 { .. } => {
+                // One pass: letters, digits and `_`, and whether any letter
+                // is lower case.
+                let (mut ok, mut lower) = (true, false);
+                for c in b {
+                    ok &= c.is_ascii_alphanumeric() || *c == b'_';
+                    lower |= c.is_ascii_lowercase();
+                }
                 b.len() <= MAX_TAG_551
                     && (first == b'_' || first.is_ascii_uppercase())
-                    && b.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'_')
-                    && (first == b'_' || !b.iter().any(u8::is_ascii_lowercase))
+                    && ok
+                    && (first == b'_' || !lower)
                     && (first != b'_' || b.len() > 1)
             }
         }
@@ -332,6 +369,7 @@ impl VersionRules {
     /// character at all, tab included. Line breaks inside text are written
     /// as `CONT` lines, never as characters.
     #[must_use]
+    #[inline]
     pub fn is_banned(&self, c: char) -> bool {
         is_banned(c) || (c == '\t' && self.xref != XrefGrammar::V7)
     }

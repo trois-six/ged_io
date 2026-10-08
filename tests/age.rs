@@ -66,7 +66,7 @@ fn test_write_age_phrase_per_version() {
     // GEDCOM 5.5.1 has no PHRASE: a text-only age is the payload itself. Its
     // bound is written against the number.
     let v551 = GedcomWriter::new()
-        .gedcom_version("5.5.1")
+        .gedcom_version(ged_io::GedcomVersion::V5_5_1)
         .write_to_string(&data)
         .unwrap();
     assert!(!v551.contains("PHRASE"), "{v551}");
@@ -78,7 +78,7 @@ fn test_write_age_phrase_per_version() {
     // keyword as written as the phrase. Every phrase is kept, the
     // attribute's included.
     let v7 = GedcomWriter::new()
-        .gedcom_version("7.0")
+        .gedcom_version(ged_io::GedcomVersion::V7_0)
         .write_to_string(&data)
         .unwrap();
     for expected in [

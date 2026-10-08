@@ -16,8 +16,8 @@ fn test_round_trip_minimal() {
 
     let writer = GedcomWriter::new();
     let written = writer.write_to_string(&data1).unwrap();
-    assert!(written.ends_with("0 TRLR"));
-    assert!(!written.ends_with('\n'));
+    // Every line, the trailer included, ends with its terminator.
+    assert!(written.ends_with("0 TRLR\n"));
 
     let data2 = GedcomBuilder::new().build_from_str(&written).unwrap();
 
@@ -628,9 +628,13 @@ fn test_round_trip_complete_gedcom() {
 
 #[test]
 fn test_round_trip_preserves_total_records() {
+    // With its submitter: a 5.5.1 file without one gets a stub record.
     let original = r#"0 HEAD
 1 GEDC
 2 VERS 5.5
+1 SUBM @U1@
+0 @U1@ SUBM
+1 NAME Sample Submitter
 0 @I1@ INDI
 1 NAME Person One /Test/
 0 @I2@ INDI
@@ -667,7 +671,7 @@ fn test_writer_with_crlf_line_endings() {
     let original = "0 HEAD\n1 GEDC\n2 VERS 5.5\n0 TRLR";
     let data = GedcomBuilder::new().build_from_str(original).unwrap();
 
-    let writer = GedcomWriter::new().line_ending("\r\n");
+    let writer = GedcomWriter::new().line_ending(ged_io::LineEnding::CrLf);
     let written = writer.write_to_string(&data).unwrap();
 
     assert!(
@@ -685,10 +689,10 @@ fn test_writer_custom_gedcom_version() {
     let original = "0 HEAD\n1 GEDC\n2 VERS 5.5\n0 TRLR";
     let _data = GedcomBuilder::new().build_from_str(original).unwrap();
 
-    let writer = GedcomWriter::new().gedcom_version("5.5.1");
+    let writer = GedcomWriter::new().gedcom_version(ged_io::GedcomVersion::V5_5_1);
     let config = writer.config();
 
-    assert_eq!(config.gedcom_version, "5.5.1");
+    assert_eq!(config.version, Some(ged_io::GedcomVersion::V5_5_1));
 }
 
 // =============================================================================

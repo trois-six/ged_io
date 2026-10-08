@@ -33,7 +33,7 @@ fn test_association_role_per_version() {
     assert_eq!(assoc[2].phrase.as_deref(), Some("Unnamed neighbour"));
 
     let v7 = GedcomWriter::new()
-        .gedcom_version("7.0")
+        .gedcom_version(ged_io::GedcomVersion::V7_0)
         .write_to_string(&data)
         .unwrap();
     for expected in [
@@ -48,7 +48,7 @@ fn test_association_role_per_version() {
 
     // 5.5.1 has no ROLE: the role is stated as RELA.
     let v551 = GedcomWriter::new()
-        .gedcom_version("5.5.1")
+        .gedcom_version(ged_io::GedcomVersion::V5_5_1)
         .write_to_string(&data)
         .unwrap();
     assert!(v551.contains("1 ASSO @I2@\n2 RELA GODP\n"), "{v551}");
@@ -61,7 +61,7 @@ fn test_association_relationship_written_as_gedcom_7_role() {
     let original = "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 ASSO @I2@\n2 RELA Godfather\n0 @I2@ INDI\n0 TRLR";
     let data = GedcomBuilder::new().build_from_str(original).unwrap();
     let v7 = GedcomWriter::new()
-        .gedcom_version("7.0")
+        .gedcom_version(ged_io::GedcomVersion::V7_0)
         .write_to_string(&data)
         .unwrap();
     assert!(

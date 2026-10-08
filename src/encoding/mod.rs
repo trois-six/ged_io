@@ -56,6 +56,7 @@ mod reader;
 
 pub use reader::DecodeReader;
 
+pub(crate) use charset::encode_ansel;
 pub(crate) use decoder::Decoder;
 pub(crate) use detect::{mode_for, sniff_input, Mode};
 
