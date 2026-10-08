@@ -102,8 +102,6 @@ case/G5-WRITE-NO-CHAR-MISMATCH	output:char-mismatch	TS18	NONCONFORMANT	-	line 5:
 case/G5-XREF-INVALID	output:pointer-syntax	TS23	NONCONFORMANT	-	line 14: pointer-syntax: @IABCDEFGHIJKLMNOPQRSTUVWXYZ0123@
 case/G5-XREF-INVALID	output:xref-syntax	TS23	NONCONFORMANT	-	line 6: xref-syntax: @#I1@
 case/G5-XREF-WITH-SPACE	parse	TS7	FATAL	-	Parse error at line 10: Unhandled tag ref@
-case/G7-AGE-INVALID	keep	TS14	LOST	-	model lacks `79`
-case/G7-AGE-INVALID	roundtrip	TS14	LOST	-	text 79 (x1)
 case/G7-AGE-OVERFLOW	keep	TS14	LOST	-	missing line `2 AGE 1y 30m 100w 400d`
 case/G7-AGE-OVERFLOW	roundtrip	TS14	DIFF	-	- INDI#0/CHR/AGE = "1y 30m 100w 400d"; + INDI#0/CHR/AGE = ""; + INDI#0/CHR/AGE/PHRASE = "1y 30m 100w 400d"
 case/G7-AT-ONLY-FIRST	keep	TS20	LOST	-	missing line `0 @N1@ SNOTE @@@@@ has four`
@@ -501,7 +499,6 @@ payload/*	output:eol-final	TS32	NONCONFORMANT	-	every output of the family
 payload/*	output:v7-gedc-form	TS17	NONCONFORMANT	-	every output of the family
 payload/551/age/invalid10	output:payload-age	TS34	NONCONFORMANT	-	line 12: payload-age: AGE "1w": not in the age grammar
 payload/551/age/invalid11	output:payload-age	TS34	NONCONFORMANT	-	line 12: payload-age: AGE "about ten": not in the age grammar
-payload/551/age/invalid9	payload	TS14	LOST	-	text 79 (x1)
 payload/551/date/invalid14	output:payload-date	TS34	NONCONFORMANT	-	line 12: payload-date: DATE "1 jan 1900": not in the date grammar
 payload/551/date/invalid15	output:payload-date	TS34	NONCONFORMANT	-	line 12: payload-date: DATE "1900 BCE": not in the date grammar
 payload/551/date/invalid16	output:payload-date	TS34	NONCONFORMANT	-	line 12: payload-date: DATE "BET 1900": not in the date grammar
@@ -513,8 +510,6 @@ payload/551/latitude/invalid3	output:payload-coordinate	TS34	NONCONFORMANT	-	lin
 payload/551/pedigree/invalid4	parse	TS3	FATAL	-	Parse error at line 11: Unrecognized FamilyLink.pedigree code: stepchild
 payload/551/time/invalid2	output:payload-time	TS34	NONCONFORMANT	-	line 13: payload-time: TIME "25:00": not in the time grammar
 payload/551/time/invalid3	output:payload-time	TS34	NONCONFORMANT	-	line 13: payload-time: TIME "10h00": not in the time grammar
-payload/70/age/invalid19	payload	TS14	LOST	-	text 79 (x1)
-payload/70/age/invalid20	payload	TS14	LOST	-	text 1d 1m (x1)
 payload/70/date-exact/invalid2	output:payload-date	TS34	NONCONFORMANT	-	line 7: payload-date: DATE "JAN 2000": not in the date grammar
 payload/70/date-exact/invalid3	output:payload-date	TS34	NONCONFORMANT	-	line 7: payload-date: DATE "2000": not in the date grammar
 payload/70/date-exact/invalid4	output:payload-date	TS34	NONCONFORMANT	-	line 7: payload-date: DATE "ABT 1 JAN 2000": not in the date grammar
@@ -814,7 +809,6 @@ vendored/*	output:head-required	TS33	NONCONFORMANT	-	every output of the family
 vendored/*	output:v7-gedc-form	TS17	NONCONFORMANT	-	every output of the family
 vendored/5/age-invalid	output:payload-age	TS34	NONCONFORMANT	-	line 100: payload-age: AGE "> 0 m": not in the age grammar
 vendored/5/age-invalid	output:payload-unexpected	TS34	NONCONFORMANT	-	line 101: payload-unexpected: EVEN "when > 0 M": this structure takes no payload
-vendored/5/age-invalid	roundtrip	TS14	LOST	-	text 0 (x1); text 11m 30d 99y (x1); text 11m 99y (x1); text 11m 99y 30d (x1); text 11m30d (x1); text 11m30d99y (x1); text 11m99y (x1); text 11m99y30d (x1); t...
 vendored/5/age-valid	output:payload-age	TS34	NONCONFORMANT	-	line 13: payload-age: AGE "child": not in the age grammar
 vendored/5/age-valid	output:payload-unexpected	TS34	NONCONFORMANT	-	line 101: payload-unexpected: EVEN "when 11m": this structure takes no payload
 vendored/5/atsign	keep	TS20	LOST	-	model lacks `doubled@internal no space`
