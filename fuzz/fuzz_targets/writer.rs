@@ -23,7 +23,10 @@ fn check_lines(out: &str, version: GedcomVersion) {
     let mut xrefs = HashSet::new();
     for line in out.split_terminator('\n') {
         assert!(!line.contains('\r'), "CR inside a line: {line:?}");
-        assert!(!line.chars().any(|c| rules.is_banned(c)), "banned: {line:?}");
+        assert!(
+            !line.chars().any(|c| rules.is_banned(c)),
+            "banned: {line:?}"
+        );
         if let Some(max) = rules.max_line_length() {
             assert!(line.len() < max, "too long: {} {line:?}", line.len());
         }
@@ -56,7 +59,10 @@ fn check_lines(out: &str, version: GedcomVersion) {
         if let Some(p) = payload {
             assert!(!p.is_empty(), "trailing delimiter: {line:?}");
             if !rules.doubles_every_at_sign() && p.starts_with('@') && !p.starts_with("@@") {
-                assert!(p.ends_with('@') && !p[1..p.len() - 1].contains('@'), "escape: {line:?}");
+                assert!(
+                    p.ends_with('@') && !p[1..p.len() - 1].contains('@'),
+                    "escape: {line:?}"
+                );
             }
         }
     }
@@ -65,7 +71,9 @@ fn check_lines(out: &str, version: GedcomVersion) {
 
 /// The number of level-0 lines.
 fn records(out: &str) -> usize {
-    out.split_terminator('\n').filter(|l| l.starts_with("0 ")).count()
+    out.split_terminator('\n')
+        .filter(|l| l.starts_with("0 "))
+        .count()
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -73,7 +81,9 @@ fuzz_target!(|data: &[u8]| {
     if let Ok(model) = GedcomBuilder::new().build_from_bytes(data) {
         for version in VERSIONS {
             let writer = GedcomWriter::new().gedcom_version(version);
-            let out = writer.write_to_string(&model).expect("repairs, never fails");
+            let out = writer
+                .write_to_string(&model)
+                .expect("repairs, never fails");
             check_lines(&out, version);
             let back = GedcomBuilder::new()
                 .build_from_str(&out)
@@ -122,8 +132,8 @@ fuzz_target!(|data: &[u8]| {
         let out = String::from_utf8(bytes).expect("UTF-8");
         check_lines(&out, version);
         let written = records(&out) - 2; // HEAD and TRLR
-        // 5.5.1 adds a submitter record when there is none, and the
-        // conformance repair moves notes out of records over 32K.
+                                         // 5.5.1 adds a submitter record when there is none, and the
+                                         // conformance repair moves notes out of records over 32K.
         assert!(
             written == kept || (version.rules().max_line_length().is_some() && written > kept),
             "{written} records written for {kept}"
