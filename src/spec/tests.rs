@@ -398,6 +398,12 @@ fn repair_b_enumeration_case() {
     let (k, out) = repair551("0 @I1@ INDI\n1 FAMC @F1@\n2 PEDI Birth\n2 STAT PROVEN\n0 @F1@ FAM\n");
     assert_eq!(k, [R::EnumCase, R::EnumCase]);
     assert!(out.contains("2 PEDI birth\n2 STAT proven\n"), "{out}");
+    // An open set: a value of its own in another case is spelled as the
+    // set spells it, a value of the user's own is kept.
+    let (k, out) = repair551("0 @I1@ INDI\n1 NAME A /B/\n2 TYPE AKA\n1 NAME C /D/\n2 TYPE Stage\n");
+    assert_eq!(k, [R::EnumCase]);
+    assert!(out.contains("2 TYPE aka\n"), "{out}");
+    assert!(out.contains("2 TYPE Stage\n"), "{out}");
 }
 
 #[test]
