@@ -720,3 +720,30 @@ fn conform_is_idempotent() {
     assert_eq!(conform(&mut records, GedcomVersion::V7_0), []);
     assert_eq!(records, before);
 }
+
+/// Each type's substructures are sorted by tag, which
+/// `Schema::subs_tagged` searches by halves.
+#[test]
+fn substructures_are_sorted_by_tag() {
+    for schema in [
+        &super::tables::V551,
+        &super::tables::V70,
+        &super::tables::V71,
+    ] {
+        for id in 0..schema.structs.len() {
+            let id = super::schema::StructId::try_from(id).unwrap();
+            let subs = schema.subs(id);
+            assert!(
+                subs.windows(2)
+                    .all(|w| schema.tag_id(w[0].id) <= schema.tag_id(w[1].id)),
+                "{} {}",
+                schema.version,
+                schema.name(id)
+            );
+            for sub in subs {
+                let tag = schema.tag_id(sub.id).unwrap();
+                assert!(schema.subs_tagged(id, tag).any(|s| s == sub));
+            }
+        }
+    }
+}

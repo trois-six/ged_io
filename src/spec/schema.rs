@@ -249,11 +249,16 @@ impl Schema {
     }
 
     /// The permitted substructures of `id` tagged `tag` (several in 5.5.1,
-    /// where a pointer form and a text form share a tag).
+    /// where a pointer form and a text form share a tag). The generator
+    /// sorts each type's substructures by tag, and tags are indices into
+    /// the sorted `TAGS`, so they are found by a binary search.
     pub(crate) fn subs_tagged(&self, id: StructId, tag: u8) -> impl Iterator<Item = &SubDef> {
-        self.subs(id)
+        let subs = self.subs(id);
+        let start = subs.partition_point(|s| self.tag_id(s.id) < Some(tag));
+        subs.get(start..)
+            .unwrap_or(&[])
             .iter()
-            .filter(move |s| self.tag_id(s.id) == Some(tag))
+            .take_while(move |s| self.tag_id(s.id) == Some(tag))
     }
 
     /// The enumeration set `index`.
