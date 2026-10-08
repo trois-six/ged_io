@@ -126,7 +126,7 @@
 pub(crate) mod conform;
 mod lines;
 mod payload;
-mod schema;
+pub(crate) mod schema;
 #[rustfmt::skip]
 pub(crate) mod tables;
 mod validate;
@@ -137,6 +137,7 @@ use crate::encoding::decode;
 use crate::tree::{Structure, Tree};
 use crate::GedcomVersion;
 
+pub(crate) use payload::is_simple_date;
 use payload::Family;
 pub(crate) use schema::Schema;
 use sealed::Sealed;

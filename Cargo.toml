@@ -56,6 +56,10 @@ harness = false
 name = "writer"
 harness = false
 
+[[bench]]
+name = "model"
+harness = false
+
 [lib]
 name = "ged_io"
 path = "src/lib.rs"
