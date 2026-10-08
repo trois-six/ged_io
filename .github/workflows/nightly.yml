@@ -28,7 +28,7 @@ jobs:
 
     - name: Seed the corpora with the test fixtures
       run: |
-        for target in entry_points tree writer; do
+        for target in entry_points tree writer spec; do
           mkdir -p fuzz/corpus/$target
           find tests/fixtures -name '*.ged' -size -64k -exec cp {} fuzz/corpus/$target/ \;
         done
@@ -41,6 +41,12 @@ jobs:
 
     - name: Fuzz the writer (conformant lines, output re-parses) for five minutes
       run: cargo fuzz run writer -- -max_total_time=300 -max_len=65536
+
+    - name: Fuzz the validator and the conformance repair for five minutes
+      run: cargo fuzz run spec -- -max_total_time=300 -max_len=65536
+
+    - name: The repair's property over the fuzz corpus
+      run: FUZZ_CORPUS=fuzz/corpus cargo test --test spec_conform -- --ignored every_fuzz_input
 
     - name: Keep the crashing inputs
       if: failure()
@@ -66,6 +72,9 @@ jobs:
 
     - name: Run the opt-in conformance tests
       run: cargo test --all-features --test conformance -- --ignored
+
+    - name: Validate and repair every corpus file (spec)
+      run: cargo test --all-features --test spec_armidale --test spec_conform -- --ignored --skip every_fuzz_input
 
     - name: Performance smoke test
       run: cargo test --release --all-features --test conformance -- --ignored performance

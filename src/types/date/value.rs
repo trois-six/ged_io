@@ -482,6 +482,14 @@ impl DatePeriod {
         ck.finish("DatePeriod", text, period)
     }
 
+    /// Whether [`parse_strict`](Self::parse_strict) accepts `text` in
+    /// `grammar`.
+    pub(crate) fn is_strict(text: &str, grammar: Grammar) -> bool {
+        let mut ck = Checker::verdict(grammar);
+        let _ = DatePeriod::checked(text, &mut ck);
+        ck.passed()
+    }
+
     /// Reads a period, checking it against the checker's grammar.
     fn checked(text: &str, ck: &mut Checker) -> DatePeriod {
         match parse_value(text, ck) {
@@ -553,6 +561,14 @@ impl DateExact {
         let mut ck = Checker::strict(Grammar::from(version));
         let exact = DateExact::checked(text, &mut ck);
         ck.finish("DateExact", text, exact)
+    }
+
+    /// Whether [`parse_strict`](Self::parse_strict) accepts `text` in
+    /// `grammar`.
+    pub(crate) fn is_strict(text: &str, grammar: Grammar) -> bool {
+        let mut ck = Checker::verdict(grammar);
+        let _ = DateExact::checked(text, &mut ck);
+        ck.passed()
     }
 
     /// Reads an exact date, checking it against the checker's grammar.

@@ -421,7 +421,7 @@ fn test_valid_551_identifiers_are_kept_as_they_are() {
     // 5.5.1 identifiers may hold spaces, `!` and `:` (p. 13) and start with
     // `_`: valid ones are neither rewritten nor taken as text.
     let original = "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @I 1@ INDI\n1 FAMS @F:1@\n1 ASSO @_I2!1@\n\
-                    0 @F:1@ FAM\n1 HUSB @I 1@\n0 @_I2@ INDI\n0 TRLR\n";
+                    2 RELA godparent\n0 @F:1@ FAM\n1 HUSB @I 1@\n0 @_I2@ INDI\n0 TRLR\n";
     let mut bytes = Vec::new();
     let report = GedcomWriter::new()
         .write_tree(&mut bytes, &Tree::parse(original))
