@@ -12,8 +12,7 @@ fn bench_parse_memory(c: &mut Criterion) {
     let files = [
         ("simple", "tests/fixtures/simple.ged"),
         ("sample", "tests/fixtures/sample.ged"),
-        // allged.ged intentionally ends with a blank line; writer currently emits a trailing
-        // newline which makes round-trip parsing fail for that fixture.
+        ("maximal551", "tests/fixtures/conformance/maximal551.ged"),
         ("washington", "tests/fixtures/washington.ged"),
     ];
 
@@ -165,8 +164,7 @@ fn bench_round_trip_memory(c: &mut Criterion) {
     let files = [
         ("simple", "tests/fixtures/simple.ged"),
         ("sample", "tests/fixtures/sample.ged"),
-        // allged.ged intentionally ends with a blank line; clearly call out any remaining failures.
-        ("allged", "tests/fixtures/allged.ged"),
+        ("maximal551", "tests/fixtures/conformance/maximal551.ged"),
     ];
 
     for (name, path) in files {

@@ -16,7 +16,6 @@ mod tests {
     #[test]
     fn parses_basic_gedcom() {
         let simple_ged: String = read_relative("./tests/fixtures/simple.ged");
-        // let simple_ged: String = read_relative("./tests/fixtures/allged.ged");
         assert!(!simple_ged.is_empty());
 
         let mut doc = Gedcom::new(simple_ged.chars()).unwrap();

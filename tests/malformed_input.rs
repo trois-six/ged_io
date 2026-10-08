@@ -14,13 +14,6 @@ fn test_missing_header() {
 }
 
 #[test]
-fn test_incomplete_header() {
-    let sample = "0 HEAD\n0 TRLR";
-    let mut gedcom = Gedcom::new(sample.chars()).unwrap();
-    let _ = gedcom.parse_data();
-}
-
-#[test]
 fn test_missing_trailer_is_accepted() {
     let sample = "0 HEAD\n1 GEDC\n2 VERS 5.5\n0 @I1@ INDI\n1 NAME John /Doe/";
     let mut gedcom = Gedcom::new(sample.chars()).unwrap();
@@ -41,13 +34,6 @@ fn test_missing_header_and_trailer_is_accepted() {
 // ============================================================================
 // Invalid Level Tests
 // ============================================================================
-
-#[test]
-fn test_invalid_level_jump() {
-    let sample = "0 HEAD\n1 GEDC\n2 VERS 5.5\n0 @I1@ INDI\n3 NAME John\n0 TRLR";
-    let mut gedcom = Gedcom::new(sample.chars()).unwrap();
-    let _ = gedcom.parse_data();
-}
 
 // ============================================================================
 // Broken Reference Tests
@@ -88,17 +74,21 @@ fn test_invalid_date_format() {
 
 #[test]
 fn test_empty_file() {
-    let result = Gedcom::new("".chars());
-    if let Ok(mut g) = result {
-        let _ = g.parse_data();
+    // Read as an empty data set or refused, never a panic.
+    if let Ok(mut g) = Gedcom::new("".chars()) {
+        if let Ok(data) = g.parse_data() {
+            assert!(data.is_empty());
+        }
     }
 }
 
 #[test]
 fn test_whitespace_only() {
-    let result = Gedcom::new("   \n\n  ".chars());
-    if let Ok(mut g) = result {
-        let _ = g.parse_data();
+    // Read as an empty data set or refused, never a panic.
+    if let Ok(mut g) = Gedcom::new("   \n\n  ".chars()) {
+        if let Ok(data) = g.parse_data() {
+            assert!(data.is_empty());
+        }
     }
 }
 

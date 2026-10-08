@@ -12,8 +12,7 @@ fn bench_tokenize_files(c: &mut Criterion) {
     let files = [
         ("simple", "tests/fixtures/simple.ged"),
         ("sample", "tests/fixtures/sample.ged"),
-        // allged.ged intentionally ends with a blank line; in strict tokenization benchmarks
-        // we want valid/typical inputs only.
+        ("maximal551", "tests/fixtures/conformance/maximal551.ged"),
         ("washington", "tests/fixtures/washington.ged"),
     ];
 
