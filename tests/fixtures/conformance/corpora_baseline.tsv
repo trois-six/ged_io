@@ -21,10 +21,10 @@ gedcom4j/sample/Issue87.ged	OK	5	payload-date
 gedcom4j/sample/RelationshipTest.ged	OK	0	cardinality-min,payload-pointer
 gedcom4j/sample/RelationshipTestExtended.ged	OK	0	cardinality-min,payload-pointer
 gedcom4j/sample/Sopranos.ged	FATAL	0	
-gedcom4j/sample/TGC551.ged	OK	332	cardinality-min,misplaced,payload-age,payload-date,payload-enum,payload-unexpected
-gedcom4j/sample/TGC551LF.ged	OK	332	cardinality-min,misplaced,payload-age,payload-date,payload-enum,payload-unexpected
-gedcom4j/sample/TGC55C.ged	OK	343	cardinality-min,misplaced,payload-age,payload-date,payload-enum,payload-unexpected
-gedcom4j/sample/TGC55CLF.ged	OK	343	cardinality-min,misplaced,payload-age,payload-date,payload-enum,payload-unexpected
+gedcom4j/sample/TGC551.ged	OK	331	cardinality-min,misplaced,payload-age,payload-date,payload-enum,payload-unexpected
+gedcom4j/sample/TGC551LF.ged	OK	331	cardinality-min,misplaced,payload-age,payload-date,payload-enum,payload-unexpected
+gedcom4j/sample/TGC55C.ged	OK	342	cardinality-min,misplaced,payload-age,payload-date,payload-enum,payload-unexpected
+gedcom4j/sample/TGC55CLF.ged	OK	342	cardinality-min,misplaced,payload-age,payload-date,payload-enum,payload-unexpected
 gedcom4j/sample/a31486.ged	OK	0	cardinality-min,payload-date,payload-enum
 gedcom4j/sample/allged.ged	OK	25	cardinality-min,misplaced,payload-enum,payload-unexpected
 gedcom4j/sample/customtagstorture.ged	OK	103	payload-date,payload-enum,pointer-dangling

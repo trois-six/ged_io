@@ -22,7 +22,10 @@
 //! superstructure, cardinalities, payload types (pointer targets, enumeration
 //! values, dates, ages, times, languages, media types, file paths, names,
 //! coordinates, integers, `Y`), and, given the input, a SCHMA declaration for
-//! every documented extension tag the output uses.
+//! every documented extension tag the output uses; in 7.x, a substructure
+//! with a payload or a substructure (§1.2: "A structure must have either a
+//! non-empty payload or at least 1 substructure"; records, which pointers
+//! name, are left to the writer).
 
 use super::spec_tables::{Cal, Pay, Spec, Sub, V551, V70, V71};
 use super::tree::{self, Node, Payload, Version};
@@ -528,7 +531,7 @@ fn check_records(records: &[Node], target: Target, input: Option<&str>, issues: 
         match pick_typed(spec, &cands, &r.payload) {
             Some(sub) => {
                 *root_counts.entry(sub.ty).or_default() += 1;
-                check_node(r, sub.ty, &cx, issues);
+                check_node(r, sub.ty, true, &cx, issues);
             }
             None => issues.push(Issue {
                 rule: "misplaced",
@@ -589,9 +592,16 @@ fn pick_typed<'s>(spec: &Spec, cands: &[&'s Sub], payload: &Payload) -> Option<&
         .copied()
 }
 
-fn check_node(n: &Node, ty: &'static str, cx: &Cx<'_>, issues: &mut Vec<Issue>) {
+fn check_node(n: &Node, ty: &'static str, record: bool, cx: &Cx<'_>, issues: &mut Vec<Issue>) {
     let spec = cx.spec;
     check_payload(n, ty, payload_of(spec, ty), cx, issues);
+    if cx.target.is_v7() && !record && n.payload.as_str().is_empty() && n.children.is_empty() {
+        issues.push(Issue {
+            rule: "empty",
+            line: n.line,
+            detail: format!("{} has no payload and no substructure", n.tag),
+        });
+    }
     let allowed: Vec<&Sub> = spec.subs.iter().filter(|s| s.sup == ty).collect();
     let mut counts: HashMap<&str, usize> = HashMap::new();
     for c in &n.children {
@@ -603,7 +613,7 @@ fn check_node(n: &Node, ty: &'static str, cx: &Cx<'_>, issues: &mut Vec<Issue>) 
             Some(sub) => {
                 // Alternatives of one tag share the cardinality budget.
                 *counts.entry(sub.tag).or_default() += 1;
-                check_node(c, sub.ty, cx, issues);
+                check_node(c, sub.ty, false, cx, issues);
             }
             // HEAD.CHAR and GEDC.FORM in 7.x have rules of their own.
             None if cx.target.is_v7()

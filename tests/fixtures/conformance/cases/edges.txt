@@ -75,8 +75,10 @@
 0 @I2@ INDI
 1 SEX X
 0 TRLR
-#model "m"
-#model "X"
+# Kept, as the writer's repairs give it: 5.5.1 controlled values ignore case
+# (`SEX M`), and a value outside the set is kept as an extension (`_SEX X`).
+#want 1 SEX m
+#want 1 SEX X
 
 ### G5-XREF-INVALID | L | xrefs not valid in 5.5.1 (leading #, 30 characters): read, written valid
 0 HEAD

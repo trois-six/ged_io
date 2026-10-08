@@ -40,12 +40,12 @@ id	check	cause	current	next	note
 # TS32 the last line is written without a terminator
 # TS33 the written header is not synthesised for the target (5.5.1 SOUR/SUBM, GEDC.VERS, FORM)
 # TS34 values and structures the target does not allow are written verbatim (no conformance repair)
-# TS35 the conformance repair (spec::conform, run by the next pipeline on every write) rewrites what the case expects verbatim:
-#      a value outside its grammar or set, a misplaced, empty or dangling structure, kept as a phrase or an extension
+# TS35 a conformance case's input that the specification does not permit (a 7.0 day past its month's end, a value outside a
+#      closed set, an extension tag documented as a record type): the conformance repair (spec::conform, run by the next
+#      pipeline on every write) rewrites it, while the case expects it verbatim. Leniency cases accept the repaired forms
+#      (tests/conformance/support/semantic.rs, `lost`), so their invalid input has no such row.
 ansel/file	roundtrip	TS30	DIFF	-	- INDI#0/NOTE[37] = "mark E0: Ả B\u{309} C\u{309} D\u{309} Ẻ F\u{309} G\u{309} H\u{309} Ỉ J\u{309} K\u{309} L\u{309} M\u{309} N\u{309} Ỏ P\u{309} Q\u{309} R\...
-case/G5-AMBIG-NUMERIC-DATE	keep	TS35	-	LOST	missing line `2 DATE 7/11/1959`; missing line `2 DATE 25/3/1934`
 case/G5-AMBIG-NUMERIC-DATE	output:payload-date	TS34	NONCONFORMANT	-	line 10: payload-date: DATE "25/3/1934": not in the date grammar
-case/G5-AMBIG-NUMERIC-DATE	roundtrip	TS35	-	LOST	text 25/3/1934 (x1); text 7/11/1959 (x1)
 case/G5-CONTACTS	keep	TS13	LOST	-	missing line `3 PHON 555-0100`; missing line `3 EMAIL corp@@example.com`
 case/G5-CONTACTS-ON-INDI	output:misplaced	TS34	NONCONFORMANT	-	line 7: misplaced: ADDR under INDI
 case/G5-CUSTOM-AFTER-CONT	keep	TS2	LOST	-	parses now; the extension under a NOTE has no place in the model: missing line `2 _H custom after cont`
@@ -60,7 +60,7 @@ case/G5-EVENT-DESCRIPTION	keep	TS16	LOST	-	model lacks `Born at home during a st
 case/G5-EVENT-DESCRIPTION	output:payload-y	TS34	NONCONFORMANT	-	line 7: payload-y: BIRT "Born at home during a storm": only Y or nothing
 case/G5-FAMC-DUP	roundtrip	TS12	LOST	-	tag FAMC (x1)
 case/G5-FORM-NOT-LINEAGE	parse	TS8	FATAL	-	Parse error at line 6: Unrecognized GEDCOM form. Expected LINEAGE-LINKED, found NOT LINEAGE-LINKED
-case/G5-LDS-OLD-STAT	keep	TS13	LOST	LOST	missing line `2 STAT Cleared`
+case/G5-LDS-OLD-STAT	keep	TS13	LOST	-	missing line `2 STAT Cleared`
 case/G5-LDS-OLD-STAT	output:misplaced	TS34	NONCONFORMANT	-	line 9: misplaced: NOTE under PLAC
 case/G5-LDS-OLD-STAT	roundtrip	TS13	LOST	-	tag STAT (x1); text Cleared (x1)
 case/G5-LINE-BREAK-NO-CONT	parse	TS5	FATAL	-	Parse error at line 7: Expected digit for level number
@@ -68,7 +68,6 @@ case/G5-LONG-LINE	keep	TS21	LOST	LOST	missing line `2 CONC AAAAAAAAAAAAAAAAAAAAA
 case/G5-MAP	keep	TS13	LOST	-	missing line `2 ROMN Taro /Yamada/`
 case/G5-MAP	roundtrip	TS13	DIFF	-	- INDI#0/NAME/FONE = "Taro /Yamada/"; - INDI#0/NAME/FONE/TYPE = "kana"; - INDI#0/NAME/ROMN = "Taro /Yamada/"; - INDI#0/NAME/ROMN/TYPE = "romaji"; + INDI#0/NA...
 case/G5-NETWORK-PTR	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Example"
-case/G5-NOTE-PLACES	keep	TS35	-	LOST	missing line `3 NOTE Location note`
 case/G5-NOTE-PLACES	output:misplaced	TS34	NONCONFORMANT	-	line 15: misplaced: NOTE under ADDR
 case/G5-NOTE-RECORD-SUBS	keep	TS13	LOST	-	missing line `2 DATE 1 JAN 2000`
 case/G5-NOTE-RECORD-SUBS	roundtrip	TS13	DIFF	-	- NOTE#0/CHAN = ""; - NOTE#0/CHAN/DATE = "1 JAN 2000"
@@ -78,29 +77,24 @@ case/G5-OBJE-55-STYLE	output:payload-enum	TS34	NONCONFORMANT	-	line 19: payload-
 case/G5-OBJE-FILE-URL-SPACE	roundtrip	TS12	DIFF	-	- OBJE#0/FILE = " http://example.com/a.png"; - OBJE#0/FILE/FORM = "gif"; - OBJE#0/FILE[1] = "C:\\Users\\Example\\b.jpg"; - OBJE#0/FILE[1]/FORM = "jpg"; + OBJ...
 case/G5-OBJE-TWO-FILES	keep	TS12	LOST	-	missing line `1 FILE one.jpg`
 case/G5-OBJE-TWO-FILES	roundtrip	TS12	DIFF	-	- OBJE#0/FILE = "one.jpg"; - OBJE#0/FILE/TITL = "First"; - OBJE#0/FILE[1] = "two.jpg"; - OBJE#0/FILE[1]/FORM = "jpg"; - OBJE#0/FILE[1]/FORM/TYPE = "photo"; -...
-case/G5-PEDI-NONSTD	keep	TS35	-	LOST	missing line `2 PEDI stepchild`
 case/G5-PEDI-NONSTD	parse	TS3	FATAL	-	Parse error at line 9: Unrecognized FamilyLink.pedigree code: stepchild
 case/G5-PLACE-HIERARCHY	keep	TS13	LOST	-	missing line `2 FORM Town, Area code, County, Region, Country, Subdivision`; model lacks `Second type`
 case/G5-PLACE-HIERARCHY	roundtrip	TS13	LOST	-	tag TYPE (x1); text Acquisition (x1)
 case/G5-RECORD-32K	output:record-size	TS27	NONCONFORMANT	NONCONFORMANT	line 10: record-size: 39674 bytes
 case/G5-RESI-ADDR-PLAC	keep	TS13	LOST	-	missing line `2 ADDR the address`
 case/G5-RESI-ADDR-PLAC	roundtrip	TS13	LOST	-	tag ADDR (x1); tag NOTE (x1); text address note (x1); text the address (x1)
-case/G5-SEX-LOWER	keep	TS35	-	LOST	model lacks `"m"`
 case/G5-SEX-LOWER	parse	TS3	FATAL	-	Parse error at line 7: Unknown gender value m
-case/G5-SEX-LOWER	roundtrip	TS35	-	LOST	text m (x1)
 case/G5-SOUR-TEXT-CITATION	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Example"
 case/G5-SUBN	keep	TS13	LOST	-	missing line `1 ORDI yes`
 case/G5-SUBN	roundtrip	TS13	DIFF	-	- HEAD#0/SUBN = "@SN@"; - SUBN@SN@ = ""; - SUBN@SN@/ANCE = "4"; - SUBN@SN@/DESC = "4"; - SUBN@SN@/FAMF = "Family file"; - SUBN@SN@/ORDI = "yes"; - SUBN@SN@/R...
 case/G5-XREF-WITH-SPACE	parse	TS7	FATAL	-	Parse error at line 10: Unhandled tag ref@
 case/G7-CONT-AFTER-SUB	roundtrip	TS16	LOST	-	tag LANG (x1); text b (x1); text en (x1)
-case/G7-CONT-UNDER-PTR	keep	TS16	LOST	-	missing line `1 FAMC @F1@`
 case/G7-CONT-UNDER-PTR	output:payload-pointer	TS16	NONCONFORMANT	-	line 6: payload-pointer: FAMC "@F1@\nstray text": text where a pointer is required
 case/G7-CONT-UNDER-PTR	roundtrip	TS16	-	LOST	text @F1@ (x1)
 case/G7-CONT-WRONG-LEVEL	keep	TS16	LOST	-	missing line `2 CONT b`; model lacks `a\nb`
 case/G7-COORD-INVALID	keep	TS14	LOST	-	model lacks `91.5N`; model lacks `W200`
 case/G7-COORD-INVALID	output:payload-coordinate	TS34	NONCONFORMANT	-	line 10: payload-coordinate: LONG "W200": not a coordinate
 case/G7-CORP-CONTACTS	keep	TS13	LOST	-	missing line `3 PHON +1 555 0100`; missing line `3 EMAIL a@example.com`; missing line `3 WWW https://example.com`
-case/G7-DANGLING	keep	TS35	-	LOST	missing line `1 FAMS @F9@`
 case/G7-DANGLING	output:pointer-dangling	TS34	NONCONFORMANT	-	line 6: pointer-dangling: @F9@
 case/G7-DATE-INVALID	output:payload-date	TS34	NONCONFORMANT	-	line 9: payload-date: DATE "BET 2000": not in the date grammar
 case/G7-ENUM-EXT	parse	TS3	FATAL	-	Parse error at line 5: Unknown gender value _EXTVAL
@@ -118,6 +112,7 @@ case/G7-HEAD-PLAC-FORM	keep	TS13	LOST	-	missing line `2 FORM City, County, Count
 case/G7-HEAD-PLAC-FORM	roundtrip	TS13	DIFF	-	- HEAD#0/PLAC = ""; - HEAD#0/PLAC/FORM = "City, County, Country"
 case/G7-LANG-TAGS	roundtrip	TS12	DIFF	-	- SUBM#0/LANG = "en"; - SUBM#0/LANG[1] = "ja"; + SUBM#0/LANG = "ja"
 case/G7-LDS-STAT	keep	TS13	LOST	-	missing line `2 STAT EXCLUDED`; missing line `2 STAT PRE_1970`
+case/G7-LDS-STAT	output:empty	TS13	NONCONFORMANT	-	line 5: empty: INIL has no payload and no substructure
 case/G7-LDS-STAT	roundtrip	TS13	DIFF	-	- INDI#0/BAPL/STAT = "PRE_1970"; - INDI#0/BAPL/STAT/DATE = "27 MAR 2022"; - INDI#0/INIL/STAT = "EXCLUDED"; - INDI#0/INIL/STAT/DATE = "27 MAR 2022"
 case/G7-NAME-INVALID	output:payload-name	TS34	NONCONFORMANT	-	line 6: payload-name: NAME "a/b/c/d": slashes must come in one pair
 case/G7-NAME-NO-INVENTED-PIECES	lacks	TS24	PRESENT	-	output has `SURN`
@@ -137,6 +132,7 @@ case/G7-PHRASE-PTRS	keep	TS13	LOST	-	missing line `2 PHRASE Unknown father`; mis
 case/G7-PHRASE-PTRS	roundtrip	TS13	DIFF	-	- FAM#0/CHIL/PHRASE = "Stillborn child"; - FAM#0/HUSB/PHRASE = "Unknown father"
 case/G7-PTR-WRONG-TYPE	output:pointer-target	TS34	NONCONFORMANT	-	line 6: pointer-target: SUBM "@I2@": points to record-INDI, not record-SUBM
 case/G7-REMARRIAGE	roundtrip	TS24	DIFF	-	+ INDI@I1@/NAME/SURN = "Example"; + INDI@I2@/NAME/SURN = "Sample"
+case/G7-SCHMA-MALFORMED	output:empty	TS13	NONCONFORMANT	-	line 4: empty: SCHMA has no payload and no substructure
 case/G7-SCHMA-MALFORMED	output:misplaced	TS34	NONCONFORMANT	-	line 6: misplaced: TAG under HEAD
 case/G7-SNOTE-CHAN	keep	TS13	LOST	-	missing line `2 DATE 25 MAY 2021`; missing line `1 CREA`
 case/G7-SNOTE-CHAN	roundtrip	TS13	DIFF	-	- SNOTE#0/CHAN = ""; - SNOTE#0/CHAN/DATE = "25 MAY 2021"; - SNOTE#0/CREA = ""; - SNOTE#0/CREA/DATE = "1 JAN 2020"
@@ -199,11 +195,13 @@ corpus/familysearch/gedcom70/remarriage1.ged	roundtrip	TS24	DIFF	-	+ INDI@I1@/NA
 corpus/familysearch/gedcom70/remarriage2.ged	roundtrip	TS24	DIFF	-	+ INDI@I1@/NAME/SURN = "Public"; + INDI@I2@/NAME/SURN = "Doe"; + INDI@I3@/NAME/SURN = "Roe"
 corpus/familysearch/gedcom70/same-sex-marriage.ged	roundtrip	TS24	DIFF	-	+ INDI@I1@/NAME/SURN = "Doe"; + INDI@I2@/NAME/SURN = "Roe"
 corpus/familysearch/gedcom70/voidptr.ged	roundtrip	TS13	DIFF	-	- INDI@I1@/FAMC = "@VOID@"; - INDI@I1@/FAMC/PEDI = "ADOPTED"; + INDI@I1@/NAME/SURN = "Smith"; + INDI@I2@/NAME/SURN = "Doe"
+corpus/familysearch/gedcom70/warnings70.ged	output:empty	TS13	NONCONFORMANT	-	line 32: empty: INIL has no payload and no substructure
 corpus/familysearch/gedcom70/warnings70.ged	roundtrip	TS13	DIFF	-	- FAM#0/SLGS[1]/STAT = "EXCLUDED"; - FAM#0/SLGS[1]/STAT/DATE = "27 MAR 2022"; - FAM#0/SLGS[2]/STAT = "PRE_1970"; - FAM#0/SLGS[2
 corpus/familysearch/gedcom71/maximal71.gdz	parse	TS4	FATAL	-	GEDCOM error: Parse error at line 172: First individual of family already exists.
 corpus/familysearch/gedcom71/maximal71.ged	parse	TS4	FATAL	-	Parse error at line 172: First individual of family already exists.
 corpus/familysearch/gedcom71/maximal71.ged	roundtrip	TS35	-	DIFF	- HEAD#0/NOTE[7]/KIND[7]/KIND = "Another"; - SNOTE@N1@/KIND[6]/KIND = "Other"; - SNOTE@N1@/KIND[7]/KIND = "Another"; + HEAD#0/NOTE[7]/KIND[7]/_KIND = "Another"; + SNOTE@N1@/KIND[6]/_KIND = "Other"; + SNOTE@N1@/KIND[7]/_KIND = "Another"
 corpus/familysearch/gedcom71/notes71.ged	roundtrip	TS13	DIFF	-	- SNOTE@3@/CHAN = ""; - SNOTE@3@/CHAN/DATE = "25 MAY 2021"; - SNOTE@4@/CHAN = ""; - SNOTE@4@/CHAN/DATE = "25 MAY 2021"; - SUBM#0/N
+corpus/familysearch/gedcom71/warnings71.ged	output:empty	TS13	NONCONFORMANT	-	line 32: empty: INIL has no payload and no substructure
 corpus/familysearch/gedcom71/warnings71.ged	roundtrip	TS13	DIFF	-	- FAM#0/SLGS[1]/STAT = "EXCLUDED"; - FAM#0/SLGS[1]/STAT/DATE = "27 MAR 2022"; - FAM#0/SLGS[2]/STAT = "PRE_1970"; - FAM#0/SLGS[2
 encoding/ansel-cr	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Exemple"
 encoding/ansel-lf	roundtrip	TS30	DIFF	-	- INDI#0/NAME = "André /Exemple/"; + INDI#0/NAME = "Andre\u{301} /Exemple/"; + INDI#0/NAME/SURN = "Exemple"
@@ -391,6 +389,7 @@ feature/streaming/extensions70	parse	TS3	-	FATAL	Parse error at line 9: Unrecogn
 feature/write-551/test-files-7-date-all	output:record-size	TS27	NONCONFORMANT	NONCONFORMANT	line 4876: record-size: 128973 bytes
 feature/write-551/test-files-7-obje-1	output:payload-enum	TS25	NONCONFORMANT	-	line 10: payload-enum: FORM "audio/wav": not in MULTIMEDIA_FORMAT
 feature/write-70/maximal551	output:cardinality-min	TS25	NONCONFORMANT	-	line 262: cardinality-min: TYPE under FACT: missing
+feature/write-70/maximal551	output:empty	TS13	NONCONFORMANT	-	line 284: empty: RESI has no payload and no substructure
 feature/write-70/maximal551	output:misplaced	TS25	NONCONFORMANT	-	line 210: misplaced: TEXT under SOUR
 feature/write-70/maximal551	output:payload-enum	TS25	NONCONFORMANT	-	line 179: payload-enum: STAT "PRE-1970": not in enumset-ord-STAT
 feature/write-70/maximal551	output:payload-file-path	TS25	NONCONFORMANT	-	line 651: payload-file-path: FILE "Value FILE A": not a URI reference
@@ -399,6 +398,10 @@ feature/write-70/maximal551	output:payload-pointer	TS25	NONCONFORMANT	-	line 208
 fixture/extensions70	keep	TS35	-	LOST	missing line `1 _CREATOR @U1@`
 fixture/extensions70	parse	TS3	FATAL	-	Parse error at line 21: Unrecognized FamilyLink.pedigree code: _ENUMVAL
 fixture/extensions70	roundtrip	TS35	-	DIFF	- INDI@I1@/<https://gedcom.io/terms/v7/record-SUBM> = "@U1@"; - SUBM@U1@ = ""; - SUBM@U1@/NAME = "Example Submitter"; + INDI@I1@/<https://gedcom.io/terms/v7/record-SUBM> = ""; + INDI@I1@/<https://gedcom.io/terms/v7/record-SUBM>/NAME = "Unknown"; + INDI@I1@/<https://gedcom.io/terms/v7/record-SUBM>/NO
+fixture/full551	output:payload-date	TS34	NONCONFORMANT	-	line 118: payload-date: DATE "@#DJULIAN@ 15 APR 1699/00": not in the date grammar
+fixture/full551	output:payload-unexpected	TS34	NONCONFORMANT	-	line 249: payload-unexpected: DIV "Y": this structure takes no payload
+fixture/full551	roundtrip	TS13	LOST	-	tag CHAN (x2); tag DATE (x2); tag FILE (x1); tag FONE (x1); tag FORM (x1); tag GIVN (x2); tag LANG (x1); tag MEDI (x1); tag NOTE (x2); tag ORDI (x1); tag PAGE (x1); tag REFN (x5); tag RIN (x1); tag ROMN (x1); tag SOUR (x1); tag TIME (x1); tag TITL (x1); tag TYPE (x5); text 100 (x1); text 10:00:00 (x1); text 3 MAR 2002 (x1); text 8 AUG 2007 (x1); text Alfa (x1); text Alfa /Eksampl/ (x1); text Alpha (x1); text Alpha /Example/ (x1); text BIRTH (x1); text Change note (x1); text DNS/CAN (x1); text Eksampl (x1); text English (x1); text FREF-1 (x1); text First file (x1); text First type (x1); text Indi change note (x1); text MREF-1 (x1); text Media type (x1); text PHOTO (x1); text REF-1 (x1); text ROMAJI (x1); text RREF-1 (x1); text SREF-1 (x1); text USER DEFINED PHONETIC (x1); text first (x1); text jpg (x1); text photo (x1); text photo1.jpg (x1); text yes (x1)
+fixture/full70	parse	TS3	FATAL	-	Parse error at line 204: Unrecognized FamilyLink.pedigree code: OTHER
 fixture/maximal551	roundtrip	TS13	DIFF	-	- FAM#21/OBJE/FILE = "Value FILE A"; - FAM#21/OBJE/FILE[1] = "Value FILE A"; - FAM#21/OBJE/FILE[1]/FORM = "bmp"; - FAM#21/OBJE/FILE[2] = "Value FILE B"; - FA...
 matrix/utf16be-cr	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Пример"
 matrix/utf16be-crlf	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Пример"
@@ -415,11 +418,8 @@ matrix/utf8-lf	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Пример"
 payload/551/age/invalid11	output:payload-age	TS34	NONCONFORMANT	-	line 12: payload-age: AGE "about ten": not in the age grammar
 payload/551/date/invalid14	output:payload-date	TS34	NONCONFORMANT	NONCONFORMANT	line 12: payload-date: DATE "1 jan 1900": not in the date grammar
 payload/551/date/invalid16	output:payload-date	TS34	NONCONFORMANT	-	line 12: payload-date: DATE "BET 1900": not in the date grammar
-payload/551/date/invalid16	payload	TS35	-	LOST	text BET 1900 (x1)
 payload/551/date/invalid17	output:payload-date	TS34	NONCONFORMANT	-	line 12: payload-date: DATE "1699/2000": not in the date grammar
-payload/551/date/invalid17	payload	TS35	-	LOST	text 1699/2000 (x1)
 payload/551/date/invalid19	output:payload-date	TS34	NONCONFORMANT	-	line 12: payload-date: DATE "25/3/1934": not in the date grammar
-payload/551/date/invalid19	payload	TS35	-	LOST	text 25/3/1934 (x1)
 payload/551/latitude/invalid2	output:payload-coordinate	TS34	NONCONFORMANT	-	line 14: payload-coordinate: LATI "18.15": not a coordinate
 payload/551/latitude/invalid3	output:payload-coordinate	TS34	NONCONFORMANT	-	line 14: payload-coordinate: LATI "N 18": not a coordinate
 payload/551/pedigree/invalid4	parse	TS3	FATAL	-	Parse error at line 11: Unrecognized FamilyLink.pedigree code: stepchild
@@ -437,7 +437,6 @@ payload/70/date/invalid21	output:payload-date	TS34	NONCONFORMANT	-	line 7: paylo
 payload/70/date/invalid23	output:payload-date	TS34	NONCONFORMANT	-	line 7: payload-date: DATE "ABT ABT 2000": not in the date grammar
 payload/70/enum/invalid4	parse	TS3	FATAL	-	Parse error at line 5: Unknown gender value male
 payload/70/enum/invalid5	parse	TS3	FATAL	-	Parse error at line 5: Unknown gender value m
-payload/70/enum/invalid5	payload	TS35	-	LOST	text m (x1)
 payload/70/file-path/invalid4	output:payload-file-path	TS34	NONCONFORMANT	-	line 6: payload-file-path: FILE "http://www.example.com/path???/file name": not a URI reference
 payload/70/file-path/invalid5	output:payload-file-path	TS34	NONCONFORMANT	-	line 6: payload-file-path: FILE "c:\\directory\\filename": not a URI reference
 payload/70/file-path/invalid6	output:payload-file-path	TS34	NONCONFORMANT	-	line 6: payload-file-path: FILE "http:\\\\host/path/file": not a URI reference
@@ -467,7 +466,6 @@ payload/70/name/invalid3	output:payload-name	TS34	NONCONFORMANT	-	line 6: payloa
 payload/70/name/invalid4	output:payload-name	TS34	NONCONFORMANT	-	line 6: payload-name: NAME "a/b/c/d": slashes must come in one pair
 payload/70/time/invalid4	output:payload-time	TS34	NONCONFORMANT	-	line 8: payload-time: TIME "24:00:00": not in the time grammar
 payload/70/time/invalid6	output:payload-time	TS34	NONCONFORMANT	-	line 8: payload-time: TIME "2:60": not in the time grammar
-payload/70/time/invalid6	payload	TS35	-	LOST	text 02:60 (x1)
 payload/70/time/invalid7	output:payload-time	TS34	NONCONFORMANT	-	line 8: payload-time: TIME "2:50 PM": not in the time grammar
 payload/70/uri/invalid1	payload	TS13	LOST	-	tag TYPE (x1); text not a uri (x1)
 payload/70/uri/valid0	payload	TS13	LOST	-	INDI@I1@/EXID/TYPE = "https://example.com/id" not written
@@ -542,6 +540,7 @@ place70/FAM-NCHI/CAUS	place	TS13	LOST	-	FAM@P0@/NCHI/CAUS = "Value CAUS A" not w
 place70/FAM-NCHI/DATE	place	TS13	LOST	-	FAM@P0@/NCHI/DATE = "1 JAN 1900" not written
 place70/FAM-NCHI/EMAIL	place	TS13	LOST	-	FAM@P0@/NCHI/EMAIL = "Value EMAIL A"; FAM@P0@/NCHI/EMAIL = "Value EMAIL B" not written
 place70/FAM-NCHI/FAX	place	TS13	LOST	-	FAM@P0@/NCHI/FAX = "Value FAX A"; FAM@P0@/NCHI/FAX = "Value FAX B" not written
+place70/FAM-NCHI/HUSB	output:empty	TS13	NONCONFORMANT	-	line 11: empty: HUSB has no payload and no substructure
 place70/FAM-NCHI/HUSB	output:payload-pointer	TS13	NONCONFORMANT	-	line 12: payload-pointer: HUSB "": text where a pointer is required
 place70/FAM-NCHI/HUSB	place	TS13	LOST	-	FAM@P0@/NCHI/HUSB = "" not written
 place70/FAM-NCHI/NOTE	place	TS13	MOVED	-	to FAM@P0@/NOTE
@@ -557,6 +556,7 @@ place70/FAM-NCHI/SOUR	output:misplaced	TS13	NONCONFORMANT	-	line 14: misplaced: 
 place70/FAM-NCHI/SOUR	place	TS13	MOVED	-	to FAM@P0@/SOUR, FAM@P0@/SOUR/SOUR
 place70/FAM-NCHI/TYPE	place	TS13	LOST	-	FAM@P0@/NCHI/TYPE = "Value TYPE A" not written
 place70/FAM-NCHI/UID	place	TS13	MOVED	-	to FAM@P0@/UID
+place70/FAM-NCHI/WIFE	output:empty	TS13	NONCONFORMANT	-	line 11: empty: WIFE has no payload and no substructure
 place70/FAM-NCHI/WIFE	output:payload-pointer	TS13	NONCONFORMANT	-	line 12: payload-pointer: WIFE "": text where a pointer is required
 place70/FAM-NCHI/WIFE	place	TS13	LOST	-	FAM@P0@/NCHI/WIFE = "" not written
 place70/FAM-NCHI/WWW	place	TS13	LOST	-	FAM@P0@/NCHI/WWW = "Value WWW A"; FAM@P0@/NCHI/WWW = "Value WWW B" not written
@@ -569,7 +569,6 @@ place70/FILE/FILE-TRAN	place	TS13	LOST	-	OBJE@P0@/FILE/TRAN = "media/a.jpg"; OBJ
 place70/FORM/MEDI	place	TS13	LOST	-	OBJE@P0@/FILE/FORM/MEDI = "AUDIO" not written
 place70/HEAD-PLAC/HEAD-PLAC-FORM	place	TS13	LOST	-	HEAD/PLAC/FORM = "Alpha, Beta" not written
 place70/HEAD/HEAD-PLAC	place	TS13	LOST	-	HEAD/PLAC = "" not written
-place70/HEAD/SCHMA	place	TS35	-	LOST	HEAD/SCHMA = "" not written
 place70/INDI-FAMC/FAMC-STAT	output:payload-enum	TS19	NONCONFORMANT	-	line 11: payload-enum: STAT "challenged": not in enumset-FAMC-STAT
 place70/INDI-FAMC/FAMC-STAT	place	TS19	CHANGED	-	now "challenged"
 place70/INDI-FAMC/PEDI	output:payload-enum	TS19	NONCONFORMANT	-	line 11: payload-enum: PEDI "adopted": not in enumset-PEDI
@@ -588,26 +587,19 @@ place70/NOTE/LANG	place	TS13	LOST	-	FAM@P0@/NOTE/LANG = "en" not written
 place70/NOTE/MIME	place	TS13	LOST	-	FAM@P0@/NOTE/MIME = "image/jpeg" not written
 place70/NOTE/NOTE-TRAN	place	TS13	LOST	-	FAM@P0@/NOTE/TRAN = "Value TRAN A"; FAM@P0@/NOTE/TRAN = "Value TRAN B" not written
 place70/NOTE/SOUR	place	TS13	LOST	-	FAM@P0@/NOTE/SOUR = "@S1@"; FAM@P0@/NOTE/SOUR = "@S2@" not written
-place70/OBJE/CROP	place	TS35	-	LOST	FAM@P0@/OBJE/CROP = "" not written
 place70/OBJE/TITL	place	TS13	LOST	-	FAM@P0@/OBJE/TITL = "Value TITL A" not written
 place70/PEDI/PHRASE	output:payload-enum	TS19	NONCONFORMANT	-	line 11: payload-enum: PEDI "adopted": not in enumset-PEDI
 place70/PEDI/PHRASE	place	TS13	LOST	-	INDI@P0@/FAMC/PEDI/PHRASE = "Value PHRASE A" not written
 place70/SOUR-EVEN/PHRASE	place	TS13	LOST	-	FAM@P0@/SOUR/EVEN/PHRASE = "Value PHRASE A" not written
-place70/SOUR/SOUR-DATA	place	TS35	-	LOST	FAM@P0@/SOUR/DATA = "" not written
 place70/TEXT/LANG	output:misplaced	TS13	NONCONFORMANT	-	line 15: misplaced: LANG under SOUR
 place70/TEXT/LANG	place	TS13	MOVED	-	to SOUR@P0@/LANG
 place70/TEXT/MIME	output:misplaced	TS13	NONCONFORMANT	-	line 15: misplaced: MIME under SOUR
 place70/TEXT/MIME	place	TS13	MOVED	-	to SOUR@P0@/MIME
 place70/record-FAM/FAM-NCHI	place	TS12	CARD	-	1/2 kept
 place70/record-FAM/REFN	place	TS12	CARD	-	1/2 kept
-place70/record-FAM/SLGS	place	TS35	-	LOST	FAM@P0@/SLGS = ""; FAM@P0@/SLGS = "" not written
 place70/record-FAM/UID	place	TS12	CARD	-	1/2 kept
 place70/record-INDI/ANCI	place	TS12	CARD	-	1/2 kept
-place70/record-INDI/BAPL	place	TS35	-	LOST	INDI@P0@/BAPL = ""; INDI@P0@/BAPL = "" not written
-place70/record-INDI/CONL	place	TS35	-	LOST	INDI@P0@/CONL = ""; INDI@P0@/CONL = "" not written
 place70/record-INDI/DESI	place	TS12	CARD	-	1/2 kept
-place70/record-INDI/ENDL	place	TS35	-	LOST	INDI@P0@/ENDL = ""; INDI@P0@/ENDL = "" not written
-place70/record-INDI/INIL	place	TS35	-	LOST	INDI@P0@/INIL = ""; INDI@P0@/INIL = "" not written
 place70/record-INDI/REFN	place	TS12	CARD	-	1/2 kept
 place70/record-INDI/UID	place	TS12	CARD	-	1/2 kept
 place70/record-OBJE/FILE	place	TS12	CARD	-	1/2 kept
@@ -617,7 +609,6 @@ place70/record-REPO/REFN	place	TS12	CARD	-	1/2 kept
 place70/record-REPO/UID	place	TS12	CARD	-	1/2 kept
 place70/record-SNOTE/CHAN	place	TS13	LOST	-	SNOTE@P0@/CHAN = "" not written
 place70/record-SNOTE/CREA	place	TS13	LOST	-	SNOTE@P0@/CREA = "" not written
-place70/record-SOUR/DATA	place	TS13	LOST	LOST	SOUR@P0@/DATA = "" not written
 place70/record-SOUR/REFN	place	TS12	CARD	-	1/2 kept
 place70/record-SOUR/UID	place	TS12	CARD	-	1/2 kept
 place70/record-SUBM/REFN	place	TS12	CARD	-	1/2 kept
@@ -640,6 +631,7 @@ place71/FAM-NCHI/CAUS	place	TS13	LOST	-	FAM@P0@/NCHI/CAUS = "Value CAUS A" not w
 place71/FAM-NCHI/DATE	place	TS13	LOST	-	FAM@P0@/NCHI/DATE = "1 JAN 1900" not written
 place71/FAM-NCHI/EMAIL	place	TS13	LOST	-	FAM@P0@/NCHI/EMAIL = "Value EMAIL A"; FAM@P0@/NCHI/EMAIL = "Value EMAIL B" not written
 place71/FAM-NCHI/FAX	place	TS13	LOST	-	FAM@P0@/NCHI/FAX = "Value FAX A"; FAM@P0@/NCHI/FAX = "Value FAX B" not written
+place71/FAM-NCHI/HUSB	output:empty	TS13	NONCONFORMANT	-	line 11: empty: HUSB has no payload and no substructure
 place71/FAM-NCHI/HUSB	output:payload-pointer	TS13	NONCONFORMANT	-	line 12: payload-pointer: HUSB "": text where a pointer is required
 place71/FAM-NCHI/HUSB	place	TS13	LOST	-	FAM@P0@/NCHI/HUSB = "" not written
 place71/FAM-NCHI/NOTE	place	TS13	MOVED	-	to FAM@P0@/NOTE
@@ -655,6 +647,7 @@ place71/FAM-NCHI/SOUR	output:misplaced	TS13	NONCONFORMANT	-	line 14: misplaced: 
 place71/FAM-NCHI/SOUR	place	TS13	MOVED	-	to FAM@P0@/SOUR, FAM@P0@/SOUR/SOUR
 place71/FAM-NCHI/TYPE	place	TS13	LOST	-	FAM@P0@/NCHI/TYPE = "Value TYPE A" not written
 place71/FAM-NCHI/UID	place	TS13	MOVED	-	to FAM@P0@/UID
+place71/FAM-NCHI/WIFE	output:empty	TS13	NONCONFORMANT	-	line 11: empty: WIFE has no payload and no substructure
 place71/FAM-NCHI/WIFE	output:payload-pointer	TS13	NONCONFORMANT	-	line 12: payload-pointer: WIFE "": text where a pointer is required
 place71/FAM-NCHI/WIFE	place	TS13	LOST	-	FAM@P0@/NCHI/WIFE = "" not written
 place71/FAM-NCHI/WWW	place	TS13	LOST	-	FAM@P0@/NCHI/WWW = "Value WWW A"; FAM@P0@/NCHI/WWW = "Value WWW B" not written
@@ -668,7 +661,6 @@ place71/FORM/MEDI	place	TS13	LOST	-	OBJE@P0@/FILE/FORM/MEDI = "AUDIO" not writte
 place71/HEAD-PLAC/HEAD-PLAC-FORM	place	TS13	LOST	-	HEAD/PLAC/FORM = "Alpha, Beta" not written
 place71/HEAD/HEAD-PLAC	place	TS13	LOST	-	HEAD/PLAC = "" not written
 place71/HEAD/NOTE	place	TS12	CARD	-	1/2 kept
-place71/HEAD/SCHMA	place	TS35	-	LOST	HEAD/SCHMA = "" not written
 place71/HEAD/SNOTE	place	TS12	CARD	-	1/2 kept
 place71/INDI-FAMC/FAMC-STAT	output:payload-enum	TS19	NONCONFORMANT	-	line 11: payload-enum: STAT "challenged": not in enumset-FAMC-STAT
 place71/INDI-FAMC/FAMC-STAT	place	TS19	CHANGED	-	now "challenged"
@@ -689,26 +681,19 @@ place71/NOTE/MIME	place	TS13	LOST	-	FAM@P0@/NOTE/MIME = "image/jpeg" not written
 place71/NOTE/NOTE-KIND	place	TS13	LOST	-	FAM@P0@/NOTE/KIND = "DATA"; FAM@P0@/NOTE/KIND = "OTHER" not written
 place71/NOTE/NOTE-TRAN	place	TS13	LOST	-	FAM@P0@/NOTE/TRAN = "Value TRAN A"; FAM@P0@/NOTE/TRAN = "Value TRAN B" not written
 place71/NOTE/SOUR	place	TS13	LOST	-	FAM@P0@/NOTE/SOUR = "@S1@"; FAM@P0@/NOTE/SOUR = "@S2@" not written
-place71/OBJE/CROP	place	TS35	-	LOST	FAM@P0@/OBJE/CROP = "" not written
 place71/OBJE/TITL	place	TS13	LOST	-	FAM@P0@/OBJE/TITL = "Value TITL A" not written
 place71/PEDI/PHRASE	output:payload-enum	TS19	NONCONFORMANT	-	line 11: payload-enum: PEDI "adopted": not in enumset-PEDI
 place71/PEDI/PHRASE	place	TS13	LOST	-	INDI@P0@/FAMC/PEDI/PHRASE = "Value PHRASE A" not written
 place71/SOUR-EVEN/PHRASE	place	TS13	LOST	-	FAM@P0@/SOUR/EVEN/PHRASE = "Value PHRASE A" not written
-place71/SOUR/SOUR-DATA	place	TS35	-	LOST	FAM@P0@/SOUR/DATA = "" not written
 place71/TEXT/LANG	output:misplaced	TS13	NONCONFORMANT	-	line 15: misplaced: LANG under SOUR
 place71/TEXT/LANG	place	TS13	MOVED	-	to SOUR@P0@/LANG
 place71/TEXT/MIME	output:misplaced	TS13	NONCONFORMANT	-	line 15: misplaced: MIME under SOUR
 place71/TEXT/MIME	place	TS13	MOVED	-	to SOUR@P0@/MIME
 place71/record-FAM/FAM-NCHI	place	TS12	CARD	-	1/2 kept
 place71/record-FAM/REFN	place	TS12	CARD	-	1/2 kept
-place71/record-FAM/SLGS	place	TS35	-	LOST	FAM@P0@/SLGS = ""; FAM@P0@/SLGS = "" not written
 place71/record-FAM/UID	place	TS12	CARD	-	1/2 kept
 place71/record-INDI/ANCI	place	TS12	CARD	-	1/2 kept
-place71/record-INDI/BAPL	place	TS35	-	LOST	INDI@P0@/BAPL = ""; INDI@P0@/BAPL = "" not written
-place71/record-INDI/CONL	place	TS35	-	LOST	INDI@P0@/CONL = ""; INDI@P0@/CONL = "" not written
 place71/record-INDI/DESI	place	TS12	CARD	-	1/2 kept
-place71/record-INDI/ENDL	place	TS35	-	LOST	INDI@P0@/ENDL = ""; INDI@P0@/ENDL = "" not written
-place71/record-INDI/INIL	place	TS35	-	LOST	INDI@P0@/INIL = ""; INDI@P0@/INIL = "" not written
 place71/record-INDI/REFN	place	TS12	CARD	-	1/2 kept
 place71/record-INDI/UID	place	TS12	CARD	-	1/2 kept
 place71/record-OBJE/FILE	place	TS12	CARD	-	1/2 kept
@@ -718,7 +703,6 @@ place71/record-REPO/REFN	place	TS12	CARD	-	1/2 kept
 place71/record-REPO/UID	place	TS12	CARD	-	1/2 kept
 place71/record-SNOTE/CHAN	place	TS13	LOST	-	SNOTE@P0@/CHAN = "" not written
 place71/record-SNOTE/CREA	place	TS13	LOST	-	SNOTE@P0@/CREA = "" not written
-place71/record-SOUR/DATA	place	TS13	LOST	LOST	SOUR@P0@/DATA = "" not written
 place71/record-SOUR/REFN	place	TS12	CARD	-	1/2 kept
 place71/record-SOUR/UID	place	TS12	CARD	-	1/2 kept
 place71/record-SUBM/REFN	place	TS12	CARD	-	1/2 kept
@@ -730,9 +714,7 @@ vendored/5/age-invalid	output:payload-unexpected	TS34	NONCONFORMANT	-	line 101: 
 vendored/5/age-valid	output:payload-unexpected	TS34	NONCONFORMANT	-	line 101: payload-unexpected: EVEN "when 11m": this structure takes no payload
 vendored/5/date-all	output:payload-date	TS34	NONCONFORMANT	-	line 1026: payload-date: DATE "BET 1950 AND GREGORIAN 302": not in the date grammar
 vendored/5/date-all	output:record-size	TS27	NONCONFORMANT	NONCONFORMANT	line 4877: record-size: 131517 bytes
-vendored/5/date-all	roundtrip	TS35	-	LOST	text 1401/08 (x2); text 1401/08 BCE (x1); text 8 MAR 1401/08 (x2); text 8 MAR 1401/08 BCE (x1); text ABT 16 AUG 918/49 (x1); text ABT 16 AUG 918/49 BCE (x1); text ABT 918/49 (x1); text ABT 918/49 BCE (x2); text ABT JULIAN 16 AUG 918/49 (x1); text ABT JULIAN 16 AUG 918/49 BCE (x1); text ABT JULIAN 91
 vendored/5/date-dual-invalid	output:payload-date	TS34	NONCONFORMANT	-	line 100: payload-date: DATE "JAN 1751/9": not in the date grammar
-vendored/5/date-dual-invalid	roundtrip	TS35	-	LOST	text 1701/03 (x1); text 1701/99 (x1); text 1751/43 (x1); text 1751/53 (x1); text 1751/59 (x2); text 1759/51 (x1); text 1759/61 (x1); text 1759/67 (x2); text 1799/01 (x1); text 1799/97 (x1); text 8 JAN 1701/03 (x1); text 8 JAN 1701/99 (x1); text 8 JAN 1751/43 (x1); text 8 JAN 1751/53 (x1); text 8 JAN
 vendored/5/enum-ext	roundtrip	TS24	DIFF	-	+ INDI#0/NAME/SURN = "Family"; + INDI#0/NAME[1]/SURN = "Kong"
 vendored/5/filename-1	roundtrip	TS12	DIFF	-	- OBJE#0/FILE = "/unix/absolute"; - OBJE#0/FILE[1] = "c:\\windows\\absolute"; - OBJE#0/FILE[1]/FORM = "bmp"; - OBJE#0/FILE[2] = "\\\\windows\\server"; - OBJE...
 vendored/5/lang-all	roundtrip	TS12	DIFF	-	- SUBM#0/LANG = "English"; - SUBM#0/LANG[1] = "Japanese"; - SUBM#0/LANG[2] = "Spanish"; + SUBM#0/LANG = "Spanish"
