@@ -187,8 +187,8 @@ fn measure(pipeline: &str) {
     );
     if let Some(data) = kept.downcast_ref::<next::Dataset>() {
         println!(
-            "{pipeline}: of which the source (input, side buffer, identifiers) {:.0} MB",
-            data.source.heap_size() as f64 / 1e6
+            "{pipeline}: of which the store (input, pieces, identifiers) {:.0} MB",
+            data.store.heap_size() as f64 / 1e6
         );
     }
     let writer = GedcomWriter::new();

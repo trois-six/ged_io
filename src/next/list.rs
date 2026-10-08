@@ -1,21 +1,22 @@
-//! A list that costs one word when empty, for substructures that may
-//! repeat but seldom appear at all.
+//! A list that costs one word when empty and one allocation for one item,
+//! for substructures that may repeat but seldom appear more than once.
 
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 
-use crate::tree::{Flat, Structure};
-
-use super::driver::{FromNode, NodeRef, ReadCx, Slot, ToNodes, WriteCx};
-
-/// A list of structures that most structures do not have (translations,
-/// external identifiers, phonetic variations, …): one word when empty,
-/// a boxed `Vec` otherwise. It dereferences to a slice; [`ThinVec::push`]
-/// and [`ThinVec::as_vec_mut`] edit it.
-// Boxing the vector keeps an empty list, the common case, to one word
-// instead of three.
-#[allow(clippy::box_collection)]
+/// A list of structures that most structures have at most one of (notes,
+/// citations, translations, identifiers, …): one word when empty; one
+/// allocation holding the item when it has one; a boxed `Vec` beyond. It
+/// dereferences to a slice, which edits the items in place;
+/// [`ThinVec::push`], [`ThinVec::clear`], `From<Vec<T>>` and
+/// [`ThinVec::into_vec`] change them.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ThinVec<T>(Option<Box<Vec<T>>>);
+pub struct ThinVec<T>(Option<Box<Inner<T>>>);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Inner<T> {
+    One(T),
+    Many(Vec<T>),
+}
 
 impl<T> Default for ThinVec<T> {
     fn default() -> Self {
@@ -32,12 +33,42 @@ impl<T> ThinVec<T> {
 
     /// Appends an item.
     pub fn push(&mut self, item: T) {
-        super::driver::push_exact(self.as_vec_mut(), item);
+        match self.0.as_deref_mut() {
+            None => self.0 = Some(Box::new(Inner::One(item))),
+            Some(Inner::Many(items)) => super::driver::push_exact(items, item),
+            Some(inner @ Inner::One(_)) => {
+                let first = std::mem::replace(inner, Inner::Many(Vec::new()));
+                if let (Inner::One(first), Inner::Many(items)) = (first, inner) {
+                    items.reserve_exact(2);
+                    items.push(first);
+                    items.push(item);
+                }
+            }
+        }
     }
 
-    /// The items, to edit.
-    pub fn as_vec_mut(&mut self) -> &mut Vec<T> {
-        self.0.get_or_insert_with(Box::default)
+    /// Removes every item.
+    pub fn clear(&mut self) {
+        self.0 = None;
+    }
+
+    /// The items, as a `Vec`.
+    #[must_use]
+    pub fn into_vec(self) -> Vec<T> {
+        match self.0.map(|inner| *inner) {
+            None => Vec::new(),
+            Some(Inner::One(item)) => vec![item],
+            Some(Inner::Many(items)) => items,
+        }
+    }
+
+    /// Releases spare capacity.
+    pub(crate) fn shrink(&mut self) {
+        if let Some(Inner::Many(items)) = self.0.as_deref_mut() {
+            if items.capacity() > items.len() {
+                items.shrink_to_fit();
+            }
+        }
     }
 }
 
@@ -45,16 +76,30 @@ impl<T> Deref for ThinVec<T> {
     type Target = [T];
 
     fn deref(&self) -> &[T] {
-        self.0.as_deref().map_or(&[], Vec::as_slice)
+        match self.0.as_deref() {
+            None => &[],
+            Some(Inner::One(item)) => std::slice::from_ref(item),
+            Some(Inner::Many(items)) => items,
+        }
+    }
+}
+
+impl<T> DerefMut for ThinVec<T> {
+    fn deref_mut(&mut self) -> &mut [T] {
+        match self.0.as_deref_mut() {
+            None => &mut [],
+            Some(Inner::One(item)) => std::slice::from_mut(item),
+            Some(Inner::Many(items)) => items,
+        }
     }
 }
 
 impl<T> From<Vec<T>> for ThinVec<T> {
-    fn from(items: Vec<T>) -> Self {
-        if items.is_empty() {
-            Self(None)
-        } else {
-            Self(Some(Box::new(items)))
+    fn from(mut items: Vec<T>) -> Self {
+        match items.len() {
+            0 => Self(None),
+            1 => Self(items.pop().map(|item| Box::new(Inner::One(item)))),
+            _ => Self(Some(Box::new(Inner::Many(items)))),
         }
     }
 }
@@ -74,36 +119,44 @@ impl<'a, T> IntoIterator for &'a ThinVec<T> {
     }
 }
 
-impl<T: FromNode + ToNodes> Slot for ThinVec<T> {
-    const MANY: bool = true;
+impl<'a, T> IntoIterator for &'a mut ThinVec<T> {
+    type Item = &'a mut T;
+    type IntoIter = std::slice::IterMut<'a, T>;
 
-    fn accept(&mut self, node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> bool {
-        match T::from_node(node, cx) {
-            Some(v) => {
-                self.push(v);
-                true
-            }
-            None => false,
-        }
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
     }
+}
 
-    fn write(&self, tag: &'static str, cx: &WriteCx<'_>, out: &mut Vec<Structure>) {
-        for v in self {
-            out.push(v.to_node(tag, cx));
-        }
+impl<T> IntoIterator for ThinVec<T> {
+    type Item = T;
+    type IntoIter = std::vec::IntoIter<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.into_vec().into_iter()
     }
+}
 
-    fn to_flat<'s>(&'s self, tag: &'static str, cx: &WriteCx<'s>, out: &mut Flat<'s>) {
-        for v in self {
-            v.to_flat(tag, cx, out);
-        }
-    }
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    fn finish(&mut self) {
-        if let Some(v) = &mut self.0 {
-            if v.capacity() > v.len() {
-                v.shrink_to_fit();
-            }
-        }
+    #[test]
+    fn one_item_then_many() {
+        let mut list = ThinVec::new();
+        assert!(list.is_empty());
+        list.push(1);
+        assert_eq!(&*list, [1]);
+        list.push(2);
+        list.push(3);
+        assert_eq!(&*list, [1, 2, 3]);
+        list[1] = 5;
+        assert_eq!(list.clone().into_vec(), [1, 5, 3]);
+        let mut one: ThinVec<u8> = vec![7].into();
+        one[0] = 8;
+        assert_eq!(&*one, [8]);
+        one.clear();
+        assert!(one.is_empty());
+        assert_eq!(std::mem::size_of::<ThinVec<String>>(), 8);
     }
 }
