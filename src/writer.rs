@@ -677,35 +677,30 @@ impl GedcomWriter {
 
     /// Writes an `AGE` structure in the grammar of the target version.
     ///
-    /// GEDCOM 5.5.1 has no `PHRASE`: an age known only as text is written as
-    /// the `AGE` payload itself, which is where 5.5.1 files carry it, and the
-    /// phrase of an age that also has a duration has nowhere to go. GEDCOM 7.0
-    /// has no `CHILD`, `INFANT` or `STILLBORN` keywords: they become the
-    /// duration they stand for, with the keyword as the phrase. An age with
-    /// neither duration nor phrase is not written, as an empty `AGE` line is
-    /// valid in neither version.
+    /// The age is converted by [`Age::to_version`]: GEDCOM 7.0 has no
+    /// `CHILD`, `INFANT` or `STILLBORN` keywords, GEDCOM 5.5.1 no weeks and
+    /// no `PHRASE`. An age known only as text is written as the 5.5.1
+    /// payload, which is where 5.5.1 files carry it. An age with neither
+    /// payload nor phrase is not written, as an empty `AGE` line is valid in
+    /// neither version.
     fn write_age<W: Write>(&self, writer: &mut W, level: u8, age: &Age) -> Result<(), io::Error> {
-        let gedcom_5 = self.config.gedcom_version.starts_with('5');
-        let (payload, phrase) = match age {
-            Age::Child | Age::Infant | Age::Stillborn if gedcom_5 => (age.to_string(), None),
-            Age::Child => ("< 8y".to_string(), Some("Child")),
-            Age::Infant => ("< 1y".to_string(), Some("Infant")),
-            Age::Stillborn => ("0y".to_string(), Some("Stillborn")),
-            Age::Numeric { phrase, .. } if age.has_duration() => {
-                (age.to_string(), phrase.as_deref().filter(|_| !gedcom_5))
-            }
-            Age::Numeric {
-                phrase: Some(phrase),
-                ..
-            } if gedcom_5 => (phrase.clone(), None),
-            Age::Numeric {
-                phrase: Some(phrase),
-                ..
-            } => (String::new(), Some(phrase.as_str())),
-            Age::Numeric { phrase: None, .. } => return Ok(()),
+        let version = GedcomVersion::from_version_str(&self.config.gedcom_version);
+        let gedcom_7 = version.is_v7();
+        let age = age.to_version(version);
+        let value = age
+            .value
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+        let phrase = age.phrase.as_deref().filter(|p| !p.is_empty());
+        let (payload, phrase) = match (value, phrase) {
+            (None, None) => return Ok(()),
+            (Some(value), phrase) => (value, phrase.filter(|_| gedcom_7)),
+            (None, Some(phrase)) if gedcom_7 => ("", Some(phrase)),
+            (None, Some(phrase)) => (phrase, None),
         };
 
-        self.write_value_or_wrap(writer, level, "AGE", Some(&payload))?;
+        self.write_value_or_wrap(writer, level, "AGE", Some(payload))?;
         if let Some(phrase) = phrase {
             self.write_value_or_wrap(writer, level + 1, "PHRASE", Some(phrase))?;
         }
