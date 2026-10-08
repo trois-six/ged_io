@@ -14,7 +14,8 @@ license = "MIT"
 readme = "README.md"
 repository = "https://github.com/ge3224/ged_io"
 edition = "2021"
-include = ["Cargo.toml", "src/**/*.rs"]
+rust-version = "1.88"
+include = ["Cargo.toml", "src/**/*.rs", "license.md", "NOTICE"]
 
 [features]
 default = []

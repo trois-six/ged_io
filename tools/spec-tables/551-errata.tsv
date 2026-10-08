@@ -1,0 +1,22 @@
+kind	key	value	extra	page	note
+# Corrections and completions of the gedcom-go 5.5.1 transcription, checked against docs/ged551.pdf.
+# kind enum / enum-open: values of a primitive (enum-open also admits user-defined values).
+# kind primitive-alias: a payload name used in a structure that is defined under another name.
+# kind calendar: date escape calendar, its months and epoch markers (DATE_* grammars).
+enum	SEX_VALUE	M|F|U		61	transcription has no values
+enum	SOURCE_MEDIA_TYPE	audio|book|card|electronic|fiche|film|magazine|manuscript|map|newspaper|photo|tombstone|video		62	transcription has no values
+enum	LDS_BAPTISM_DATE_STATUS	CHILD|COMPLETED|EXCLUDED|PRE-1970|STILLBORN|SUBMITTED|UNCLEARED		51	transcription has no values
+enum	LDS_CHILD_SEALING_DATE_STATUS	BIC|COMPLETED|EXCLUDED|DNS|PRE-1970|STILLBORN|SUBMITTED|UNCLEARED		51	transcription has no values
+enum	LDS_ENDOWMENT_DATE_STATUS	CHILD|COMPLETED|EXCLUDED|INFANT|PRE-1970|STILLBORN|SUBMITTED|UNCLEARED		52	transcription has no values; the bracketed list omits INFANT, which the definitions below it give
+enum	LDS_SPOUSE_SEALING_DATE_STATUS	CANCELED|COMPLETED|DNS|EXCLUDED|DNS/CAN|PRE-1970|SUBMITTED|UNCLEARED		52	transcription has no values
+enum-open	NAME_TYPE	aka|birth|immigrant|maiden|married		56	<user defined> is permitted
+enum-open	PHONETIC_TYPE	hangul|kana		57	<user defined> is permitted
+enum-open	ROMANIZED_TYPE	pinyin|romaji|wadegiles		61	<user defined> is permitted
+enum-open	ROLE_IN_EVENT	CHIL|HUSB|WIFE|MOTH|FATH|SPOU		61	(<ROLE_DESCRIPTOR>) is permitted
+primitive-alias	MULTIMEDIA_FILE_REFN	MULTIMEDIA_FILE_REFERENCE		26, 37, 54	structures use the short name, the primitive is defined under the long one
+calendar	GREGORIAN	JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC	B.C.	45, 46, 52	@#DGREGORIAN@; YEAR_GREG admits a dual year
+calendar	JULIAN	JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC	B.C.	45, 46, 52	@#DJULIAN@
+calendar	HEBREW	TSH|CSH|KSL|TVT|SHV|ADR|ADS|NSN|IYR|SVN|TMZ|AAV|ELL	B.C.	45, 46, 53	@#DHEBREW@
+calendar	FRENCH R	VEND|BRUM|FRIM|NIVO|PLUV|VENT|GERM|FLOR|PRAI|MESS|THER|FRUC|COMP	B.C.	45, 53	@#DFRENCH R@
+calendar	ROMAN			45	@#DROMAN@, for future definition
+calendar	UNKNOWN			45	@#DUNKNOWN@, calendar not known
