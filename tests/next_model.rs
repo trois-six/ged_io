@@ -569,3 +569,25 @@ fn written_output_reads_typed_and_is_stable() {
         }
     }
 }
+
+/// A value only the other version names is kept as written: a 5.5.1
+/// `OTHER` medium (7.x only) is not read as 7.x's `OTHER`, which 5.5.1
+/// could not write back.
+#[test]
+fn values_of_the_other_version_keep_their_spelling() {
+    let data = read_str(&v551(
+        "0 @S1@ SOUR\n1 REPO @R1@\n2 CALN 1\n3 MEDI Other\n2 CALN 2\n3 MEDI Photo\n0 @R1@ REPO\n1 NAME Archive\n",
+    ));
+    let repo: &RepositoryCitation = record(&data, "@S1@").typed().next().unwrap();
+    assert!(matches!(
+        &repo.call_numbers[0].medium.as_ref().unwrap().value,
+        Medium::Unknown(t) if t.as_str(&data) == "Other"
+    ));
+    assert_eq!(
+        repo.call_numbers[1].medium.as_ref().unwrap().value,
+        Medium::Photo
+    );
+    let out = write(&data);
+    assert!(out.contains("3 _MEDI Other\n"), "{out}");
+    assert!(out.contains("3 MEDI photo\n"), "{out}");
+}

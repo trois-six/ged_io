@@ -54,8 +54,9 @@ pub struct EnumDesc {
 pub(crate) trait Enumeration: Sized + Default {
     /// The type's description.
     const DESC: EnumDesc;
-    /// The variant `s` names, in either spelling and any case.
-    fn known(s: &str) -> Option<Self>;
+    /// The variant `s` names, in either spelling and any case; with a
+    /// version, only among the variants that version has.
+    fn known(s: &str, version: Option<GedcomVersion>) -> Option<Self>;
     /// The spelling of a known value in `version`.
     fn spelling(&self, version: GedcomVersion) -> Option<&'static str>;
     /// The text of an unknown value.
@@ -70,7 +71,7 @@ pub(crate) fn read_enum<E: Enumeration>(node: NodeRef<'_>, cx: &mut ReadCx<'_>) 
     if node.is_pointer() || node.has_no_payload() {
         return None;
     }
-    match E::known(node.payload_str()) {
+    match E::known(node.payload_str(), Some(cx.version)) {
         Some(v) => Some(v),
         None => cx.text(node).map(E::from_unknown),
     }
@@ -122,7 +123,7 @@ macro_rules! gedcom_enum {
             /// otherwise `Unknown`, owning `s`.
             #[must_use]
             pub fn parse(s: &str) -> Self {
-                <Self as Enumeration>::known(s).unwrap_or_else(|| Self::Unknown(Text::new(s)))
+                <Self as Enumeration>::known(s, None).unwrap_or_else(|| Self::Unknown(Text::new(s)))
             }
 
             /// The spelling of a known value in `version`: its own, or the
@@ -151,8 +152,8 @@ macro_rules! gedcom_enum {
                 },)*],
             };
 
-            fn known(s: &str) -> Option<Self> {
-                find_known(Self::DESC.values, s).and_then(|i| Self::KNOWN.get(i).cloned())
+            fn known(s: &str, version: Option<GedcomVersion>) -> Option<Self> {
+                find_known(Self::DESC.values, s, version).and_then(|i| Self::KNOWN.get(i).cloned())
             }
 
             fn spelling(&self, version: GedcomVersion) -> Option<&'static str> {
@@ -196,12 +197,19 @@ macro_rules! gedcom_enum {
 }
 
 /// The index of the value `s` spells, in either version and any case,
-/// with surrounding spaces.
-fn find_known(values: &[EnumValue], s: &str) -> Option<usize> {
+/// with surrounding spaces. With a version, a value that version does not
+/// have is not recognised: a 5.5.1 file's `Other` stays as written rather
+/// than becoming 7.x's `OTHER`, which 5.5.1 could not write back.
+fn find_known(values: &[EnumValue], s: &str, version: Option<GedcomVersion>) -> Option<usize> {
     let s = s.trim();
     values.iter().position(|v| {
-        v.v551.is_some_and(|x| x.eq_ignore_ascii_case(s))
-            || v.v7.is_some_and(|x| x.eq_ignore_ascii_case(s))
+        let own = match version {
+            Some(version) if version.is_v7() => v.v7.is_some(),
+            Some(_) => v.v551.is_some(),
+            None => true,
+        };
+        own && (v.v551.is_some_and(|x| x.eq_ignore_ascii_case(s))
+            || v.v7.is_some_and(|x| x.eq_ignore_ascii_case(s)))
     })
 }
 
@@ -661,14 +669,17 @@ pub(crate) const ENUMS: &[EnumDesc] = &[
 pub struct EnumList<E>(pub Vec<E>);
 
 impl<E: Enumeration> PayloadField for EnumList<E> {
-    fn read(node: NodeRef<'_>, _cx: &mut ReadCx<'_>) -> Option<Self> {
+    fn read(node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> Option<Self> {
         if node.is_pointer() || node.has_no_payload() {
             return None;
         }
         let items = node
             .payload_str()
             .split(',')
-            .map(|item| E::known(item).unwrap_or_else(|| E::from_unknown(Text::new(item.trim()))))
+            .map(|item| {
+                E::known(item, Some(cx.version))
+                    .unwrap_or_else(|| E::from_unknown(Text::new(item.trim())))
+            })
             .collect();
         Some(Self(items))
     }
