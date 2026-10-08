@@ -1,0 +1,288 @@
+# Grammar edges, malformed lines, rarely used 5.5.1 forms and GEDCOM 7.1.
+#
+# Format: `### ID | C|L | purpose (origin)`, then the GEDCOM input, then directives:
+#   #want LINE    the written output contains this line
+#   #model TEXT   the parsed model keeps this text (newline written \n)
+#   #lacks TEXT   the written output does not contain this text
+#   #target VERS  write as 5.5.1, 7.0 or 7.1 instead of the input's version
+# Tokens: <CR> / <CRLF> end a line with that terminator, <NOEOL> ends the input without one,
+# <TAB>, <BOM> and <U+XXXX> stand for those characters. Every name, place and value is fictitious.
+
+### G5-NETWORK-PTR | C | 5.5.1 network pointer forms (`:` reserved for permanent record files, p.16 and p.57; `!` in the same non_at pointer grammar) are pointers, kept verbatim and never resolved locally
+0 HEAD
+1 SOUR EXAMPLE_APP
+1 SUBM @U0@
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @I1@ INDI
+1 NAME Ann /Example/
+1 SOUR @ARCHIVE:S77@
+1 ASSO @REMOTE!I9@
+2 RELA Godparent
+0 @U0@ SUBM
+1 NAME Example Submitter
+0 TRLR
+#want 1 SOUR @ARCHIVE:S77@
+#want 1 ASSO @REMOTE!I9@
+
+### G5-ESCAPE-NONDATE | C | 5.5.1 escape sequence other than a date calendar (`@#…@ `, p.12 and p.17) in text: kept, and not doubled on write
+0 HEAD
+1 SOUR EXAMPLE_APP
+1 SUBM @U0@
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @I1@ INDI
+1 NAME Ann /Example/
+1 NOTE Before @#XFORM@ after, and mail@@example.com
+0 @U0@ SUBM
+1 NAME Example Submitter
+0 TRLR
+#want 1 NOTE Before @#XFORM@ after, and mail@@example.com
+
+### G5-SOUR-TEXT-CITATION | C | 5.5.1 citation without a source record: description, TEXT and CONT (SOURCE_CITATION second form)
+0 HEAD
+1 SOUR EXAMPLE_APP
+1 SUBM @U0@
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @I1@ INDI
+1 NAME Ann /Example/
+1 BIRT
+2 SOUR Parish register of Sampleton
+3 CONT volume two
+3 TEXT Born on a Sunday
+4 CONT at home
+0 @U0@ SUBM
+1 NAME Example Submitter
+0 TRLR
+#want 2 SOUR Parish register of Sampleton
+#want 3 TEXT Born on a Sunday
+
+### G5-SEX-LOWER | L | lower-case or unknown SEX values (gedcom-go sex-value-variants intent)
+0 HEAD
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @I1@ INDI
+1 SEX m
+0 @I2@ INDI
+1 SEX X
+0 TRLR
+#model "m"
+#model "X"
+
+### G5-XREF-INVALID | L | xrefs not valid in 5.5.1 (leading #, 30 characters): read, written valid
+0 HEAD
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @#I1@ INDI
+1 NAME Ann /Example/
+0 @IABCDEFGHIJKLMNOPQRSTUVWXYZ0123@ INDI
+1 NAME Bea /Example/
+1 FAMS @F1@
+0 @F1@ FAM
+1 WIFE @IABCDEFGHIJKLMNOPQRSTUVWXYZ0123@
+0 TRLR
+#model Bea /Example/
+
+### G7-XREF-INVALID | L | xrefs valid in 5.5.1 only (`#`, lower case) inside a 7.0 file: read, written valid for 7.0
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I#1@ INDI
+1 NAME Ann /Example/
+1 FAMS @f1@
+0 @f1@ FAM
+1 WIFE @I#1@
+0 TRLR
+#model Ann /Example/
+
+### G7-CONT-ORPHAN | L | CONT directly under a record that has no payload (python test_orphan_cont_rejected intent)
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 CONT orphan text
+1 SEX F
+0 TRLR
+#want 1 SEX F
+#model orphan text
+
+### G7-CONT-UNDER-PTR | L | CONT under a pointer payload (python test_cont_on_pointer_payload_rejected intent)
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 FAMC @F1@
+2 CONT stray text
+0 @F1@ FAM
+1 CHIL @I1@
+0 TRLR
+#want 1 FAMC @F1@
+#model stray text
+
+### G7-MALFORMED-LINES | L | a level alone and a text payload starting with a single `@` (python test_malformed_lines_rejected intent)
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1
+1 NOTE @invalid
+1 SEX M
+0 TRLR
+#want 1 SEX M
+#model @invalid
+
+### G7-TRLR-DUP | L | duplicate TRLR and a record after it (Armidale "Duplicate TRLR record" intent)
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 SEX F
+0 TRLR
+0 @I2@ INDI
+1 SEX M
+0 TRLR
+#want 1 SEX F
+
+### G7-PTR-WRONG-TYPE | L | pointer to a record of the wrong type (Armidale "SUBM points to a INDI record", python test_pointer_at_the_wrong_record_type intent)
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 SUBM @I2@
+0 @I2@ INDI
+1 SEX M
+0 TRLR
+#model @I2@
+
+### G7-NAME-INVALID | L | NAME payloads outside the personal-name grammar (Armidale invalid name intent)
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 NAME a/b/c/d
+1 NAME /
+0 TRLR
+#model a/b/c/d
+
+### G7-COORD-INVALID | L | malformed coordinates (gedcom-go malformed/coordinates intent)
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 BIRT
+2 PLAC Sampleton
+3 MAP
+4 LATI 91.5N
+4 LONG W200
+0 TRLR
+#model 91.5N
+#model W200
+
+### G7-TIME-INVALID | L | times outside the grammar (Armidale invalid time intent)
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 CHAN
+2 DATE 1 JAN 2000
+3 TIME 24:00:00
+1 CREA
+2 DATE 2 JAN 2000
+3 TIME 2:5
+0 TRLR
+#model 24:00:00
+#model 2:5
+
+### G7-LONG-URL | C | a 7.0 payload over 255 characters is written whole, never CONC-split (FamilySearch long-url intent)
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 NOTE https://example.com/a/very/long/path/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/end
+0 TRLR
+#want 1 NOTE https://example.com/a/very/long/path/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/end
+#lacks CONC
+
+### G7-SCHMA-MALFORMED | L | SCHMA TAG without a URI, and a TAG outside SCHMA (python malformed_tag_definition / tag_outside_schema intent)
+0 HEAD
+1 GEDC
+2 VERS 7.0
+1 SCHMA
+2 TAG _BROKEN
+1 TAG _LOOSE https://example.com/loose
+0 @I1@ INDI
+1 _BROKEN value one
+1 _LOOSE value two
+0 TRLR
+#model value one
+#model value two
+
+### G7-REMARRIAGE | C | the same couple in two FAM records, events in order (FamilySearch remarriage intent)
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 NAME Ann /Example/
+1 FAMS @F1@
+1 FAMS @F2@
+0 @I2@ INDI
+1 NAME Bob /Sample/
+1 FAMS @F1@
+1 FAMS @F2@
+0 @F1@ FAM
+1 HUSB @I2@
+1 WIFE @I1@
+1 MARR
+2 DATE 1 MAY 1950
+1 DIV
+2 DATE 1 JUN 1960
+0 @F2@ FAM
+1 HUSB @I2@
+1 WIFE @I1@
+1 MARR
+2 DATE 1 JUL 1970
+0 TRLR
+#want 2 DATE 1 JUL 1970
+
+### G71-READ-WRITE | C | a GEDCOM 7.1 file with 7.1-only structures (HEAD.TITL, NOTE.KIND, BIRT.KIND, RESN on records) is written back as conformant 7.1
+0 HEAD
+1 GEDC
+2 VERS 7.1
+1 TITL Example family file
+0 @I1@ INDI
+1 BIRT
+2 KIND BORN_LIVE
+1 NOTE Kept for the record
+2 KIND RESEARCH
+0 @S1@ SOUR
+1 RESN PRIVACY
+1 TITL Example source
+0 TRLR
+#want 2 VERS 7.1
+#want 2 KIND BORN_LIVE
+#want 2 KIND RESEARCH
+#want 1 RESN PRIVACY
+
+### G71-WRITE-TARGET | C | a 7.0 file written with GEDCOM 7.1 as the target is conformant 7.1
+#target 7.1
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 NAME Ann /Example/
+1 BIRT
+2 DATE 1 JAN 1900
+0 TRLR
+#want 2 VERS 7.1
+#want 2 DATE 1 JAN 1900

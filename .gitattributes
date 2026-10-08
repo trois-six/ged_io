@@ -1,0 +1,2 @@
+# Conformance fixtures are byte-exact: no line-ending or encoding normalisation.
+tests/fixtures/conformance/** -text

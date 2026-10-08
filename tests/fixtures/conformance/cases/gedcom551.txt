@@ -1,0 +1,864 @@
+# GEDCOM 5.5.1 records, values, extensions and dialects.
+#
+# Format: `### ID | C|L | purpose (origin)`, then the GEDCOM input, then directives:
+#   #want LINE    the written output contains this line
+#   #model TEXT   the parsed model keeps this text (newline written \n)
+#   #lacks TEXT   the written output does not contain this text
+#   #target VERS  write as 5.5.1, 7.0 or 7.1 instead of the input's version
+# Tokens: <CR> / <CRLF> end a line with that terminator, <NOEOL> ends the input without one,
+# <TAB>, <BOM> and <U+XXXX> stand for those characters. Every name, place and value is fictitious.
+
+### G5-CONC-TRAILING-SPACE | L | FTM-style CONC: space at end of previous line (gramps imp_test_FTM_CONC)
+0 HEAD
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @I1@ INDI
+1 NAME Ann /Example/
+2 NOTE The FTM way --> 
+3 CONC <--
+2 NOTE The spec way -->
+3 CONC  <--
+0 TRLR
+#model The FTM way --> <--
+#model The spec way --> <--
+
+### G5-CUSTOM-AFTER-CONT | C | custom tag after CONT/CONC lines (gedcom4j customtagstorture/famhist/willis _FOOT)
+0 HEAD
+1 SOUR EXAMPLE_APP
+1 SUBM @U0@
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @I1@ INDI
+1 NOTE First line
+2 CONT second line
+2 _H custom after cont
+0 @U0@ SUBM
+1 NAME Example Submitter
+0 TRLR
+#want 2 _H custom after cont
+
+### G5-CUSTOM-UNDER-CITATION | C | custom tag under a citation under NAME (gramps imp_FTM_LINK)
+0 HEAD
+1 SOUR EXAMPLE_APP
+1 SUBM @U0@
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @I1@ INDI
+1 NAME Ann /Example/
+2 SOUR @S1@
+3 PAGE p. 1
+3 _LINK https://example.org/record/1
+0 @S1@ SOUR
+1 TITL Example source
+0 @U0@ SUBM
+1 NAME Example Submitter
+0 TRLR
+#want 3 _LINK https://example.org/record/1
+
+### G5-CUSTOM-NOTE-SUB | C | custom tags under NOTE (gedcom4j famhistcustomtags)
+0 HEAD
+1 SOUR EXAMPLE_APP
+1 SUBM @U0@
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @M1@ OBJE
+1 FILE photo.jpg
+2 FORM jpg
+1 NOTE This is a note
+2 _AREA {1,2,3,4}
+0 @U0@ SUBM
+1 NAME Example Submitter
+0 TRLR
+#want 2 _AREA {1,2,3,4}
+
+### G5-CUSTOM-EVENTS | C | custom event tags with DATE/PLAC/TYPE, CHIL _FREL/_MREL, citation _JUST (gramps imp_CustTags, gedcom4j ftmcustomtags)
+0 HEAD
+1 SOUR EXAMPLE_APP
+1 SUBM @U0@
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @I1@ INDI
+1 NAME Ann /Example/
+2 SOUR @S1@
+3 _JUST Because
+1 _ELEC Mayor
+2 TYPE Small town
+2 DATE 1980
+2 PLAC Sampleton
+1 FAMC @F1@
+0 @F1@ FAM
+1 CHIL @I1@
+2 _FREL Natural
+2 _MREL Adopted
+1 _SEPR
+2 DATE 1980
+1 EVEN Celebration
+2 TYPE Festival
+2 DATE 4 JUL 1981
+0 @S1@ SOUR
+1 TITL S
+0 @U0@ SUBM
+1 NAME Example Submitter
+0 TRLR
+#want 1 _ELEC Mayor
+#want 2 PLAC Sampleton
+#want 1 EVEN Celebration
+#want 2 _FREL Natural
+#want 2 _MREL Adopted
+#want 1 _SEPR
+#want 3 _JUST Because
+
+### G5-EMPTY-PAYLOAD-ATTR | L | OCCU/RELI with empty payload + PLAC used as value (gramps imp_FTM_OCCU_bug)
+0 HEAD
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @I1@ INDI
+1 OCCU
+2 DATE 06 JUL 1950
+2 PLAC Shoemaker
+1 RELI 
+2 PLAC Lutheran
+0 TRLR
+#want 2 PLAC Shoemaker
+#want 2 PLAC Lutheran
+
+### G5-NOTE-MIX | C | inline NOTE, pointer NOTE, inline NOTE order + inline SOUR text (gramps imp_MixInlineXrefNote)
+0 HEAD
+1 SOUR EXAMPLE_APP
+1 SUBM @U0@
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @I1@ INDI
+1 NOTE Inline 0
+1 NOTE @N0@
+1 NOTE Inline 1
+1 SOUR Inline source text
+0 @N0@ NOTE
+1 CONC XREF N0
+0 @U0@ SUBM
+1 NAME Example Submitter
+0 TRLR
+#want 1 NOTE Inline 0
+#want 1 NOTE @N0@
+#want 1 NOTE Inline 1
+#want 1 SOUR Inline source text
+#want 0 @N0@ NOTE XREF N0
+
+### G5-NOTE-PLACES | L | notes under FAMS link, ADDR, PLAC, NAME, empty NOTE with subs (gramps imp_notetest_dfs)
+0 HEAD
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @I1@ INDI
+1 NAME Ed /Example/
+2 NICK Eddie
+2 NOTE Name note
+1 BIRT
+2 PLAC Sampleton
+3 NOTE Place note
+2 ADDR 1 Sample Street
+3 NOTE Location note
+1 FAMS @F1@
+2 NOTE FAMS note
+0 @F1@ FAM
+1 HUSB @I1@
+0 TRLR
+#want 2 NOTE Name note
+#want 3 NOTE Place note
+#want 3 NOTE Location note
+#want 2 NOTE FAMS note
+
+### G5-NOTE-RECORD-SUBS | C | NOTE record with REFN/TYPE, RIN, SOUR, CHAN (gramps notetest)
+0 HEAD
+1 SOUR EXAMPLE_APP
+1 SUBM @U0@
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @N1@ NOTE Shared text
+1 REFN 98765
+2 TYPE user
+1 RIN 123
+1 SOUR @S1@
+1 CHAN
+2 DATE 1 JAN 2000
+0 @S1@ SOUR
+1 TITL S
+0 @U0@ SUBM
+1 NAME Example Submitter
+0 TRLR
+#want 1 REFN 98765
+#want 2 TYPE user
+#want 1 RIN 123
+#want 1 SOUR @S1@
+#want 2 DATE 1 JAN 2000
+
+### G5-CONTACTS | C | PHON x2/EMAIL/FAX/WWW on SUBM, REPO, RESI, HEAD.SOUR.CORP (gramps imp_PhonFax_dfs, gedcom4j 551 email/fax/www)
+0 HEAD
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+1 SUBM @U0@
+1 SOUR APP
+2 CORP Example Corp
+3 PHON 555-0100
+3 EMAIL corp@@example.com
+3 WWW https://example.com
+0 @U1@ SUBM
+1 NAME Sub
+1 PHON 555-0101
+1 PHON 555-0102
+1 EMAIL sub@@example.com
+1 FAX 555-0103
+1 WWW https://example.org
+0 @R1@ REPO
+1 NAME Repo
+1 PHON 555-0104
+1 EMAIL repo@@example.com
+0 @I1@ INDI
+1 RESI
+2 DATE 1964
+2 PHON 555-0105
+2 EMAIL ind@@example.com
+2 FAX 555-0106
+2 WWW https://example.net
+0 @U0@ SUBM
+1 NAME Example Submitter
+0 TRLR
+#want 3 PHON 555-0100
+#want 3 EMAIL corp@@example.com
+#want 1 PHON 555-0102
+#want 1 FAX 555-0103
+#want 1 EMAIL repo@@example.com
+#want 2 FAX 555-0106
+#want 2 WWW https://example.net
+
+### G5-CONTACTS-ON-INDI | L | ADDR/PHON/EMAIL directly on INDI (non-standard, gramps imp_PhonFax_dfs)
+0 HEAD
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @I1@ INDI
+1 ADDR 1 Sample Street
+1 PHON 555-0101
+1 EMAIL a@@example.com
+0 TRLR
+#model 555-0101
+
+### G5-HEAD-DUP-CHAR-FORM-CASE | L | two CHAR lines, FORM in mixed case (gramps imp_PhonFax_dfs)
+0 HEAD
+1 GEDC
+2 VERS 5.5
+2 FORM Lineage-Linked
+1 CHAR UTF-8
+1 CHAR UTF-8
+2 VERS 1.1
+0 @I1@ INDI
+1 SEX M
+0 TRLR
+#want 1 SEX M
+
+### G5-FORM-NOT-LINEAGE | L | extra GEDC FORM value (gramps imp_sample)
+0 HEAD
+1 GEDC
+2 VERS 5.5
+2 FORM LINEAGE-LINKED
+2 FORM NOT LINEAGE-LINKED
+1 CHAR UTF-8
+0 @I1@ INDI
+1 SEX M
+0 TRLR
+#want 1 SEX M
+
+### G5-FAMC-DUP | L | duplicated FAMC/FAMS links (gramps imp_FTM_16dec2015a)
+0 HEAD
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @I1@ INDI
+1 FAMS @F1@
+1 FAMC @F2@
+1 FAMC @F2@
+0 @F1@ FAM
+1 HUSB @I1@
+0 @F2@ FAM
+1 CHIL @I1@
+0 TRLR
+#want 1 FAMC @F2@
+
+### G5-REPO-EMPTY-CONTACTS | L | empty ADDR/EMAIL/PHON (gramps FTM_16dec)
+0 HEAD
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @R1@ REPO
+1 NAME Repo
+1 ADDR
+1 EMAIL
+1 PHON
+0 TRLR
+#want 1 NAME Repo
+
+### G5-OBJE-PHOTO-PRIM | C | _PHOTO pointer, _PRIM under OBJE link, 5.5.1 inline OBJE (gramps imp_FTM_PHOTO)
+0 HEAD
+1 SOUR EXAMPLE_APP
+1 SUBM @U0@
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @I1@ INDI
+1 _PHOTO @M1@
+1 OBJE @M1@
+2 _PRIM Y
+1 OBJE
+2 FILE a.jpg
+3 FORM jpg
+2 TITL Inline
+0 @M1@ OBJE
+1 FILE b.jpg
+2 FORM jpg
+2 TITL Linked
+0 @U0@ SUBM
+1 NAME Example Submitter
+0 TRLR
+#want 1 _PHOTO @M1@
+#want 2 _PRIM Y
+#want 2 FILE a.jpg
+#want 2 TITL Inline
+#want 2 TITL Linked
+
+### G5-OBJE-55-STYLE | L | GEDCOM 5.5 OBJE link (FORM/TITL/FILE siblings) and 5.5 OBJE record with BLOB (gramps imp_MediaTest, TGC55)
+0 HEAD
+1 GEDC
+2 VERS 5.5
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @I1@ INDI
+1 OBJE
+2 FORM jpeg
+2 TITL Old style link
+2 FILE old.jpg
+0 @M1@ OBJE
+1 FORM jpeg
+1 TITL Blob object
+1 BLOB
+2 CONT .HM.......k.1..F.jwA
+1 OBJE @M2@
+0 @M2@ OBJE
+1 FILE c.jpg
+2 FORM jpeg
+0 TRLR
+#want 2 TITL Old style link
+#want 2 FILE old.jpg
+#model Blob object
+#model .HM.......k.1..F.jwA
+
+### G5-OBJE-TWO-FILES | C | OBJE record with two FILE, FORM TYPE, REFN TYPE, RIN, SOUR (gramps imp_MediaTest)
+0 HEAD
+1 SOUR EXAMPLE_APP
+1 SUBM @U0@
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @M1@ OBJE
+1 FILE one.jpg
+2 FORM jpg
+3 TYPE photo
+2 TITL First
+1 FILE two.jpg
+2 FORM jpg
+3 TYPE photo
+2 TITL Second
+1 REFN R1
+2 TYPE user
+1 RIN 77
+0 @U0@ SUBM
+1 NAME Example Submitter
+0 TRLR
+#want 1 FILE one.jpg
+#want 1 FILE two.jpg
+#want 2 TITL Second
+#want 3 TYPE photo
+#want 1 RIN 77
+
+### G5-OBJE-FILE-URL-SPACE | C | FILE payload with leading space / URL / backslashes (gramps imp_MediaTest)
+0 HEAD
+1 SOUR EXAMPLE_APP
+1 SUBM @U0@
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @M1@ OBJE
+1 FILE  http://example.com/a.png
+2 FORM gif
+1 FILE C:\Users\Example\b.jpg
+2 FORM jpg
+0 @U0@ SUBM
+1 NAME Example Submitter
+0 TRLR
+#want 1 FILE C:\Users\Example\b.jpg
+
+### G5-RESI-ADDR-PLAC | L | RESI ADDR+PLAC with NOTEs, repeated ADDR/PLAC (gramps imp_bug_8322) (L for repeats)
+0 HEAD
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @I1@ INDI
+1 RESI
+2 DATE 1960
+2 PLAC the place
+3 NOTE place note
+2 ADDR the address
+3 NOTE address note
+2 ADDR second address
+0 TRLR
+#want 2 PLAC the place
+#want 3 NOTE place note
+#want 2 ADDR the address
+#model second address
+
+### G5-PLACE-HIERARCHY | L | HEAD.PLAC.FORM, place with empty trailing jurisdiction, EVEN with 2 TYPE, ORDN x2, NAME without space before slash (gramps imp_Paris)
+0 HEAD
+1 GEDC
+2 VERS 5.5
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+1 PLAC
+2 FORM Town, Area code, County, Region, Country, Subdivision
+0 @I1@ INDI
+1 NAME Quartiers/SAMPLEVILLE/
+2 GIVN Quartiers
+2 SURN SAMPLEVILLE
+1 EVEN
+2 TYPE Acquisition
+2 TYPE Second type
+2 PLAC Sampleton,00001,Samplecounty,Sampleregion,SAMPLELAND,
+1 ORDN
+2 TYPE Chapel A
+1 ORDN
+2 TYPE Chapel B
+0 TRLR
+#want 2 FORM Town, Area code, County, Region, Country, Subdivision
+#want 1 NAME Quartiers/SAMPLEVILLE/
+#want 2 PLAC Sampleton,00001,Samplecounty,Sampleregion,SAMPLELAND,
+#want 2 TYPE Chapel B
+#model Second type
+
+### G5-LDS-OLD-STAT | L | BAPL with PLAC NOTE and 5.5 STAT 'Cleared' (gramps notetest)
+0 HEAD
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @I1@ INDI
+1 BAPL
+2 PLAC Sample Temple City
+3 NOTE Place note
+2 STAT Cleared
+0 TRLR
+#want 2 STAT Cleared
+#want 3 NOTE Place note
+
+### G5-SUBN | C | SUBN record fields (gramps imp_sample/notetest, TGC)
+0 HEAD
+1 SOUR EXAMPLE_APP
+1 SUBM @U0@
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+1 SUBN @SN@
+0 @SN@ SUBN
+1 SUBM @U1@
+1 FAMF Family file
+1 TEMP SLAKE
+1 ANCE 4
+1 DESC 4
+1 ORDI yes
+1 RIN 1
+0 @U1@ SUBM
+1 NAME Sub
+0 @U0@ SUBM
+1 NAME Example Submitter
+0 TRLR
+#want 1 FAMF Family file
+#want 1 TEMP SLAKE
+#want 1 ANCE 4
+#want 1 ORDI yes
+
+### G5-HEAD-FULL | C | HEAD fields: DEST, DATE TIME, FILE, COPR CONT, LANG, NOTE, SOUR DATA (allged / TGC header)
+0 HEAD
+1 SUBM @U0@
+1 SOUR APP
+2 VERS 1.0
+2 NAME App
+2 DATA Source data
+3 DATE 1 JAN 1998
+3 COPR Data copyright
+1 DEST Destination
+1 DATE 1 JAN 1998
+2 TIME 13:57:24.80
+1 FILE SAMPLE.GED
+1 COPR Line one
+2 CONT Line two
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+1 LANG English
+1 NOTE Header note
+0 @U0@ SUBM
+1 NAME Example Submitter
+0 TRLR
+#want 2 TIME 13:57:24.80
+#want 2 CONT Line two
+#want 3 COPR Data copyright
+#want 1 NOTE Header note
+#want 1 DEST Destination
+
+### G5-AMBIG-NUMERIC-DATE | L | non-standard numeric dates kept verbatim (gramps importgedcom_ambiguous_date_test)
+0 HEAD
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @I1@ INDI
+1 BIRT
+2 DATE 7/11/1959
+1 DEAT
+2 DATE 25/3/1934
+0 TRLR
+#want 2 DATE 7/11/1959
+#want 2 DATE 25/3/1934
+
+### G5-DATES | C | 5.5.1 dates: dual year, B.C., calendar escapes, INT, phrase
+0 HEAD
+1 SOUR EXAMPLE_APP
+1 SUBM @U0@
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @I1@ INDI
+1 BIRT
+2 DATE 1740/41
+1 CHR
+2 DATE @#DGREGORIAN@ 20 B.C.
+1 DEAT
+2 DATE @#DHEBREW@ 1 TSH 5760
+1 BURI
+2 DATE @#DFRENCH R@ 1 VEND 1
+1 CREM
+2 DATE INT 1900 (about nineteen hundred)
+1 PROB
+2 DATE (Easter)
+1 WILL
+2 DATE @#DJULIAN@ 1 JAN 1700
+0 @U0@ SUBM
+1 NAME Example Submitter
+0 TRLR
+#want 2 DATE 1740/41
+#want 2 DATE @#DGREGORIAN@ 20 B.C.
+#want 2 DATE @#DHEBREW@ 1 TSH 5760
+#want 2 DATE @#DFRENCH R@ 1 VEND 1
+#want 2 DATE INT 1900 (about nineteen hundred)
+#want 2 DATE (Easter)
+#want 2 DATE @#DJULIAN@ 1 JAN 1700
+
+### G5-AGES | C | 5.5.1 ages CHILD/INFANT/STILLBORN, '<1y', '>79y'
+0 HEAD
+1 SOUR EXAMPLE_APP
+1 SUBM @U0@
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @I1@ INDI
+1 DEAT
+2 AGE STILLBORN
+1 BURI
+2 AGE <1y
+1 CREM
+2 AGE >79y
+0 @U0@ SUBM
+1 NAME Example Submitter
+0 TRLR
+#want 2 AGE STILLBORN
+#model 1y
+#model 79y
+
+### G5-XREF-CHARS | C | 5.5.1 xref with '#', case-distinct xrefs (Armidale 551 Xref, test-files xref-case)
+0 HEAD
+1 SOUR EXAMPLE_APP
+1 SUBM @U0@
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @I#1@ INDI
+1 NOTE @note@
+0 @note@ NOTE lower
+0 @NOTE@ NOTE upper
+0 @U0@ SUBM
+1 NAME Example Submitter
+0 TRLR
+#want 0 @I#1@ INDI
+#model lower
+#model upper
+
+### G5-XREF-WITH-SPACE | L | pointer containing a space (test-files xref-case '@NoTe ref@')
+0 HEAD
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @I1@ INDI
+1 NOTE @NoTe ref@
+0 TRLR
+
+### G5-NOTE-LOOKS-LIKE-PTR | L | NOTE record whose text is '@N0@' (gedcom4j issue96)
+0 HEAD
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @N5678@ NOTE @N0@
+0 TRLR
+#model N0
+
+### G5-EVENT-DESCRIPTION | L | event with free text where Y
+0 HEAD
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @I1@ INDI
+1 BIRT Born at home
+2 CONC  during a storm
+2 DATE 1 JAN 1900
+0 TRLR
+#model Born at home during a storm
+
+### G5-LINE-BREAK-NO-CONT | L | raw line break inside a NOTE without CONT (gedcom4j Issue100/Sopranos)
+0 HEAD
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @I1@ INDI
+1 NOTE First line of the note.
+This line lacks a CONT tag.
+1 SEX M
+0 TRLR
+#model This line lacks a CONT tag.
+#want 1 SEX M
+
+### G5-ORDER-INDEPENDENT | C | FAM before its INDI records (gedcom4j Issue63)
+0 HEAD
+1 SOUR EXAMPLE_APP
+1 SUBM @U0@
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @F1@ FAM
+1 HUSB @I1@
+1 WIFE @I2@
+0 @I1@ INDI
+1 FAMS @F1@
+0 @I2@ INDI
+1 FAMS @F1@
+0 @U0@ SUBM
+1 NAME Example Submitter
+0 TRLR
+#want 1 HUSB @I1@
+#want 1 WIFE @I2@
+
+### G5-MAP | C | PLAC MAP LATI/LONG, FONE/ROMN on PLAC and NAME (gedcom4j Issue80, GedcomParser551Test)
+0 HEAD
+1 SOUR EXAMPLE_APP
+1 SUBM @U0@
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @I1@ INDI
+1 NAME Taro /Yamada/
+2 ROMN Taro /Yamada/
+3 TYPE romaji
+2 FONE Taro /Yamada/
+3 TYPE kana
+1 BIRT
+2 PLAC Sampleton
+3 FONE Sampletonne
+4 TYPE kana
+3 ROMN Sampleton
+4 TYPE romaji
+3 MAP
+4 LATI N50.0
+4 LONG E19.9
+0 @U0@ SUBM
+1 NAME Example Submitter
+0 TRLR
+#want 4 LATI N50.0
+#want 4 LONG E19.9
+#want 2 ROMN Taro /Yamada/
+#want 3 FONE Sampletonne
+#want 3 ROMN Sampleton
+
+### G5-RESN-FAM-EVENT | C | RESN on FAM and event, RELI on event detail, FAMC STAT (gedcom4j GedcomParser551Test)
+0 HEAD
+1 SOUR EXAMPLE_APP
+1 SUBM @U0@
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @I1@ INDI
+1 BIRT
+2 RESN privacy
+2 RELI Example faith
+1 FAMC @F1@
+2 STAT challenged
+0 @F1@ FAM
+1 RESN locked
+1 CHIL @I1@
+0 @U0@ SUBM
+1 NAME Example Submitter
+0 TRLR
+#want 2 RESN privacy
+#want 2 RELI Example faith
+#want 2 STAT challenged
+#want 1 RESN locked
+
+### G5-AT-ESCAPE-551 | C | 5.5.1 '@@' anywhere in text decodes to '@' and is re-escaped on write
+0 HEAD
+1 SOUR EXAMPLE_APP
+1 SUBM @U0@
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @I1@ INDI
+1 NOTE mail me at a@@example.com
+0 @U0@ SUBM
+1 NAME Example Submitter
+0 TRLR
+#want 1 NOTE mail me at a@@example.com
+
+### G5-PEDI-NONSTD | L | non-standard PEDI value 'stepchild' (gramps exp_sample_ged)
+0 HEAD
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @I1@ INDI
+1 FAMC @F1@
+2 PEDI stepchild
+0 @F1@ FAM
+1 CHIL @I1@
+0 TRLR
+#want 2 PEDI stepchild
+
+### G5-PEDI-STD | C | 5.5.1 PEDI values lower case kept
+0 HEAD
+1 SOUR EXAMPLE_APP
+1 SUBM @U0@
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @I1@ INDI
+1 FAMC @F1@
+2 PEDI adopted
+0 @F1@ FAM
+1 CHIL @I1@
+0 @U0@ SUBM
+1 NAME Example Submitter
+0 TRLR
+#want 2 PEDI adopted
+
+### G5-LEVEL-SKIP-NOTE | L | NOTE at level 3 under level-1 event (gedcom4j Issue87)
+0 HEAD
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @F1@ FAM
+1 MARR
+3 NOTE skipped level
+1 DIV
+0 TRLR
+#want 1 DIV
+
+### G5-100-LEVELS | C | 100 nesting levels (gedcom4j issue102) - generated in plan, small here
+0 HEAD
+1 SOUR EXAMPLE_APP
+1 SUBM @U0@
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @I1@ INDI
+1 _A
+2 _B
+3 _C
+4 _D
+5 _E
+6 _F
+7 _G
+8 _H
+9 _I
+10 _J
+11 _K deep
+0 @U0@ SUBM
+1 NAME Example Submitter
+0 TRLR
+#want 11 _K deep
+
+### G5-LONG-LINE | L | 300-char NOTE line: kept whole, written split with CONC <=255 (gedcom4j superlongline, LongLineReaderTest)
+0 HEAD
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @I1@ INDI
+1 NOTE AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+0 TRLR
+#model AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+#want 2 CONC AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+
+### G5-WRITE-NO-CHAR-MISMATCH | L | writer must not label UTF-8 text as UNICODE (test-files char_utf16*)
+0 HEAD
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UNICODE
+0 @I1@ INDI
+1 SEX M
+0 TRLR
+#lacks CHAR UNICODE

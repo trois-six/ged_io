@@ -1,0 +1,406 @@
+# Lines, levels, terminators, xrefs, continuations and the header/trailer frame.
+#
+# Format: `### ID | C|L | purpose (origin)`, then the GEDCOM input, then directives:
+#   #want LINE    the written output contains this line
+#   #model TEXT   the parsed model keeps this text (newline written \n)
+#   #lacks TEXT   the written output does not contain this text
+#   #target VERS  write as 5.5.1, 7.0 or 7.1 instead of the input's version
+# Tokens: <CR> / <CRLF> end a line with that terminator, <NOEOL> ends the input without one,
+# <TAB>, <BOM> and <U+XXXX> stand for those characters. Every name, place and value is fictitious.
+
+### G7-EOL-CR | C | CR-only line endings (python test_line_terminators, gramps imp_*_CR, gedcom4j utf8_cr_nobom)
+0 HEAD<CR>
+1 GEDC<CR>
+2 VERS 7.0<CR>
+0 @I1@ INDI<CR>
+1 SEX M<CR>
+0 TRLR<CR>
+#want 1 SEX M
+
+### G7-EOL-CRLF | C | CRLF line endings
+0 HEAD<CRLF>
+1 GEDC<CRLF>
+2 VERS 7.0<CRLF>
+0 @I1@ INDI<CRLF>
+1 SEX M<CRLF>
+0 TRLR<CRLF>
+#want 1 SEX M
+
+### G7-BOM | C | leading U+FEFF ignored
+<BOM>0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 SEX F
+0 TRLR
+#want 1 SEX F
+
+### G7-NOEOL | L | last line without terminator
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 SEX F
+0 TRLR<NOEOL>
+#want 1 SEX F
+
+### G7-TAB-ASTRAL | C | tab and astral chars kept in payload
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 NOTE ok<TAB>here 😀
+0 TRLR
+#want 1 NOTE ok	here 😀
+
+### G7-BANNED-C0 | L | banned control char in payload: lenient keep (L), writer must not emit it raw
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 NOTE bad<U+0007>char
+0 TRLR
+
+### G7-LEVEL-LEADING-ZERO | L | '01 NAME' leading zero level
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+01 NAME John /Doe/
+0 TRLR
+#want 1 NAME John /Doe/
+
+### G7-LEADING-SPACE | L | indented lines (L; legal in 5.5.1, banned in 7.0; gedcom4j Issue166, Armidale ValidateSpacing)
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+  1 NAME John /Doe/
+0 TRLR
+#want 1 NAME John /Doe/
+
+### G7-DOUBLE-SPACE-BEFORE-TAG | L | '1  NAME' extra delimiter
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1  NAME John /Doe/
+0 TRLR
+#want 1 NAME John /Doe/
+
+### G7-LOWERCASE-TAG | L | lower-case tag kept as-is
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 _x lower
+0 TRLR
+#want 1 _x lower
+
+### G7-BLANK-LINE | L | blank line between lines (L; gedcom4j Issue64)
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+
+1 SEX M
+0 TRLR
+#want 1 SEX M
+
+### G7-TWO-SPACES-PAYLOAD | C | second space after tag belongs to payload
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 NOTE  leading space kept
+0 TRLR
+#want 1 NOTE  leading space kept
+
+### G7-TRAILING-SPACE | C | trailing payload space preserved
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 NOTE trailing 
+0 TRLR
+#want 1 NOTE trailing 
+
+### G7-AT-LEADING | C | leading @@ decoded, re-escaped on write
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 NOTE me@example.com is my email
+2 CONT @@me and @I are handles
+0 TRLR
+#want 2 CONT @@me and @I are handles
+
+### G7-AT-ONLY-FIRST | C | @@@@@ decodes to @@@@ (only leading pair)
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @N1@ SNOTE @@@@@ has four
+0 TRLR
+#want 0 @N1@ SNOTE @@@@@ has four
+
+### G7-AT-INTERIOR | C | interior @@ untouched in 7.0
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 NOTE a@@b
+0 TRLR
+#want 1 NOTE a@@b
+
+### G7-LEVEL-SKIP | L | level jump 0->2 (L; python test_level_may_not_skip, gedcom4j Issue87)
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+2 _FOO bar
+1 SEX M
+0 TRLR
+#want 1 SEX M
+
+### G7-DEEP-NESTING | C | levels beyond 9 (python test_deep_nesting, gedcom4j issue102)
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 _L1
+2 _L2
+3 _L3
+4 _L4
+5 _L5
+6 _L6
+7 _L7
+8 _L8
+9 _L9
+10 _L10
+11 _L11
+12 _L12 x
+0 TRLR
+#want 12 _L12 x
+
+### G7-VOIDPTR | C | @VOID@ pointers kept
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 ALIA @I1@
+1 FAMC @VOID@
+0 TRLR
+#want 1 FAMC @VOID@
+#want 1 ALIA @I1@
+
+### G7-DANGLING | L | dangling pointers parse (L), kept
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 FAMS @F9@
+0 TRLR
+#want 1 FAMS @F9@
+
+### G7-FORWARD-PTR | C | forward pointer
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 ALIA @I2@
+0 @I2@ INDI
+1 SEX F
+0 TRLR
+#want 1 ALIA @I2@
+
+### G7-DUP-XREF | L | duplicate xref (L): both records kept, writer must emit unique xrefs
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 SEX M
+0 @I1@ INDI
+1 SEX F
+0 TRLR
+#want 1 SEX M
+#want 1 SEX F
+
+### G7-SUBSTRUCT-XREF | L | xref on substructure (L), writer must not emit it
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 @X1@ NOTE hi
+0 TRLR
+#want 1 NOTE hi
+
+### G7-VOID-AS-XREF | L | @VOID@ used as record xref (L), writer must rename
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @VOID@ INDI
+1 SEX M
+0 TRLR
+#want 1 SEX M
+#lacks 0 @VOID@
+
+### G7-XREF-UNDERSCORE | C | 7.0 xref with underscore valid
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I_1@ INDI
+1 SEX M
+0 TRLR
+#want 0 @I_1@ INDI
+
+### G7-XREF-LOWER | L | lowercase xref (L in 7.0)
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @i1@ INDI
+1 SEX M
+0 TRLR
+#want 1 SEX M
+
+### G7-NO-XREF-RECORD | C | record without xref is legal
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 INDI
+1 NOTE no xref
+0 TRLR
+#want 1 NOTE no xref
+
+### G7-CONT-BLANK | C | blank CONT lines
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 NOTE This is a note field that
+2 CONT   spans four lines.
+2 CONT
+2 CONT (the third line was blank)
+0 TRLR
+#want 2 CONT   spans four lines.
+#want 2 CONT (the third line was blank)
+
+### G7-CONC-IN-7 | L | CONC in a 7.0 file (L; removed in 7.0) - writer must not emit CONC in 7.0
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 NOTE abc
+2 CONC def
+0 TRLR
+#want 1 NOTE abcdef
+#lacks CONC
+
+### G7-CONT-AFTER-SUB | L | CONT after another substructure
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 NOTE a
+2 LANG en
+2 CONT b
+0 TRLR
+
+### G7-CONT-WRONG-LEVEL | L | CONT at the note's own level (L, gedcom4j Issue100-like)
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 NOTE a
+1 CONT b
+0 TRLR
+
+### G7-NO-HEAD | L | missing HEAD
+0 @I1@ INDI
+1 SEX M
+0 TRLR
+
+### G7-NO-TRLR | L | missing TRLR
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 SEX M
+
+### G7-TRLR-SUB | L | TRLR with substructure
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 TRLR
+1 NOTE nope
+
+### G7-EMPTY | L | empty input: must not panic (Ok(empty) or Err both acceptable)
+
+### X-CUSTOM-AFTER-PTR-CITATION | C | custom tag directly after pointer citation (gramps imp_FTM_LINK shape)
+0 HEAD
+1 SOUR EXAMPLE_APP
+1 SUBM @U0@
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @I1@ INDI
+1 NAME Ann /Example/
+2 SOUR @S1@
+3 _LINK https://example.org/record/1
+0 @S1@ SOUR
+1 TITL S
+0 @U0@ SUBM
+1 NAME Example Submitter
+0 TRLR
+#want 3 _LINK https://example.org/record/1
+
+### X-DUP-XREF-UNIQUE | L | duplicate xref: output xrefs must be unique
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 SEX M
+0 @I1@ INDI
+1 SEX F
+0 TRLR
+#lacks @I1@ INDI
+#want 1 SEX F
+
+### X-BANNED-OUT | L | banned char must not be written raw
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 NOTE bad<U+0007>char
+0 TRLR
+#lacks <U+0007>
+
+### X-NEWLINE-IN-PAYLOAD-551 | C | CONT in 5.5.1 written back as CONT
+0 HEAD
+1 SOUR EXAMPLE_APP
+1 SUBM @U0@
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @U1@ SUBM
+1 NAME Sub
+1 NOTE a
+2 CONT b
+0 @U0@ SUBM
+1 NAME Example Submitter
+0 TRLR
+#want 2 CONT b
+
+### X-LEVEL-JUMP-NO-REPARENT | L | level jump after new record must not attach to previous record
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 BIRT
+2 DATE 1 JAN 2000
+0 @I2@ INDI
+2 _FOO bar
+1 SEX F
+0 TRLR
+#want 1 SEX F
