@@ -5,7 +5,6 @@ use crate::tree::{FlatPayload, Payload};
 use super::citation::Citation;
 use super::driver::{gedcom_struct, NodeRef, PayloadField, ReadCx, WriteCx};
 use super::enums::{NoteKind, Phrased};
-use super::list::ThinVec;
 use super::text::{Text, XrefId};
 
 /// What a note holds: its own text, or a pointer to a shared note (5.5.1
@@ -67,16 +66,21 @@ gedcom_struct! {
         @payload
         /// The note's text, or the shared note it points to.
         content: NoteContent;
-        /// The media type of the text (`MIME`), `text/plain` when absent.
-        "MIME" => mime: Option<Text>,
-        /// The language of the text (`LANG`).
-        "LANG" => language: Option<Text>,
-        /// Translations of the text (`TRAN`).
-        "TRAN" => translations: ThinVec<NoteTranslation>,
-        /// Sources of the note (`SOUR`).
-        "SOUR" => citations: ThinVec<Citation>,
-        /// What kind of note this is (7.1 `KIND`).
-        "KIND" => kinds: ThinVec<Phrased<NoteKind>>,
+        @detail
+        /// What few notes have besides their text: a media type, a
+        /// language, translations, sources and kinds.
+        NoteDetail {
+            /// The media type of the text (`MIME`), `text/plain` when absent.
+            "MIME" => mime: Option<Text>,
+            /// The language of the text (`LANG`).
+            "LANG" => language: Option<Text>,
+            /// Translations of the text (`TRAN`).
+            "TRAN" => translations: Vec<NoteTranslation>,
+            /// Sources of the note (`SOUR`).
+            "SOUR" => citations: Vec<Citation>,
+            /// What kind of note this is (7.1 `KIND`).
+            "KIND" => kinds: Vec<Phrased<NoteKind>>,
+        }
     }
     spec {
         v551: ["NOTE_STRUCTURE.NOTE", "NOTE_STRUCTURE.NOTE#2"],

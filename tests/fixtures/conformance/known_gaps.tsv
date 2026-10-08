@@ -165,7 +165,7 @@ convert/filename-1	output:misplaced	TS25	NONCONFORMANT	-	line 8: misplaced: FILE
 convert/filename-1	output:payload-media-type	TS25	NONCONFORMANT	-	line 13: payload-media-type: FORM "bmp": not a media type
 convert/lang-all	convert	TS25	DIFF	DIFF	191 differences: - HEAD#0/SCHMA = ""; - HEAD#0/SCHMA/TAG = "https://gedcom.io/terms/v7/PHRASE"; - SUBM#0/LANG = "en"; - SUBM#0/LANG[1] = "ja"; - SUBM#0/LANG[...
 convert/lang-all	output:payload-lang	TS25	NONCONFORMANT	-	line 8: payload-lang: LANG "Afrikaans": not a BCP 47 language tag
-convert/notes-1	convert	TS25	DIFF	DIFF	4 differences: - SNOTE@4@/CHAN = ""; - SNOTE@4@/CHAN/DATE = "25 MAY 2021"; - SOUR@2@/NOTE/CHAN = ""; - SOUR@2@/NOTE/CHAN/DATE = "25 MAY 2021"
+convert/notes-1	convert	TS25	DIFF	-	4 differences: - SNOTE@4@/CHAN = ""; - SNOTE@4@/CHAN/DATE = "25 MAY 2021"; - SOUR@2@/NOTE/CHAN = ""; - SOUR@2@/NOTE/CHAN/DATE = "25 MAY 2021"
 convert/obje-1	convert	TS25	DIFF	DIFF	22 differences: - INDI#0/OBJE[1] = "@X1@"; - OBJE@1@/FILE = "example.jpg"; - OBJE@1@/FILE/FORM = "image/jpeg"; - OBJE@1@/FILE/FORM/MEDI = "PHOTO"; - OBJE@1@/...
 convert/obje-1	output:misplaced	TS25	NONCONFORMANT	-	line 9: misplaced: FILE under OBJE
 convert/obje-1	output:payload-media-type	TS25	NONCONFORMANT	-	line 14: payload-media-type: FORM "wav": not a media type

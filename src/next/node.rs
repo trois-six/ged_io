@@ -71,14 +71,19 @@ impl Node {
         }
     }
 
-    /// [`Node::to_structure`], into a flat arena, borrowing the texts.
-    pub(crate) fn to_flat<'s>(&'s self, store: &'s Store, out: &mut Flat<'s>) {
-        let payload = match &self.payload {
+    /// The payload, borrowed.
+    pub(crate) fn payload_flat<'s>(&'s self, store: &'s Store) -> FlatPayload<'s> {
+        match &self.payload {
             Value::None => FlatPayload::None,
             Value::Pointer(p) => FlatPayload::Pointer(Cow::Borrowed(store.xref(*p))),
             Value::Text(t) if t.is_empty() => FlatPayload::None,
             Value::Text(t) => FlatPayload::Text(t.to_str(store)),
-        };
+        }
+    }
+
+    /// [`Node::to_structure`], into a flat arena, borrowing the texts.
+    pub(crate) fn to_flat<'s>(&'s self, store: &'s Store, out: &mut Flat<'s>) {
+        let payload = self.payload_flat(store);
         let standard = u16::try_from(self.tag.get())
             .ok()
             .filter(|&t| usize::from(t) < crate::tree::STANDARD_TAGS.len());
@@ -107,20 +112,6 @@ impl Extra {
     #[must_use]
     pub const fn new() -> Self {
         Self(ThinVec::new())
-    }
-
-    /// Writes the nodes.
-    pub(crate) fn write(&self, cx: &WriteCx<'_>, out: &mut Vec<Structure>) {
-        for n in &self.0 {
-            out.push(n.to_structure(cx.store));
-        }
-    }
-
-    /// Writes the nodes into a flat arena.
-    pub(crate) fn write_flat<'s>(&'s self, cx: &WriteCx<'s>, out: &mut Flat<'s>) {
-        for n in self {
-            n.to_flat(cx.store, out);
-        }
     }
 }
 

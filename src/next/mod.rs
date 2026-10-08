@@ -5,7 +5,20 @@
 //! step beside the current one, and exercised by the conformance suite in
 //! its `next` tier. It becomes the crate's model when it is complete.
 //!
+//! # Model
+//!
+//! A [`Dataset`] holds the header and every record typed: [`Individual`],
+//! [`Family`], [`Source`], [`Repository`], [`Multimedia`], [`Submitter`],
+//! [`Submission`] and [`SharedNote`]; records of no type the model has stay
+//! [`Node`]s. Every structure of GEDCOM 5.5.1, 7.0 and 7.1 has a type
+//! ([`Event`], [`Name`], [`ChildLink`], [`Ordinance`], [`Citation`], …),
+//! with one field per substructure the specifications permit — an `Option`
+//! when they permit one, a list when any version permits several — and
+//! `extra`, the substructures it has no field for, in order.
+//!
 //! # Layout
+//!
+//! The model is laid out for a peak of at most three times the input:
 //!
 //! - A [`Dataset`] keeps the decoded text it was read from in its
 //!   [`Store`]. Every text of the model is a [`Text`]: a span of that
@@ -14,15 +27,15 @@
 //!   allocation either way, and no copy of the characters; text a program
 //!   sets owns its characters.
 //! - Identifiers and pointers are interned [`XrefId`]s (4 bytes); the
-//!   store maps them to their text and back (8 bytes each, and an index of
-//!   8 bytes a slot).
+//!   store maps them to their text and back.
 //! - Enumeration values are enums ([`Pedigree`], [`Role`], …) whose
 //!   unknown values keep their text; tags of untyped [`Node`]s are
 //!   [`TagId`]s.
-//! - Every typed structure has `extra`, the substructures it has no field
-//!   for, in order: one word when empty. Lists of substructures that seldom
-//!   appear are [`ThinVec`]s (one word when empty), rare large parts are
-//!   boxed; `tests/sizes.rs` holds the sizes to their budget.
+//! - A structure's fields that few occurrences use are in its boxed
+//!   *detail* ([`Event::detail`], [`Individual::detail`], …): one word when
+//!   none is used. Lists of substructures that seldom repeat are
+//!   [`ThinVec`]s (one word when empty, one allocation for one item), and
+//!   `extra` is one too. `tests/sizes.rs` holds the sizes to their budget.
 //! - Records are read one at a time from the lexer's arena, which is reused:
 //!   the whole file is never held as a tree.
 //!
@@ -35,28 +48,20 @@
 //! ([`crate::spec::conform`]) and emits, so the output is conformant to
 //! the target version.
 //!
-//! Records are [`Generic`] until each has its type: their substructures
-//! are typed wherever the specification tables say a typed structure
-//! stands — a note, a citation, a place, an enumeration value — at any
-//! depth.
-//!
 //! ```rust
-//! use ged_io::next::{read_str, write_string, Child, Note, NoteContent, Pedigree, Phrased};
+//! use ged_io::next::{read_str, write_string, NoteContent, Pedigree};
 //! use ged_io::GedcomWriter;
 //!
 //! let text = "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 NOTE Hello\n2 LANG en\n\
 //!             1 FAMC @F1@\n2 PEDI OTHER\n3 PHRASE Guardianship\n0 @F1@ FAM\n0 TRLR\n";
 //! let data = read_str(text);
-//! let indi = &data.records[1];
-//! let Child::Typed(note) = &indi.children[0] else { panic!() };
-//! let note: &Note = note.get().unwrap();
+//! let indi = &data.individuals[0];
+//! let note = &indi.notes[0];
 //! assert!(matches!(&note.content, NoteContent::Text(t) if t.to_str(&data) == "Hello"));
-//! assert_eq!(note.language.as_ref().unwrap().to_str(&data), "en");
+//! assert_eq!(note.detail().language.as_ref().unwrap().to_str(&data), "en");
 //!
-//! let Child::Generic(famc) = &indi.children[1] else { panic!() };
-//! let Child::Typed(pedi) = &famc.children[0] else { panic!() };
-//! let pedi: &Phrased<Pedigree> = pedi.get().unwrap();
-//! assert_eq!(pedi.value, Pedigree::Other);
+//! let pedigree = indi.child_of[0].detail().pedigree.as_ref().unwrap();
+//! assert_eq!(pedigree.value, Pedigree::Other);
 //!
 //! let out = write_string(&data, &GedcomWriter::new()).unwrap();
 //! assert!(out.contains("2 PEDI OTHER\n3 PHRASE Guardianship\n"));
@@ -65,108 +70,69 @@
 pub(crate) mod driver;
 
 mod citation;
+mod dataset;
 mod dates;
 mod enums;
-mod generic;
+mod event;
+mod header;
 mod identifiers;
+mod lds;
+mod ledger_impl;
+mod link;
 mod list;
 mod multimedia;
+mod name;
 mod node;
 mod note;
 mod place;
+mod records;
 mod text;
 
 use std::io;
 
 use crate::spec::conform::Build;
-use crate::tree::{head_version, Builder, Escaping, Flat, Structure, TagInterner};
+use crate::tree::{head_version, Builder, Escaping, Flat, FlatPayload, TagInterner};
 use crate::version::GedcomVersion;
 use crate::writer::{GedcomWriter, WriteError, WriteReport};
 
+use driver::WriteCx;
+
 pub use citation::{
-    CallNumber, Citation, CitationData, CitationSource, CitedEvent, RepositoryCitation,
+    CallNumber, Citation, CitationData, CitationDetail, CitationSource, CitedEvent,
+    RepositoryCitation,
 };
-pub use dates::{Age, ChangeDate, CreationDate, Date, ExactDate, Period};
+pub use dataset::{Dataset, RecordRef};
+pub use dates::{Age, ChangeDate, CreationDate, Date, DateDetail, ExactDate, Period};
 pub use enums::{
     Adoption, BirthKind, Certainty, CharacterSet, ChildStatus, EnumList, EventKind, GedcomForm,
     LdsStatus, Medium, MultimediaFormat, NameType, NoteKind, OrdinanceFlag, OrdinanceStatus,
     Pedigree, PhoneticType, Phrased, Restriction, Role, RomanizedType, Sex,
 };
-pub use generic::{Child, Generic, Typed};
+pub use event::{Event, EventDetail, EventFamily, EventSpouse, NonEvent};
+pub use header::{
+    Charset, Corporation, GedcomInfo, Header, HeaderPlace, HeaderSource, HeaderSourceData,
+    HeaderText, Schema,
+};
 pub use identifiers::{Address, Exid, Refn};
+pub use lds::{Ordinance, OrdinanceKind};
+pub use link::{ChildLink, ChildLinkDetail, IndividualRef, IndividualRefDetail, SpouseLink};
 pub use list::ThinVec;
 pub use multimedia::{Crop, File, FileForm, FileTranslation, MultimediaLink};
+pub use name::{
+    Name, NameDetail, NamePiece, NamePieceKind, NameTranslation, PhoneticName, RomanizedName,
+};
 pub use node::{Extra, Node, Value};
-pub use note::{Note, NoteContent, NoteTranslation, SourceText, TextTranslation};
-pub use place::{Association, Map, PhoneticVariation, Place, PlaceTranslation, RomanizedVariation};
+pub use note::{Note, NoteContent, NoteDetail, NoteTranslation, SourceText, TextTranslation};
+pub use place::{
+    Association, Map, PhoneticVariation, Place, PlaceDetail, PlaceTranslation, RomanizedVariation,
+};
+pub use records::{
+    Family, FamilyDetail, Individual, IndividualDetail, Multimedia, RecordedEvents, Repository,
+    SharedNote, Source, SourceData, Submission, Submitter,
+};
 pub use text::{Store, TagId, Text, XrefId};
 
-use driver::{Arena, NodeRef, ReadCx, WriteCx};
-
-/// A GEDCOM dataset: its records, and the store their texts and
-/// identifiers resolve against.
-#[derive(Debug, Default)]
-pub struct Dataset {
-    /// The text the dataset was read from, and its tables.
-    pub store: Store,
-    /// The records, the header first when the file has one, in file
-    /// order.
-    pub records: Vec<Generic>,
-    version: GedcomVersion,
-    declared_version: Option<Box<str>>,
-}
-
-impl AsRef<Store> for Dataset {
-    fn as_ref(&self) -> &Store {
-        &self.store
-    }
-}
-
-impl Dataset {
-    /// The version the file declares (`HEAD.GEDC.VERS`): 7.0 or 7.1 for
-    /// 7.x, 5.5.1 otherwise.
-    #[must_use]
-    pub fn version(&self) -> GedcomVersion {
-        self.version
-    }
-
-    /// The `HEAD.GEDC.VERS` payload as written.
-    #[must_use]
-    pub fn declared_version(&self) -> Option<&str> {
-        self.declared_version.as_deref()
-    }
-
-    /// The record with this identifier (`@I1@`): the first one, when
-    /// several have it.
-    #[must_use]
-    pub fn find(&self, xref: &str) -> Option<&Generic> {
-        let id = self.store.find_xref(xref)?;
-        self.records.iter().find(|r| r.xref == Some(id))
-    }
-
-    /// The records as owned structures, as the model holds them (known
-    /// enumeration values in the dataset's version's spelling).
-    #[must_use]
-    pub fn to_structures(&self) -> Vec<Structure> {
-        self.structures(self.version, false)
-    }
-
-    /// The records as owned structures for writing `version`: dates, ages
-    /// and times in its grammars, enumeration values in its spelling.
-    #[must_use]
-    pub fn to_structures_for(&self, version: GedcomVersion) -> Vec<Structure> {
-        self.structures(version, true)
-    }
-
-    fn structures(&self, version: GedcomVersion, convert: bool) -> Vec<Structure> {
-        let cx = WriteCx {
-            store: &self.store,
-            version,
-            convert,
-        };
-        self.records.iter().map(|r| r.to_structure(&cx)).collect()
-    }
-}
+use driver::{Arena, NodeRef, ReadCx};
 
 /// The largest text one pass of the lexer indexes: offsets are 32-bit, and
 /// a piece's length takes 31 bits.
@@ -199,7 +165,11 @@ fn read_segmented(text: String, limit: usize) -> Dataset {
         .map_or(GedcomVersion::V5_5_1, GedcomVersion::from_version_str);
     let escaping = Escaping::of(declared.as_deref());
     let mut store = Store::new(text);
-    let mut records = Vec::new();
+    let mut data = Dataset {
+        version,
+        declared_version: declared.map(Into::into),
+        ..Dataset::default()
+    };
     let mut tags = TagInterner::default();
     {
         let (input, pieces, xrefs) = store.parts_mut();
@@ -217,20 +187,16 @@ fn read_segmented(text: String, limit: usize) -> Dataset {
                     xrefs: &b.xrefs,
                 };
                 if let Some(root) = NodeRef::root(&arena) {
-                    records.push(Generic::read(root, &mut cx));
+                    data.add(root, &mut cx);
                 }
             });
         }
     }
     store.set_tags(tags.others);
     store.shrink();
-    records.shrink_to_fit();
-    Dataset {
-        store,
-        records,
-        version,
-        declared_version: declared.map(Into::into),
-    }
+    data.store = store;
+    data.shrink();
+    data
 }
 
 /// Writes a dataset with `writer`'s configuration: in its version, unless
@@ -264,44 +230,46 @@ pub fn write_string(data: &Dataset, writer: &GedcomWriter) -> Result<String, Wri
 /// when the writer needs them, into the writer's flat arena: the dataset is
 /// never copied as owned structures.
 struct Built<'d> {
-    record: &'d Generic,
+    /// The record; `None` for the trailer, which the dataset does not keep.
+    record: Option<RecordRef<'d>>,
     cx: WriteCx<'d>,
 }
 
 impl<'d> Build<'d> for Built<'d> {
     fn tag(&self) -> &'d str {
-        self.cx.store.tag(self.record.tag)
+        self.record.map_or("TRLR", |r| r.tag(&self.cx))
     }
 
     fn xref(&self) -> Option<&'d str> {
-        self.record.xref.map(|x| self.cx.store.xref(x))
+        self.record?.xref().map(|x| self.cx.store.xref(x))
     }
 
     fn is_empty(&self) -> bool {
-        let payload = match &self.record.payload {
-            node::Value::None => true,
-            node::Value::Pointer(_) => false,
-            node::Value::Text(t) => t.is_empty(),
-        };
-        payload && self.record.children.is_empty()
+        self.record.is_none_or(|r| r.is_empty())
     }
 
     fn build(&self, out: &mut Flat<'d>) {
-        self.record.to_flat(&self.cx, out);
+        if let Some(r) = self.record {
+            r.to_flat(&self.cx, out);
+        } else {
+            let at = out.open(std::borrow::Cow::Borrowed("TRLR"), None, FlatPayload::None);
+            out.close(at);
+        }
     }
 }
 
 impl Dataset {
-    /// The records, to write with `writer`: in its version, unless one is
-    /// configured.
+    /// The records, to write with `writer` (in its version, unless one is
+    /// configured), then the trailer.
     fn built(&self, writer: &GedcomWriter) -> Vec<Built<'_>> {
         let cx = WriteCx {
             store: &self.store,
             version: writer.config().version.unwrap_or(self.version),
             convert: true,
         };
-        self.records
-            .iter()
+        self.records()
+            .map(Some)
+            .chain([None])
             .map(|record| Built { record, cx })
             .collect()
     }
@@ -319,7 +287,7 @@ pub mod ledger {
     /// and its fields.
     #[must_use]
     pub fn structures() -> &'static [(&'static str, SpecNames, &'static [FieldDesc])] {
-        super::generic::STRUCTURES
+        super::ledger_impl::STRUCTURES
     }
 
     /// Every enumeration type.
@@ -328,11 +296,11 @@ pub mod ledger {
         super::enums::ENUMS
     }
 
-    /// The paths of the structures of `data` that the model types but read
-    /// as generic structures, because they did not fit their type.
+    /// The paths of the structures of `data` kept untyped although a field
+    /// takes their tag: they did not fit their type.
     #[must_use]
     pub fn untyped(data: &super::Dataset) -> Vec<String> {
-        super::generic::untyped(&data.records, &data.store, data.version)
+        super::ledger_impl::untyped(data)
     }
 }
 
@@ -349,6 +317,13 @@ mod tests {
             let parts = read_segmented(text.to_owned(), limit);
             assert_eq!(parts.to_structures(), whole.to_structures(), "{limit}");
         }
-        assert_eq!(whole.find("@I2@").map(|r| r.children.len()), Some(1));
+        assert_eq!(
+            whole
+                .individual("@I2@")
+                .map(|r| r.detail().associations.len()),
+            Some(1)
+        );
+        let note = &whole.individuals[0].notes[0];
+        assert!(matches!(&note.content, NoteContent::Text(t) if t.to_str(&whole) == "a@b\nc"));
     }
 }

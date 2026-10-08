@@ -21,10 +21,10 @@ gedcom4j/sample/Issue87.ged	OK	0	payload-date
 gedcom4j/sample/RelationshipTest.ged	OK	0	
 gedcom4j/sample/RelationshipTestExtended.ged	OK	0	
 gedcom4j/sample/Sopranos.ged	OK	0	
-gedcom4j/sample/TGC551.ged	OK	160	payload-date
-gedcom4j/sample/TGC551LF.ged	OK	160	payload-date
-gedcom4j/sample/TGC55C.ged	OK	160	payload-date
-gedcom4j/sample/TGC55CLF.ged	OK	160	payload-date
+gedcom4j/sample/TGC551.ged	OK	159	payload-date
+gedcom4j/sample/TGC551LF.ged	OK	159	payload-date
+gedcom4j/sample/TGC55C.ged	OK	159	payload-date
+gedcom4j/sample/TGC55CLF.ged	OK	159	payload-date
 gedcom4j/sample/a31486.ged	OK	1	
 gedcom4j/sample/allged.ged	OK	0	
 gedcom4j/sample/customtagstorture.ged	OK	0	payload-date

@@ -18,22 +18,28 @@ gedcom_struct! {
         @payload
         /// The name, jurisdictions from the smallest.
         name: Text;
-        /// The jurisdictions named, in order (`FORM`).
-        "FORM" => form: Option<Text>,
-        /// The language of the name (`LANG`).
-        "LANG" => language: Option<Text>,
-        /// The name in other languages (`TRAN`).
-        "TRAN" => translations: ThinVec<PlaceTranslation>,
-        /// The coordinates (`MAP`).
-        "MAP" => map: Option<Box<Map>>,
-        /// Identifiers in external systems (`EXID`).
-        "EXID" => exids: ThinVec<Exid>,
-        /// Notes (`NOTE`, 7.x `SNOTE`).
-        "NOTE" | "SNOTE" => notes: ThinVec<Note>,
-        /// Phonetic variations of the name (5.5.1 `FONE`).
-        "FONE" => phonetic: ThinVec<PhoneticVariation>,
-        /// Romanized variations of the name (5.5.1 `ROMN`).
-        "ROMN" => romanized: ThinVec<RomanizedVariation>,
+        @detail
+        /// What fewer places have besides their name: the form of the
+        /// jurisdictions, a language, translations, coordinates,
+        /// identifiers, notes and variations.
+        PlaceDetail {
+            /// The jurisdictions named, in order (`FORM`).
+            "FORM" => form: Option<Text>,
+            /// The language of the name (`LANG`).
+            "LANG" => language: Option<Text>,
+            /// The name in other languages (`TRAN`).
+            "TRAN" => translations: Vec<PlaceTranslation>,
+            /// The coordinates (`MAP`).
+            "MAP" => map: Option<Map>,
+            /// Identifiers in external systems (`EXID`).
+            "EXID" => exids: Vec<Exid>,
+            /// Notes (`NOTE`, 7.x `SNOTE`).
+            "NOTE" | "SNOTE" => notes: Vec<Note>,
+            /// Phonetic variations of the name (5.5.1 `FONE`).
+            "FONE" => phonetic: Vec<PhoneticVariation>,
+            /// Romanized variations of the name (5.5.1 `ROMN`).
+            "ROMN" => romanized: Vec<RomanizedVariation>,
+        }
     }
     spec {
         v551: ["PLACE_STRUCTURE.PLAC"],

@@ -59,18 +59,23 @@ gedcom_struct! {
         source: CitationSource;
         /// Where in the source (`PAGE`).
         "PAGE" => page: Option<Text>,
-        /// What the source says (`DATA`).
-        "DATA" => data: Option<Box<CitationData>>,
-        /// The event the source records (`EVEN`).
-        "EVEN" => event: Option<Box<CitedEvent>>,
-        /// How reliable the evidence is (`QUAY`).
-        "QUAY" => quality: Option<Certainty>,
-        /// Text from a described source (5.5.1 `TEXT`).
-        "TEXT" => texts: ThinVec<SourceText>,
-        /// Media (`OBJE`).
-        "OBJE" => multimedia: ThinVec<MultimediaLink>,
-        /// Notes (`NOTE`, 7.x `SNOTE`).
-        "NOTE" | "SNOTE" => notes: ThinVec<Note>,
+        @detail
+        /// What fewer citations have: what the source says, the event it
+        /// records, its quality, texts, media and notes.
+        CitationDetail {
+            /// What the source says (`DATA`).
+            "DATA" => data: Option<CitationData>,
+            /// The event the source records (`EVEN`).
+            "EVEN" => event: Option<CitedEvent>,
+            /// How reliable the evidence is (`QUAY`).
+            "QUAY" => quality: Option<Certainty>,
+            /// Text from a described source (5.5.1 `TEXT`).
+            "TEXT" => texts: Vec<SourceText>,
+            /// Media (`OBJE`).
+            "OBJE" => multimedia: Vec<MultimediaLink>,
+            /// Notes (`NOTE`, 7.x `SNOTE`).
+            "NOTE" | "SNOTE" => notes: Vec<Note>,
+        }
     }
     spec {
         v551: ["SOURCE_CITATION.SOUR", "SOURCE_CITATION.SOUR#2"],

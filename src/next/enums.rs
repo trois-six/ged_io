@@ -656,6 +656,19 @@ gedcom_enum! {
     }
 }
 
+/// An event or attribute structure keeps its tag as its kind.
+impl super::driver::TagField for EventKind {
+    fn from_tag(tag: &'static str) -> Option<Self> {
+        Self::known(tag, None)
+    }
+
+    fn tag(&self) -> &'static str {
+        // A kind read from a tag is known; one a program left unknown is
+        // written as a generic event.
+        self.as_str(GedcomVersion::V7_0).unwrap_or("EVEN")
+    }
+}
+
 /// Every enumeration type, for the coverage ledger.
 pub(crate) const ENUMS: &[EnumDesc] = &[
     Adoption::DESC,
@@ -685,36 +698,61 @@ pub(crate) const ENUMS: &[EnumDesc] = &[
 pub struct EnumList<E>(pub Vec<E>);
 
 impl<E: Enumeration> PayloadField for EnumList<E> {
+    /// A list read from its payload: no payload is an empty list (a
+    /// 5.5.1 `DATA.EVEN` may name no event); a pointer does not fit.
     fn read(node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> Option<Self> {
-        if node.is_pointer() || node.has_no_payload() {
+        if node.is_pointer() {
             return None;
+        }
+        if node.has_no_payload() {
+            return Some(Self(Vec::new()));
         }
         let items = cx
             .payload_str(node)
             .split(',')
             .map(|item| {
                 E::known(item, Some(cx.version))
-                    .unwrap_or_else(|| E::from_unknown(Text::new(item.trim())))
+                    .unwrap_or_else(|| E::from_unknown(Text::new(item.trim_matches(' '))))
             })
             .collect();
         Some(Self(items))
     }
 
     fn write(&self, cx: &WriteCx<'_>) -> Payload {
-        let items: Vec<std::borrow::Cow<'_, str>> = self
+        // An item as it reads back: without the characters the target
+        // bans (which the writer leaves out) and the spaces around it.
+        let rules = cx.version.rules();
+        let items: Vec<String> = self
             .0
             .iter()
             .map(|e| match (e.spelling(cx.version), e.unknown()) {
-                (Some(s), _) => s.into(),
-                (None, Some(t)) => t.to_str(cx.store),
-                (None, None) => "".into(),
+                (Some(s), _) => s.to_string(),
+                (None, Some(t)) => t
+                    .to_str(cx.store)
+                    .chars()
+                    .filter(|&c| !rules.is_banned(c))
+                    .collect::<String>()
+                    .trim_matches(' ')
+                    .to_string(),
+                (None, None) => String::new(),
             })
             .collect();
         WriteCx::str(&items.join(", "))
     }
+
+    fn payload<'s>(&'s self, cx: &WriteCx<'s>) -> FlatPayload<'s> {
+        // One known value is its static spelling; a list is joined.
+        match self.0.as_slice() {
+            [] => FlatPayload::None,
+            [e] if e.spelling(cx.version).is_some() => write_enum_flat(e, cx),
+            _ => self.write(cx).into(),
+        }
+    }
 }
 
 impl<E: Enumeration> super::driver::FromNode for EnumList<E> {
+    const LEAF: bool = true;
+
     fn from_node(node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> Option<Self> {
         super::driver::read_leaf(node, cx)
     }
@@ -723,6 +761,10 @@ impl<E: Enumeration> super::driver::FromNode for EnumList<E> {
 impl<E: Enumeration> super::driver::ToNodes for EnumList<E> {
     fn to_node(&self, tag: &'static str, cx: &WriteCx<'_>) -> Structure {
         super::driver::write_leaf(self, tag, cx)
+    }
+
+    fn to_flat<'s>(&'s self, tag: &'static str, cx: &WriteCx<'s>, out: &mut Flat<'s>) {
+        super::driver::write_leaf_flat(self, tag, cx, out);
     }
 }
 
@@ -740,10 +782,11 @@ pub struct Phrased<E> {
 }
 
 /// The fields of [`Phrased`]: `PHRASE`.
-const PHRASED_FIELDS: &[super::driver::FieldDesc] = &[super::driver::FieldDesc {
+pub(crate) const PHRASED_FIELDS: &[super::driver::FieldDesc] = &[super::driver::FieldDesc {
     tags: &["PHRASE"],
     name: "phrase",
     many: false,
+    leaf: true,
 }];
 
 /// The field of each standard tag in [`Phrased`].
@@ -760,8 +803,36 @@ impl<E: Enumeration + Clone + PartialEq + std::fmt::Debug> super::driver::Struct
 }
 
 impl<E: Enumeration> super::driver::Fields for Phrased<E> {
+    fn fields(&self) -> &'static [super::driver::FieldDesc] {
+        PHRASED_FIELDS
+    }
+
     fn lookup(&self) -> &'static super::driver::Lookup {
         &PHRASED_LOOKUP
+    }
+
+    fn read_xref(&mut self, node: NodeRef<'_>, _cx: &mut ReadCx<'_>) -> bool {
+        !node.has_xref()
+    }
+
+    fn read_tag(&mut self, _node: NodeRef<'_>) -> bool {
+        true
+    }
+
+    fn write_xref(&self, _cx: &WriteCx<'_>) -> Option<crate::tree::Xref> {
+        None
+    }
+
+    fn walk(&self, _f: &mut dyn FnMut(&'static str, &dyn super::driver::Fields)) {}
+
+    fn write_extra(
+        &self,
+        _field: usize,
+        _node: &super::Node,
+        _tag: &'static str,
+        _cx: &WriteCx<'_>,
+    ) -> Option<Structure> {
+        None
     }
 
     fn read_payload(&mut self, node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> bool {
@@ -818,6 +889,14 @@ impl<E: Enumeration> super::driver::ToNodes for Phrased<E> {
 
     fn to_flat<'s>(&'s self, tag: &'static str, cx: &WriteCx<'s>, out: &mut Flat<'s>) {
         super::driver::write_flat(self, tag, cx, out);
+    }
+
+    fn visit(
+        &self,
+        tag: &'static str,
+        f: &mut dyn FnMut(&'static str, &dyn super::driver::Fields),
+    ) {
+        f(tag, self);
     }
 }
 

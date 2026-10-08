@@ -125,7 +125,7 @@
 
 pub(crate) mod conform;
 mod lines;
-mod payload;
+pub(crate) mod payload;
 pub(crate) mod schema;
 #[rustfmt::skip]
 pub(crate) mod tables;

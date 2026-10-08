@@ -29,10 +29,10 @@ use crate::tree::{TagHasher, TextPiece, STANDARD_TAGS};
 /// absent payload.
 ///
 /// ```rust
-/// use ged_io::next::{read_str, Text, Value};
+/// use ged_io::next::{read_str, Text};
 ///
 /// let data = read_str("0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @N1@ SNOTE Shared\n1 CONT text\n0 TRLR\n");
-/// let Value::Text(text) = &data.records[1].payload else { panic!() };
+/// let text = &data.notes[0].text;
 /// assert_eq!(text.to_str(&data), "Shared\ntext");
 /// assert_eq!(text.chunks(&data).collect::<Vec<_>>(), ["Shared", "\n", "text"]);
 /// assert_eq!(Text::from("Shared").to_str(&data), "Shared");
@@ -294,6 +294,12 @@ impl TagId {
         crate::tree::standard_index(tag).map(|i| Self(u32::from(i)))
     }
 
+    /// The tag of the node a typed structure keeps in its `extra` for the
+    /// payload or identifier its type has no place for (text where its
+    /// pointer belongs, a payload on a record): it is written back as the
+    /// structure's own. It names no tag ([`Store::tag`] gives `""`).
+    pub const ASIDE: Self = Self(u32::MAX);
+
     /// The id of a tag of the lexer's arena.
     pub(crate) const fn raw(id: u32) -> Self {
         Self(id)
@@ -492,7 +498,10 @@ impl Store {
         let i = id.0 as usize;
         match STANDARD_TAGS.get(i) {
             Some(tag) => tag,
-            None => self.tags.get(i - STANDARD_TAGS.len()).map_or("", |t| t),
+            None => self
+                .tags
+                .get(i.saturating_sub(STANDARD_TAGS.len()))
+                .map_or("", |t| t),
         }
     }
 

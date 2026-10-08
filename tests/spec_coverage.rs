@@ -5,9 +5,13 @@
 //! it stands for:
 //! 1. every substructure the tables permit is a field, or is listed in
 //!    [`OPAQUE`] (kept in `extra`) with a reason;
-//! 2. a field holding one occurrence (`Option`) stands for a substructure
-//!    of cardinality `{0:1}` or `{1:1}`, a field holding many (`Vec`) for
-//!    `{0:M}`, `{1:M}` or `{0:3}`;
+//! 2. a field holding one occurrence (`Option`) stands for substructures
+//!    of cardinality `{0:1}` or `{1:1}` in every version; a field holding
+//!    many (`Vec`, `ThinVec`) stands for `{0:M}`, `{1:M}` or `{0:3}` in at
+//!    least one version — the model is one for every version, and writing
+//!    a version that permits fewer, the repair pass keeps the others as
+//!    extensions — or takes several tags (the pieces of a name, kept in
+//!    order in one list);
 //! 3. every field's tags are permitted by at least one of its types.
 //!
 //! For every enumeration type:
@@ -16,6 +20,12 @@
 //!    its sets (but for the types listed in [`WIDER`]);
 //! 5. every enumeration set of the tables has a type, but those listed in
 //!    [`TEXT_SETS`].
+//!
+//! For every version:
+//! 6. every structure type with substructures (the records and the header
+//!    included) is one a typed structure stands for: a structure type
+//!    without substructures is a value, held by a field of its
+//!    superstructure.
 //!
 //! Cardinalities thus come from the specifications and cannot drift.
 
@@ -84,6 +94,9 @@ fn every_substructure_is_a_field_with_the_right_cardinality() {
     let mut checked = 0;
     for (name, spec, fields) in ledger::structures() {
         let mut permitted: BTreeSet<&str> = BTreeSet::new();
+        // For each field, the cardinalities of the substructures it stands
+        // for, in every version.
+        let mut seen: HashMap<&str, Vec<String>> = HashMap::new();
         let mut typed = 0;
         for (version, schema) in versions() {
             let types = by_name(schema);
@@ -104,24 +117,34 @@ fn every_substructure_is_a_field_with_the_right_cardinality() {
                         }
                         continue;
                     };
-                    let many = sub.max != 1;
-                    if field.many != many {
+                    let max = if sub.max == 0 {
+                        "M".to_string()
+                    } else {
+                        sub.max.to_string()
+                    };
+                    seen.entry(field.name)
+                        .or_default()
+                        .push(format!("{version} {type_name}.{tag} {{{}:{max}}}", sub.min));
+                    if !field.many && sub.max != 1 {
                         problems.push(format!(
-                            "{name}.{}: {} for {version} {type_name}.{tag} {{{}:{}}}",
-                            field.name,
-                            if field.many { "Vec" } else { "Option" },
-                            sub.min,
-                            if sub.max == 0 {
-                                "M".to_string()
-                            } else {
-                                sub.max.to_string()
-                            },
+                            "{name}.{}: Option for {version} {type_name}.{tag} {{{}:{max}}}",
+                            field.name, sub.min,
                         ));
                     }
                 }
             }
         }
         assert!(typed > 0, "{name} stands for no structure type");
+        for field in fields.iter().filter(|f| f.many && f.tags.len() == 1) {
+            let cards = seen.get(field.name).map(Vec::as_slice).unwrap_or_default();
+            if !cards.is_empty() && cards.iter().all(|c| c.ends_with(":1}")) {
+                problems.push(format!(
+                    "{name}.{}: a list, but every version permits one: {}",
+                    field.name,
+                    cards.join(", ")
+                ));
+            }
+        }
         for field in *fields {
             if !field.tags.iter().any(|t| permitted.contains(t)) {
                 problems.push(format!(
@@ -188,6 +211,23 @@ fn every_enumeration_value_is_a_variant() {
             let text = TEXT_SETS.iter().any(|(s, _)| *s == e.name);
             if !text && !covered.contains(&(version, e.name)) {
                 problems.push(format!("{version} set {} has no type", e.name));
+            }
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+#[test]
+fn every_structure_type_with_substructures_is_typed() {
+    let mut problems = Vec::new();
+    for (version, schema) in versions() {
+        let typed: BTreeSet<&str> = ledger::structures()
+            .iter()
+            .flat_map(|(_, spec, _)| names_of(spec, version).iter().copied())
+            .collect();
+        for id in ids(schema).filter(|&id| id != schema::DATASET) {
+            if !schema.subs(id).is_empty() && !typed.contains(schema.name(id)) {
+                problems.push(format!("{version} {} has no type", schema.name(id)));
             }
         }
     }

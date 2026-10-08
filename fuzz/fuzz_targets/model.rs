@@ -2,7 +2,8 @@
 //! output is stable: for any bytes, reading never panics; for every
 //! version, the written output reads back with every structure the model
 //! types read typed (`ledger::untyped`), and writing what was read back
-//! gives the same text.
+//! gives the same structures (records and siblings of different tags in
+//! any order).
 #![no_main]
 
 use ged_io::next::{ledger, read_bytes, read_str, write_string};
@@ -34,6 +35,7 @@ fuzz_target!(|data: &[u8]| {
                     .sort_by(|a, b| a.tag.as_str().cmp(b.tag.as_str()));
             }
             records.iter_mut().for_each(sort);
+            records.sort_by(|a, b| a.tag.as_str().cmp(b.tag.as_str()));
             records
         };
         assert!(

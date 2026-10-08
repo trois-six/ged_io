@@ -21,7 +21,7 @@ pub enum Model {
     /// The public model.
     Current(Box<ged_io::types::GedcomData>),
     /// The model under construction.
-    Next(ged_io::next::Dataset),
+    Next(Box<ged_io::next::Dataset>),
 }
 
 /// Whether the suite runs the `next` pipeline.
@@ -65,7 +65,7 @@ pub fn guard<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
 pub fn read(bytes: &[u8]) -> Result<Model, String> {
     guard(|| {
         if next_tier() {
-            return Ok(Model::Next(ged_io::next::read_bytes(bytes)));
+            return Ok(Model::Next(Box::new(ged_io::next::read_bytes(bytes))));
         }
         GedcomBuilder::new()
             .build_from_bytes(bytes)
@@ -82,7 +82,7 @@ pub fn read_checking_references(bytes: &[u8]) -> Result<Model, String> {
             let data = ged_io::next::read_bytes(bytes);
             return match dangling(&data) {
                 Some(p) => Err(format!("dangling pointer {p}")),
-                None => Ok(Model::Next(data)),
+                None => Ok(Model::Next(Box::new(data))),
             };
         }
         GedcomBuilder::new()
@@ -245,13 +245,16 @@ pub fn model_contains(m: &Model, needle: &str) -> bool {
 pub fn record_count(m: &Model) -> usize {
     match m {
         Model::Current(data) => data.total_records(),
-        Model::Next(data) => {
-            let tags = ["HEAD", "TRLR"];
-            data.records
-                .iter()
-                .filter(|r| !tags.contains(&data.store.tag(r.tag)))
-                .count()
-        }
+        Model::Next(data) => data
+            .records()
+            .filter(|r| match r {
+                ged_io::next::RecordRef::Header(_) => false,
+                ged_io::next::RecordRef::Other(n) => {
+                    !["HEAD", "TRLR"].contains(&data.store.tag(n.tag))
+                }
+                _ => true,
+            })
+            .count(),
     }
 }
 
@@ -354,7 +357,7 @@ pub fn gedzip_round_trip(
             .collect();
         let back = if next_tier() {
             let gedcom = reader.read_gedcom_bytes().map_err(|e| e.to_string())?;
-            Model::Next(ged_io::next::read_bytes(gedcom))
+            Model::Next(Box::new(ged_io::next::read_bytes(gedcom)))
         } else {
             Model::Current(Box::new(reader.parse_gedcom().map_err(|e| e.to_string())?))
         };
@@ -370,7 +373,7 @@ pub fn read_gedzip(bytes: &[u8]) -> Result<Model, String> {
             let mut reader = ged_io::gedzip::GedzipReader::new(std::io::Cursor::new(bytes))
                 .map_err(|e| e.to_string())?;
             let gedcom = reader.read_gedcom_bytes().map_err(|e| e.to_string())?;
-            return Ok(Model::Next(ged_io::next::read_bytes(gedcom)));
+            return Ok(Model::Next(Box::new(ged_io::next::read_bytes(gedcom))));
         }
         ged_io::gedzip::read_gedzip(bytes)
             .map(|d| Model::Current(Box::new(d)))
