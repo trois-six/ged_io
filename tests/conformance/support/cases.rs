@@ -5,7 +5,15 @@
 //!   to the input under the semantic rules, and keep the listed values.
 //! * **L** (leniency): invalid or exotic input. It must be read silently, its
 //!   data kept ("nothing lost": every payload and structure of the input is
-//!   somewhere in the output), and the output must be conformant.
+//!   somewhere in the output), and the output must be conformant. The writer
+//!   repairs what the target version does not permit (the table of
+//!   `spec::conform`), so the data of invalid input is kept in the forms
+//!   that table gives it, which the keep and round-trip checks accept (see
+//!   `keeps` and `semantic::lost`): an extension for a value outside a
+//!   closed set or a misplaced structure (`_PEDI stepchild`), the version's
+//!   case for an enumeration value (`SEX M` for 5.5.1 `SEX m`), a date
+//!   phrase for a date outside the grammar, a pointer to no record kept as
+//!   text. A conformance case accepts nothing but its input.
 
 use super::adapter::{self, Target as WriteTarget};
 use super::checker::{self, Target};
@@ -213,10 +221,11 @@ pub fn run(family: &str, case: &Case) -> Run {
         }
     };
     let out_lines: Vec<&str> = tree::split_lines(&output);
+    let version = tree::parse(&input_text).0;
     let mut lost: Vec<String> = case
         .wants
         .iter()
-        .filter(|w| !out_lines.contains(&w.as_str()))
+        .filter(|w| !keeps(&out_lines, w, case.kind == Kind::L, version))
         .map(|w| format!("missing line `{w}`"))
         .collect();
     lost.extend(missing.iter().map(|m| format!("model lacks `{m}`")));
@@ -262,4 +271,49 @@ pub fn run(family: &str, case: &Case) -> Run {
         output: Some(output),
         failures,
     }
+}
+
+/// Whether the written lines keep a wanted line: as written, or, for a
+/// leniency case, in a form the writer's repair table (`spec::conform`)
+/// gives invalid input — the rules of [`semantic::lost`], line by line:
+/// the tag relocated as an extension (`_PEDI stepchild`), an enumeration
+/// value in another case (`SEX M` for `SEX m`), a date as a 5.5.1 date
+/// phrase (`DATE (7/11/1959)`) or as a 7.x `PHRASE` under an empty `DATE`,
+/// a pointer kept as text (`_FAMS @@F9@` for a dangling `FAMS @F9@`).
+fn keeps(out: &[&str], want: &str, lenient: bool, version: tree::Version) -> bool {
+    if out.contains(&want) {
+        return true;
+    }
+    let Some(w) = lenient.then(|| tree::parse_line(want)).flatten() else {
+        return false;
+    };
+    let wanted = w
+        .payload
+        .map(|p| tree::unescape(p, version))
+        .unwrap_or_default();
+    out.iter().enumerate().any(|(i, line)| {
+        let Some(l) = tree::parse_line(line) else {
+            return false;
+        };
+        if l.level != w.level || l.tag.trim_start_matches('_') != w.tag {
+            return false;
+        }
+        let got = l
+            .payload
+            .map(|p| tree::unescape(p, version))
+            .unwrap_or_default();
+        let phrase = || {
+            out.get(i + 1)
+                .and_then(|n| tree::parse_line(n))
+                .filter(|n| n.level == w.level + 1 && n.tag == "PHRASE")
+                .and_then(|n| n.payload)
+        };
+        got == wanted
+            || (matches!(
+                w.tag,
+                "PEDI" | "STAT" | "ADOP" | "MEDI" | "RESN" | "SEX" | "ROLE" | "QUAY"
+            ) && got.eq_ignore_ascii_case(&wanted))
+            || (w.tag == "DATE"
+                && (got == format!("({wanted})") || (got.is_empty() && phrase() == Some(&wanted))))
+    })
 }

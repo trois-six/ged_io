@@ -4,6 +4,10 @@
 //!   repeatable one twice; it replaces `allged.ged` (non-commercial terms) as
 //!   the all-structures fixture and the benchmark input.
 //! * `extensions70.ged`: GEDCOM 7.0 extensions in every documented form.
+//! * `full551.ged` and `full70.ged`: the hand-written files of the 5.5.1
+//!   and 7.0 conformance reviews, every structure of their chapters with
+//!   invented content. `full551.ged` has a few values 5.5.1 does not permit
+//!   (`DIV Y`, a Julian dual year): a leniency case.
 
 use crate::support::cases::{self, Case, Kind};
 use crate::support::checker::{self, Target};
@@ -174,7 +178,13 @@ fn maximal_fixtures_round_trip() {
     let mut m = Case::new("maximal551", Kind::C, read_fixture("maximal551.ged"));
     m.purpose = "every 5.5.1 structure type".into();
     failures.extend(cases::run("fixture", &m).failures);
-    ratchet::verify("fixture", 2, failures);
+    let mut f = Case::new("full551", Kind::L, read_fixture("full551.ged"));
+    f.purpose = "the 5.5.1 review's every-structure file".into();
+    failures.extend(cases::run("fixture", &f).failures);
+    let mut f = Case::new("full70", Kind::C, read_fixture("full70.ged"));
+    f.purpose = "the 7.0 review's every-structure file".into();
+    failures.extend(cases::run("fixture", &f).failures);
+    ratchet::verify("fixture", 4, failures);
 }
 
 #[test]

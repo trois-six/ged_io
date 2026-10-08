@@ -219,6 +219,17 @@ impl Gen {
         if ty == "NOTE-TRAN" && self.skip.is_none() {
             out.push(N::new("LANG", Some("en".into())));
         }
+        // A 7.x structure has a payload or a substructure (§1.2): one
+        // without either (records aside) gets its first substructure but a
+        // phrase.
+        let record = self.subs("").iter().any(|s| s.ty == ty);
+        if self.v7() && out.is_empty() && self.pay(ty) == Pay::None && !record {
+            if let Some(s) = self.subs(ty).iter().find(|s| s.tag != "PHRASE") {
+                let mut n = N::new(s.tag, self.sample(s.ty, s.tag, tag, 0));
+                n.children = self.required(s.ty, s.tag, depth + 1);
+                out.push(n);
+            }
+        }
         out
     }
 
