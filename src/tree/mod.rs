@@ -181,15 +181,14 @@ impl Tree {
         }
     }
 
-    /// The version the file declares: [`GedcomVersion::V7_0`] when
-    /// `HEAD.GEDC.VERS` starts with 7, [`GedcomVersion::V5_5_1`] otherwise
-    /// (5.5, 5.5.1, 5.5.5, or no declaration).
+    /// The version the file declares, as [`GedcomVersion::from_version_str`]
+    /// reads `HEAD.GEDC.VERS`: 7.0 or 7.1 for 7.x, 5.5.1 otherwise (5.5,
+    /// 5.5.1, 5.5.5, or no declaration).
     #[must_use]
     pub fn version(&self) -> GedcomVersion {
-        match self.escaping {
-            Escaping::V70 => GedcomVersion::V7_0,
-            Escaping::V551 => GedcomVersion::V5_5_1,
-        }
+        self.vers
+            .as_deref()
+            .map_or(GedcomVersion::V5_5_1, GedcomVersion::from_version_str)
     }
 
     /// The `HEAD.GEDC.VERS` payload as written, trimmed.
@@ -586,10 +585,11 @@ impl Structure {
     /// Writes the structure and its substructures as GEDCOM text, at
     /// `level`, with `@` escaped for `version`. See [`Tree::to_gedcom`].
     #[must_use]
-    pub fn to_gedcom(&self, level: u8, version: &GedcomVersion) -> String {
-        let escaping = match version {
-            GedcomVersion::V7_0 => Escaping::V70,
-            _ => Escaping::V551,
+    pub fn to_gedcom(&self, level: u8, version: GedcomVersion) -> String {
+        let escaping = if version.is_v7() {
+            Escaping::V70
+        } else {
+            Escaping::V551
         };
         let mut out = String::new();
         self.write(&mut out, usize::from(level), escaping);

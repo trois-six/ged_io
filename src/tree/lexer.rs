@@ -28,7 +28,7 @@ impl Escaping {
     /// The escaping of a `HEAD.GEDC.VERS` value: 7.x is 7.0, anything else
     /// (5.5, 5.5.1, 5.5.5, missing) is 5.5.1.
     pub(crate) fn of(vers: Option<&str>) -> Self {
-        if vers.is_some_and(|v| v.trim_start().starts_with('7')) {
+        if vers.is_some_and(|v| crate::GedcomVersion::from_version_str(v).is_v7()) {
             Escaping::V70
         } else {
             Escaping::V551

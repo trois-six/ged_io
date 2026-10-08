@@ -175,12 +175,12 @@ fn test_date_values() {
         let lenient = DateValue::parse(&text);
         for version in [V551, V7] {
             // Strict parsing is lenient parsing that may refuse.
-            if let Ok(strict) = DateValue::parse_strict(&text, version.clone()) {
+            if let Ok(strict) = DateValue::parse_strict(&text, version) {
                 assert_eq!(strict, lenient, "{text:?}");
             }
-            let _ = DatePeriod::parse_strict(&text, version.clone());
-            let _ = DateExact::parse_strict(&text, version.clone());
-            let _ = Time::parse_strict(&text, version.clone());
+            let _ = DatePeriod::parse_strict(&text, version);
+            let _ = DateExact::parse_strict(&text, version);
+            let _ = Time::parse_strict(&text, version);
         }
         let _ = DatePeriod::parse(&text);
         let _ = DateExact::parse(&text);
@@ -211,16 +211,16 @@ fn test_date_conversions_conform_or_keep_the_value() {
             phrase: (rng.below(3) == 0).then(|| rng.pick(WORDS).to_string()),
         };
         for version in [V551, V7] {
-            let converted = date.to_version(version.clone());
+            let converted = date.to_version(version);
             let value = converted.value.as_deref().unwrap_or_default();
-            let conforms = DateValue::parse_strict(value, version.clone()).is_ok();
+            let conforms = DateValue::parse_strict(value, version).is_ok();
             assert!(
                 conforms || converted.value == date.value,
                 "{date:?} → {converted:?}"
             );
             // Converting again changes nothing.
-            assert_eq!(converted.to_version(version.clone()), converted, "{date:?}");
-            let _ = date.normalize(version.clone());
+            assert_eq!(converted.to_version(version), converted, "{date:?}");
+            let _ = date.normalize(version);
             let _ = date.datetime();
         }
     }
@@ -233,20 +233,20 @@ fn test_ages() {
         let text = payload(&mut rng);
         let lenient = AgeValue::parse(&text);
         for version in [V551, V7] {
-            if let Ok(strict) = AgeValue::parse_strict(&text, version.clone()) {
+            if let Ok(strict) = AgeValue::parse_strict(&text, version) {
                 assert_eq!(strict, lenient, "{text:?}");
             }
             let age = Age {
                 value: Some(text.clone()),
                 phrase: (rng.below(3) == 0).then(|| rng.pick(WORDS).to_string()),
             };
-            let converted = age.to_version(version.clone());
+            let converted = age.to_version(version);
             let value = converted.value.as_deref().unwrap_or_default();
             assert!(
-                AgeValue::parse_strict(value, version.clone()).is_ok() || converted == age,
+                AgeValue::parse_strict(value, version).is_ok() || converted == age,
                 "{age:?} → {converted:?}"
             );
-            assert_eq!(converted.to_version(version.clone()), converted, "{age:?}");
+            assert_eq!(converted.to_version(version), converted, "{age:?}");
         }
         // A duration writes back to itself in 7.0, whose grammar has weeks.
         if let AgeValue::Duration { .. } = lenient {
@@ -279,7 +279,7 @@ fn test_times() {
         );
         let lenient = Time::parse(&text);
         for version in [V551, V7] {
-            if let Ok(strict) = Time::parse_strict(&text, version.clone()) {
+            if let Ok(strict) = Time::parse_strict(&text, version) {
                 assert_eq!(Some(strict), lenient, "{text:?}");
             }
         }

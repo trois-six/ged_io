@@ -26,37 +26,32 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Represents a GEDCOM specification version.
+/// A GEDCOM version this crate reads and writes.
 ///
-/// This enum identifies which version of the GEDCOM specification a file conforms to,
-/// which affects parsing behavior and available features.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+/// Reading maps whatever `HEAD.GEDC.VERS` declares to the version whose rules
+/// apply ([`GedcomVersion::from_version_str`]): 7.0 for `7` and `7.0.x`, 7.1
+/// for any later 7.x, and 5.5.1 for anything else (5.5, 5.5.1, 5.5.5, no
+/// declaration). The declared string itself stays on the header.
+///
+/// Each version has a static table of the rules the writer follows,
+/// [`GedcomVersion::rules`].
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "json", derive(Serialize, Deserialize))]
 pub enum GedcomVersion {
-    /// GEDCOM 5.5.1 - The previous major version, widely supported.
-    ///
-    /// Originally released as a draft in November 1999, re-released as a standard in October 2019.
+    /// GEDCOM 5.5.1 (1999, re-released as a standard in 2019).
     #[default]
     V5_5_1,
 
-    /// GEDCOM 7.0 - The current major version with modernized features.
-    ///
-    /// Released in 2021 with UTF-8 only encoding, extension schemas, and many new structure types.
+    /// GEDCOM 7.0 (2021): UTF-8 only, no `CONC`, extension schemas.
     V7_0,
 
-    /// An unknown or unsupported GEDCOM version.
-    ///
-    /// Contains the version string as reported in the file.
-    Unknown(VersionString),
+    /// GEDCOM 7.1: the line grammar and header of 7.0, with more structures.
+    V7_1,
 }
 
-/// A wrapper for version strings from unknown GEDCOM versions.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "json", derive(Serialize, Deserialize))]
-pub struct VersionString(pub String);
-
 impl GedcomVersion {
-    /// Creates a `GedcomVersion` from a version string.
+    /// The version whose rules apply to a declared `GEDC.VERS` value.
     ///
     /// # Examples
     ///
@@ -67,148 +62,291 @@ impl GedcomVersion {
     /// assert_eq!(GedcomVersion::from_version_str("5.5"), GedcomVersion::V5_5_1);
     /// assert_eq!(GedcomVersion::from_version_str("7.0"), GedcomVersion::V7_0);
     /// assert_eq!(GedcomVersion::from_version_str("7.0.14"), GedcomVersion::V7_0);
+    /// assert_eq!(GedcomVersion::from_version_str("7.1"), GedcomVersion::V7_1);
+    /// assert_eq!(GedcomVersion::from_version_str("4.0"), GedcomVersion::V5_5_1);
     /// ```
     #[must_use]
     pub fn from_version_str(version: &str) -> Self {
         let version = version.trim();
-
-        // Check for 7.x versions
-        if version.starts_with("7.") || version == "7" {
+        let Some(rest) = version.strip_prefix('7') else {
+            return GedcomVersion::V5_5_1;
+        };
+        if rest.is_empty() {
             return GedcomVersion::V7_0;
         }
-
-        // Check for 5.5.x versions (treat 5.5 and 5.5.1 as equivalent)
-        if version.starts_with("5.5") || version == "5.5" {
+        let Some(rest) = rest.strip_prefix('.') else {
+            // `70`, `7a`: not a 7.x version.
             return GedcomVersion::V5_5_1;
+        };
+        let minor = rest.split('.').next().unwrap_or_default();
+        if minor.bytes().all(|b| b == b'0') {
+            GedcomVersion::V7_0
+        } else {
+            GedcomVersion::V7_1
         }
-
-        // Unknown version
-        GedcomVersion::Unknown(VersionString(version.to_string()))
     }
 
-    /// Returns true if this is GEDCOM 7.0 or later.
+    /// Whether this is GEDCOM 7.0 or a later 7.x.
     #[must_use]
-    pub fn is_v7(&self) -> bool {
-        matches!(self, GedcomVersion::V7_0)
+    pub fn is_v7(self) -> bool {
+        matches!(self, GedcomVersion::V7_0 | GedcomVersion::V7_1)
     }
 
-    /// Returns true if this is GEDCOM 5.5.1 or earlier.
+    /// Whether this is GEDCOM 5.5.1.
     #[must_use]
-    pub fn is_v5(&self) -> bool {
+    pub fn is_v5(self) -> bool {
         matches!(self, GedcomVersion::V5_5_1)
     }
 
-    /// Returns true if the version is unknown.
+    /// The `GEDC.VERS` payload of this version: `5.5.1`, `7.0` or `7.1`.
     #[must_use]
-    pub fn is_unknown(&self) -> bool {
-        matches!(self, GedcomVersion::Unknown(_))
+    pub fn as_str(self) -> &'static str {
+        self.rules().vers_payload
     }
 
-    /// Returns the version string for this GEDCOM version.
+    /// The writing rules of this version.
     #[must_use]
-    pub fn as_str(&self) -> &str {
+    pub const fn rules(self) -> &'static VersionRules {
         match self {
-            GedcomVersion::V5_5_1 => "5.5.1",
-            GedcomVersion::V7_0 => "7.0",
-            GedcomVersion::Unknown(s) => &s.0,
-        }
-    }
-
-    /// Returns whether this version supports the `CONC` tag for line continuation.
-    ///
-    /// GEDCOM 7.0 removed `CONC` support; only `CONT` is used.
-    #[must_use]
-    pub fn supports_conc(&self) -> bool {
-        !self.is_v7()
-    }
-
-    /// Returns whether this version requires UTF-8 encoding.
-    ///
-    /// GEDCOM 7.0 only supports UTF-8 encoding.
-    #[must_use]
-    pub fn requires_utf8(&self) -> bool {
-        self.is_v7()
-    }
-
-    /// Returns whether this version supports the `SCHMA` (schema) structure.
-    ///
-    /// The schema structure for documenting extension tags is only in GEDCOM 7.0+.
-    #[must_use]
-    pub fn supports_schema(&self) -> bool {
-        self.is_v7()
-    }
-
-    /// Returns whether this version supports the `SNOTE` (shared note) record.
-    ///
-    /// Shared notes as records are only in GEDCOM 7.0+.
-    #[must_use]
-    pub fn supports_shared_notes(&self) -> bool {
-        self.is_v7()
-    }
-
-    /// Returns whether this version supports the `SUBN` (submission) record.
-    ///
-    /// The submission record was removed in GEDCOM 7.0.
-    #[must_use]
-    pub fn supports_submission_record(&self) -> bool {
-        !self.is_v7()
-    }
-
-    /// Returns whether this version supports the `CHAR` tag for character encoding.
-    ///
-    /// The `CHAR` tag was removed in GEDCOM 7.0 (UTF-8 is mandatory).
-    #[must_use]
-    pub fn supports_char_encoding(&self) -> bool {
-        !self.is_v7()
-    }
-
-    /// Returns whether all `@` characters should be doubled in payloads.
-    ///
-    /// In GEDCOM 5.5.1, all `@` characters are doubled.
-    /// In GEDCOM 7.0, only the leading `@` is doubled.
-    #[must_use]
-    pub fn doubles_all_at_signs(&self) -> bool {
-        !self.is_v7()
-    }
-
-    /// Returns the major version number.
-    #[must_use]
-    pub fn major(&self) -> u8 {
-        match self {
-            GedcomVersion::V5_5_1 => 5,
-            GedcomVersion::V7_0 => 7,
-            GedcomVersion::Unknown(s) => {
-                s.0.chars()
-                    .take_while(char::is_ascii_digit)
-                    .collect::<String>()
-                    .parse()
-                    .unwrap_or(0)
-            }
-        }
-    }
-
-    /// Returns the minor version number.
-    #[must_use]
-    pub fn minor(&self) -> u8 {
-        match self {
-            GedcomVersion::V5_5_1 => 5,
-            GedcomVersion::V7_0 => 0,
-            GedcomVersion::Unknown(s) => {
-                let parts: Vec<&str> = s.0.split('.').collect();
-                if parts.len() > 1 {
-                    parts[1].parse().unwrap_or(0)
-                } else {
-                    0
-                }
-            }
+            GedcomVersion::V5_5_1 => &V551,
+            GedcomVersion::V7_0 => &V70,
+            GedcomVersion::V7_1 => &V71,
         }
     }
 }
 
 impl fmt::Display for GedcomVersion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.as_str())
+        f.write_str(self.as_str())
     }
+}
+
+/// How text escapes the `@` sign.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AtEscape {
+    /// GEDCOM 5.5.1 (p. 12): every `@` of text is doubled, except in an
+    /// escape sequence such as `@#DJULIAN@`.
+    AllAtSigns,
+    /// GEDCOM 7.x (§1.3): only a leading `@` of a line is doubled.
+    LeadingOnly,
+}
+
+/// The grammar of cross-reference identifiers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum XrefGrammar {
+    /// GEDCOM 5.5.1 (`pointer`, `pointer_char`, `xref_ID`, pp. 13 and 16):
+    /// a letter, digit or `_`, then any characters but `@` and the control
+    /// characters (spaces, `!` and `:` included), at most `max_len`
+    /// characters with the delimiters.
+    V551 {
+        /// The longest identifier, delimiters included.
+        max_len: usize,
+    },
+    /// GEDCOM 7.x (§1.3): `@[A-Z0-9_]+@`, never `@VOID@`.
+    V7,
+}
+
+/// The rules of the line grammar and the header that one GEDCOM version sets
+/// for written files.
+///
+/// The writer consults these tables instead of testing version strings: one
+/// static per version, reached with [`GedcomVersion::rules`].
+///
+/// ```
+/// use ged_io::GedcomVersion;
+///
+/// let rules = GedcomVersion::V5_5_1.rules();
+/// assert_eq!(rules.max_line_length(), Some(255));
+/// assert!(rules.uses_conc());
+/// assert!(GedcomVersion::V7_0.rules().max_line_length().is_none());
+/// assert!(!GedcomVersion::V7_0.rules().is_valid_xref("@i1@"));
+/// ```
+#[derive(Debug)]
+pub struct VersionRules {
+    pub(crate) version: GedcomVersion,
+    /// The `HEAD.GEDC.VERS` payload.
+    pub(crate) vers_payload: &'static str,
+    /// The longest line, terminator included (5.5.1 p. 11).
+    pub(crate) max_line_len: Option<usize>,
+    /// Whether `CONC` exists.
+    pub(crate) conc: bool,
+    pub(crate) at_escape: AtEscape,
+    /// The `HEAD.GEDC.FORM` payload, when the version has one.
+    pub(crate) gedc_form: Option<&'static str>,
+    /// Whether `HEAD.CHAR` exists (it must then name the output encoding).
+    pub(crate) head_char: bool,
+    pub(crate) xref: XrefGrammar,
+}
+
+/// GEDCOM 5.5.1.
+pub static V551: VersionRules = VersionRules {
+    version: GedcomVersion::V5_5_1,
+    vers_payload: "5.5.1",
+    max_line_len: Some(255),
+    conc: true,
+    at_escape: AtEscape::AllAtSigns,
+    gedc_form: Some("LINEAGE-LINKED"),
+    head_char: true,
+    xref: XrefGrammar::V551 { max_len: 22 },
+};
+
+/// GEDCOM 7.0.
+pub static V70: VersionRules = VersionRules {
+    version: GedcomVersion::V7_0,
+    vers_payload: "7.0",
+    max_line_len: None,
+    conc: false,
+    at_escape: AtEscape::LeadingOnly,
+    gedc_form: None,
+    head_char: false,
+    xref: XrefGrammar::V7,
+};
+
+/// GEDCOM 7.1, whose line grammar and header rules are those of 7.0.
+pub static V71: VersionRules = VersionRules {
+    version: GedcomVersion::V7_1,
+    vers_payload: "7.1",
+    ..V70_LINES
+};
+
+/// The 7.x line rules, shared by [`V70`] and [`V71`].
+const V70_LINES: VersionRules = VersionRules {
+    version: GedcomVersion::V7_0,
+    vers_payload: "7.0",
+    max_line_len: None,
+    conc: false,
+    at_escape: AtEscape::LeadingOnly,
+    gedc_form: None,
+    head_char: false,
+    xref: XrefGrammar::V7,
+};
+
+impl VersionRules {
+    /// The version these rules belong to.
+    #[must_use]
+    pub fn version(&self) -> GedcomVersion {
+        self.version
+    }
+
+    /// The `HEAD.GEDC.VERS` payload written.
+    #[must_use]
+    pub fn vers(&self) -> &'static str {
+        self.vers_payload
+    }
+
+    /// The longest line, level, identifier, tag, payload, delimiters and
+    /// terminator included: `Some(255)` in 5.5.1, `None` (no limit) in 7.x.
+    #[must_use]
+    pub fn max_line_length(&self) -> Option<usize> {
+        self.max_line_len
+    }
+
+    /// Whether long payloads are continued with `CONC` (5.5.1 only).
+    #[must_use]
+    pub fn uses_conc(&self) -> bool {
+        self.conc
+    }
+
+    /// Whether every `@` of text is doubled (5.5.1) rather than only a
+    /// leading one (7.x).
+    #[must_use]
+    pub fn doubles_every_at_sign(&self) -> bool {
+        self.at_escape == AtEscape::AllAtSigns
+    }
+
+    /// The `HEAD.GEDC.FORM` payload, `LINEAGE-LINKED` in 5.5.1; 7.x has no
+    /// `FORM`.
+    #[must_use]
+    pub fn gedc_form(&self) -> Option<&'static str> {
+        self.gedc_form
+    }
+
+    /// Whether the header names its character set in `HEAD.CHAR` (5.5.1);
+    /// 7.x is always UTF-8 and has no `CHAR`.
+    #[must_use]
+    pub fn has_head_char(&self) -> bool {
+        self.head_char
+    }
+
+    /// Whether a cross-reference identifier, delimiters included, follows
+    /// the grammar of the version.
+    #[must_use]
+    pub fn is_valid_xref(&self, xref: &str) -> bool {
+        let Some(id) = xref
+            .strip_prefix('@')
+            .and_then(|x| x.strip_suffix('@'))
+            .filter(|id| !id.is_empty())
+        else {
+            return false;
+        };
+        match self.xref {
+            XrefGrammar::V7 => {
+                id != "VOID"
+                    && id
+                        .bytes()
+                        .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+            }
+            XrefGrammar::V551 { max_len } => {
+                xref.chars().count() <= max_len
+                    && id.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+                    && !id.chars().any(|c| c == '@' || c.is_control())
+            }
+        }
+    }
+
+    /// Whether a tag follows the grammar of the version: 7.x `[A-Z][A-Z0-9_]*`
+    /// or `_[A-Z0-9_]+`; 5.5.1 letters, digits and underscores, starting with
+    /// a letter or `_`, upper case unless it starts with `_`, at most 31
+    /// characters (p. 41).
+    #[must_use]
+    pub fn is_valid_tag(&self, tag: &str) -> bool {
+        let b = tag.as_bytes();
+        let Some(&first) = b.first() else {
+            return false;
+        };
+        match self.xref {
+            XrefGrammar::V7 => {
+                let tail_ok = |s: &[u8]| {
+                    s.iter()
+                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == b'_')
+                };
+                if first == b'_' {
+                    b.len() > 1 && tail_ok(&b[1..])
+                } else {
+                    first.is_ascii_uppercase() && tail_ok(b)
+                }
+            }
+            XrefGrammar::V551 { .. } => {
+                b.len() <= MAX_TAG_551
+                    && (first == b'_' || first.is_ascii_uppercase())
+                    && b.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'_')
+                    && (first == b'_' || !b.iter().any(u8::is_ascii_lowercase))
+                    && (first != b'_' || b.len() > 1)
+            }
+        }
+    }
+
+    /// Whether a character may not appear in a payload. GEDCOM 7.x (§1.1)
+    /// bans the C0 controls but tab, DEL, the C1 controls, U+FFFE and
+    /// U+FFFF; GEDCOM 5.5.1 (`any_char`, pp. 11 and 14) admits no control
+    /// character at all, tab included. Line breaks inside text are written
+    /// as `CONT` lines, never as characters.
+    #[must_use]
+    pub fn is_banned(&self, c: char) -> bool {
+        is_banned(c) || (c == '\t' && self.xref != XrefGrammar::V7)
+    }
+}
+
+/// The longest GEDCOM 5.5.1 tag (p. 41, `TAG`: 1 to 31 characters).
+pub(crate) const MAX_TAG_551: usize = 31;
+
+/// The characters every version bans (see [`VersionRules::is_banned`],
+/// which adds tab in 5.5.1).
+pub(crate) fn is_banned(c: char) -> bool {
+    (c < ' ' && c != '\t')
+        || ('\u{7f}'..='\u{9f}').contains(&c)
+        || c == '\u{fffe}'
+        || c == '\u{ffff}'
 }
 
 /// Detects the GEDCOM version from file content.
@@ -268,109 +406,109 @@ pub fn appears_to_be_v7(content: &str) -> bool {
     version.is_v7() || has_schema || has_snote || (has_bom && !version.is_v5())
 }
 
-/// Feature flags for GEDCOM version capabilities.
-///
-/// This struct provides a convenient way to check multiple version-dependent
-/// features at once.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(clippy::struct_excessive_bools)]
-pub struct VersionFeatures {
-    /// Whether `CONC` tag is supported
-    pub conc_supported: bool,
-    /// Whether `SCHMA` (schema) is supported
-    pub schema_supported: bool,
-    /// Whether `SNOTE` (shared note record) is supported
-    pub shared_notes_supported: bool,
-    /// Whether `SUBN` (submission record) is supported
-    pub submission_supported: bool,
-    /// Whether UTF-8 encoding is required
-    pub utf8_required: bool,
-    /// Whether all `@` signs should be doubled (vs just leading)
-    pub double_all_at_signs: bool,
-    /// Whether `CHAR` encoding tag is supported
-    pub char_encoding_supported: bool,
-}
-
-impl From<GedcomVersion> for VersionFeatures {
-    fn from(version: GedcomVersion) -> Self {
-        VersionFeatures {
-            conc_supported: version.supports_conc(),
-            schema_supported: version.supports_schema(),
-            shared_notes_supported: version.supports_shared_notes(),
-            submission_supported: version.supports_submission_record(),
-            utf8_required: version.requires_utf8(),
-            double_all_at_signs: version.doubles_all_at_signs(),
-            char_encoding_supported: version.supports_char_encoding(),
-        }
-    }
-}
-
-impl VersionFeatures {
-    /// Creates feature flags for GEDCOM 5.5.1.
-    #[must_use]
-    pub fn v5_5_1() -> Self {
-        GedcomVersion::V5_5_1.into()
-    }
-
-    /// Creates feature flags for GEDCOM 7.0.
-    #[must_use]
-    pub fn v7_0() -> Self {
-        GedcomVersion::V7_0.into()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_version_from_str() {
-        assert_eq!(
-            GedcomVersion::from_version_str("5.5.1"),
-            GedcomVersion::V5_5_1
-        );
-        assert_eq!(
-            GedcomVersion::from_version_str("5.5"),
-            GedcomVersion::V5_5_1
-        );
-        assert_eq!(
-            GedcomVersion::from_version_str("5.5.0"),
-            GedcomVersion::V5_5_1
-        );
-        assert_eq!(GedcomVersion::from_version_str("7.0"), GedcomVersion::V7_0);
-        assert_eq!(
-            GedcomVersion::from_version_str("7.0.14"),
-            GedcomVersion::V7_0
-        );
-        assert_eq!(GedcomVersion::from_version_str("7"), GedcomVersion::V7_0);
-        assert!(GedcomVersion::from_version_str("6.0").is_unknown());
+        for (vers, version) in [
+            ("5.5.1", GedcomVersion::V5_5_1),
+            ("5.5", GedcomVersion::V5_5_1),
+            ("5.5.5", GedcomVersion::V5_5_1),
+            ("", GedcomVersion::V5_5_1),
+            ("4.0", GedcomVersion::V5_5_1),
+            ("70", GedcomVersion::V5_5_1),
+            ("7", GedcomVersion::V7_0),
+            ("7.0", GedcomVersion::V7_0),
+            (" 7.0.14 ", GedcomVersion::V7_0),
+            ("7.00", GedcomVersion::V7_0),
+            ("7.1", GedcomVersion::V7_1),
+            ("7.1.2", GedcomVersion::V7_1),
+            ("7.2", GedcomVersion::V7_1),
+        ] {
+            assert_eq!(GedcomVersion::from_version_str(vers), version, "{vers:?}");
+        }
     }
 
     #[test]
     fn test_version_display() {
         assert_eq!(GedcomVersion::V5_5_1.to_string(), "5.5.1");
         assert_eq!(GedcomVersion::V7_0.to_string(), "7.0");
+        assert_eq!(GedcomVersion::V7_1.to_string(), "7.1");
     }
 
     #[test]
-    fn test_version_features() {
-        let v5 = GedcomVersion::V5_5_1;
-        assert!(v5.supports_conc());
-        assert!(!v5.requires_utf8());
-        assert!(!v5.supports_schema());
-        assert!(!v5.supports_shared_notes());
-        assert!(v5.supports_submission_record());
-        assert!(v5.supports_char_encoding());
-        assert!(v5.doubles_all_at_signs());
+    fn test_rules() {
+        let v5 = GedcomVersion::V5_5_1.rules();
+        assert_eq!(v5.version(), GedcomVersion::V5_5_1);
+        assert!(v5.uses_conc() && v5.doubles_every_at_sign() && v5.has_head_char());
+        assert_eq!(v5.gedc_form(), Some("LINEAGE-LINKED"));
+        assert_eq!(v5.max_line_length(), Some(255));
+        for v7 in [GedcomVersion::V7_0, GedcomVersion::V7_1] {
+            let r = v7.rules();
+            assert_eq!(r.version(), v7);
+            assert_eq!(r.vers(), v7.as_str());
+            assert!(!r.uses_conc() && !r.doubles_every_at_sign() && !r.has_head_char());
+            assert_eq!(r.gedc_form(), None);
+            assert_eq!(r.max_line_length(), None);
+        }
+    }
 
-        let v7 = GedcomVersion::V7_0;
-        assert!(!v7.supports_conc());
-        assert!(v7.requires_utf8());
-        assert!(v7.supports_schema());
-        assert!(v7.supports_shared_notes());
-        assert!(!v7.supports_submission_record());
-        assert!(!v7.supports_char_encoding());
-        assert!(!v7.doubles_all_at_signs());
+    #[test]
+    fn test_xref_grammar() {
+        let (v5, v7) = (&V551, &V70);
+        for x in ["@I1@", "@F_2@", "@VOID@X@"] {
+            assert_eq!(v7.is_valid_xref(x), x != "@VOID@X@", "{x}");
+        }
+        assert!(!v7.is_valid_xref("@VOID@"));
+        assert!(!v7.is_valid_xref("@i1@"));
+        assert!(!v7.is_valid_xref("@@"));
+        assert!(v5.is_valid_xref("@i1@"));
+        assert!(v5.is_valid_xref("@VOID@"));
+        assert!(v5.is_valid_xref("@ABCDEFGHIJKLMNOPQRST@"));
+        assert!(!v5.is_valid_xref("@ABCDEFGHIJKLMNOPQRSTU@"));
+        assert!(!v5.is_valid_xref("@#I1@"));
+        assert!(!v5.is_valid_xref("@I\t1@"));
+        // p. 13: spaces, `!`, `:` and `_` first are 5.5.1 identifier characters.
+        for x in ["@I 1@", "@I1!2@", "@!2@X@", "@NET:I1@", "@_I1@", "@Iö1@"] {
+            assert_eq!(v5.is_valid_xref(x), x != "@!2@X@", "{x}");
+        }
+    }
+
+    #[test]
+    fn test_tag_grammar() {
+        let (v5, v7) = (&V551, &V70);
+        for t in ["NAME", "_X", "_EXT_1", "A1"] {
+            assert!(v5.is_valid_tag(t) && v7.is_valid_tag(t), "{t}");
+        }
+        assert!(v5.is_valid_tag("_low"));
+        assert!(!v7.is_valid_tag("_low"));
+        assert!(v5.is_valid_tag(&"_X".repeat(15)));
+        assert!(!v5.is_valid_tag(&"X".repeat(32)));
+        assert!(v7.is_valid_tag(&"X".repeat(32)));
+        for t in ["", "_", "name", "1A", "NA-ME", "NA ME"] {
+            assert!(!v5.is_valid_tag(t) && !v7.is_valid_tag(t), "{t}");
+        }
+    }
+
+    #[test]
+    fn test_tab_is_banned_in_551_only() {
+        assert!(V551.is_banned('\t'));
+        assert!(!V70.is_banned('\t'));
+        assert!(V70.is_banned('\u{7}') && V551.is_banned('\u{7}'));
+    }
+
+    #[test]
+    fn test_banned() {
+        for c in [
+            '\0', '\u{7}', '\n', '\r', '\u{7f}', '\u{85}', '\u{fffe}', '\u{ffff}',
+        ] {
+            assert!(is_banned(c), "{c:?}");
+        }
+        for c in ['\t', ' ', 'a', '\u{a0}', '\u{feff}'] {
+            assert!(!is_banned(c), "{c:?}");
+        }
     }
 
     #[test]
@@ -405,38 +543,11 @@ mod tests {
     }
 
     #[test]
-    fn test_version_major_minor() {
-        assert_eq!(GedcomVersion::V5_5_1.major(), 5);
-        assert_eq!(GedcomVersion::V5_5_1.minor(), 5);
-
-        assert_eq!(GedcomVersion::V7_0.major(), 7);
-        assert_eq!(GedcomVersion::V7_0.minor(), 0);
-    }
-
-    #[test]
-    fn test_version_features_struct() {
-        let features = VersionFeatures::v5_5_1();
-        assert!(features.conc_supported);
-        assert!(!features.utf8_required);
-
-        let features = VersionFeatures::v7_0();
-        assert!(!features.conc_supported);
-        assert!(features.utf8_required);
-    }
-
-    #[test]
     fn test_is_predicates() {
         assert!(GedcomVersion::V5_5_1.is_v5());
         assert!(!GedcomVersion::V5_5_1.is_v7());
-        assert!(!GedcomVersion::V5_5_1.is_unknown());
-
         assert!(!GedcomVersion::V7_0.is_v5());
         assert!(GedcomVersion::V7_0.is_v7());
-        assert!(!GedcomVersion::V7_0.is_unknown());
-
-        let unknown = GedcomVersion::Unknown(VersionString("4.0".to_string()));
-        assert!(!unknown.is_v5());
-        assert!(!unknown.is_v7());
-        assert!(unknown.is_unknown());
+        assert!(GedcomVersion::V7_1.is_v7());
     }
 }

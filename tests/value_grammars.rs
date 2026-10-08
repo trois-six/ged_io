@@ -370,14 +370,14 @@ fn test_date_value_samples() {
         (V7, DATE_VALUES_7, INVALID_DATE_VALUES_7),
     ] {
         for value in DATE_VALUES.iter().chain(valid) {
-            let parsed = DateValue::parse_strict(value, version.clone())
+            let parsed = DateValue::parse_strict(value, version)
                 .unwrap_or_else(|error| panic!("{version:?}: {error}"));
             // The strict reading is the lenient one.
             assert_eq!(parsed, DateValue::parse(value), "{value}");
         }
         for value in INVALID_DATE_VALUES.iter().chain(invalid) {
             assert!(
-                DateValue::parse_strict(value, version.clone()).is_err(),
+                DateValue::parse_strict(value, version).is_err(),
                 "{version:?}: {value}"
             );
         }
@@ -414,7 +414,7 @@ fn test_date_value_samples_through_the_reader_and_writer() {
         for (index, sample) in samples.iter().enumerate() {
             let event = &written.individuals[0].events[index];
             let date = event.date.as_ref().unwrap();
-            if DateValue::parse_strict(sample, target.clone()).is_ok() {
+            if DateValue::parse_strict(sample, target).is_ok() {
                 // Valid: re-emitted identically.
                 assert_eq!(date.value.as_deref(), Some(*sample));
             } else {
@@ -443,10 +443,7 @@ fn test_period_and_exact_samples() {
             "FROM MAR 2000 TO JUN 2000",
             "FROM 30 NOV 2000 TO 1 DEC 2000",
         ] {
-            assert!(
-                DatePeriod::parse_strict(valid, version.clone()).is_ok(),
-                "{valid}"
-            );
+            assert!(DatePeriod::parse_strict(valid, version).is_ok(), "{valid}");
         }
         for invalid in [
             "2023",
@@ -456,15 +453,12 @@ fn test_period_and_exact_samples() {
             "BEF 2023",
         ] {
             assert!(
-                DatePeriod::parse_strict(invalid, version.clone()).is_err(),
+                DatePeriod::parse_strict(invalid, version).is_err(),
                 "{invalid}"
             );
         }
         for valid in ["3 DEC 2023", "03 DEC 2023"] {
-            assert!(
-                DateExact::parse_strict(valid, version.clone()).is_ok(),
-                "{valid}"
-            );
+            assert!(DateExact::parse_strict(valid, version).is_ok(), "{valid}");
         }
         for invalid in [
             "invalid",
@@ -474,7 +468,7 @@ fn test_period_and_exact_samples() {
             "ABT 3 DEC 2023",
         ] {
             assert!(
-                DateExact::parse_strict(invalid, version.clone()).is_err(),
+                DateExact::parse_strict(invalid, version).is_err(),
                 "{invalid}"
             );
         }
@@ -490,25 +484,19 @@ fn test_period_and_exact_samples() {
 fn test_time_samples() {
     for version in [V551, V7] {
         for valid in ["02:50", "2:50", "12:34:56.789"] {
-            assert!(
-                Time::parse_strict(valid, version.clone()).is_ok(),
-                "{valid}"
-            );
+            assert!(Time::parse_strict(valid, version).is_ok(), "{valid}");
         }
         for invalid in [
             " ", "invalid", "000:00", "24:00:00", "2:5", "2:60", "2:00:60",
         ] {
-            assert!(
-                Time::parse_strict(invalid, version.clone()).is_err(),
-                "{invalid}"
-            );
+            assert!(Time::parse_strict(invalid, version).is_err(), "{invalid}");
             // Kept by the date that holds it.
             let date = Date {
                 value: Some("1 DEC 2023".into()),
                 time: Some(invalid.into()),
                 phrase: None,
             };
-            let converted = date.to_version(version.clone());
+            let converted = date.to_version(version);
             let kept = converted.time.as_deref() == Some(invalid)
                 || converted.time.as_deref().and_then(Time::parse) == Time::parse(invalid);
             assert!(kept, "{invalid}: {converted:?}");
@@ -633,13 +621,13 @@ fn test_age_samples() {
         (V551, AGES_551, INVALID_AGES_551),
     ] {
         for value in valid {
-            let parsed = AgeValue::parse_strict(value, version.clone())
+            let parsed = AgeValue::parse_strict(value, version)
                 .unwrap_or_else(|error| panic!("{version:?}: {error}"));
             assert_eq!(parsed, AgeValue::parse(value), "{value}");
         }
         for value in invalid {
             assert!(
-                AgeValue::parse_strict(value, version.clone()).is_err(),
+                AgeValue::parse_strict(value, version).is_err(),
                 "{version:?}: {value}"
             );
         }

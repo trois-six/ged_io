@@ -230,46 +230,23 @@ fn test_gedcom_7_with_individuals_and_families() {
     assert!(data.find_shared_note("@N1@").is_some());
 }
 
-/// Test version features struct.
+/// The writing rules of each version.
 #[test]
-fn test_version_features() {
-    use ged_io::VersionFeatures;
-
-    let v5_features = VersionFeatures::v5_5_1();
-    assert!(v5_features.conc_supported);
-    assert!(!v5_features.utf8_required);
-    assert!(!v5_features.schema_supported);
-    assert!(!v5_features.shared_notes_supported);
-    assert!(v5_features.submission_supported);
-    assert!(v5_features.char_encoding_supported);
-    assert!(v5_features.double_all_at_signs);
-
-    let v7_features = VersionFeatures::v7_0();
-    assert!(!v7_features.conc_supported);
-    assert!(v7_features.utf8_required);
-    assert!(v7_features.schema_supported);
-    assert!(v7_features.shared_notes_supported);
-    assert!(!v7_features.submission_supported);
-    assert!(!v7_features.char_encoding_supported);
-    assert!(!v7_features.double_all_at_signs);
-}
-
-/// Test version comparison and methods.
-#[test]
-fn test_version_methods() {
+fn test_version_rules() {
     let v5 = GedcomVersion::V5_5_1;
     assert_eq!(v5.as_str(), "5.5.1");
-    assert_eq!(v5.major(), 5);
-    assert_eq!(v5.minor(), 5);
-    assert!(v5.supports_conc());
-    assert!(!v5.requires_utf8());
+    assert!(v5.rules().uses_conc());
+    assert!(v5.rules().doubles_every_at_sign());
+    assert!(v5.rules().has_head_char());
 
-    let v7 = GedcomVersion::V7_0;
-    assert_eq!(v7.as_str(), "7.0");
-    assert_eq!(v7.major(), 7);
-    assert_eq!(v7.minor(), 0);
-    assert!(!v7.supports_conc());
-    assert!(v7.requires_utf8());
+    for v7 in [GedcomVersion::V7_0, GedcomVersion::V7_1] {
+        assert!(!v7.rules().uses_conc());
+        assert!(!v7.rules().doubles_every_at_sign());
+        assert!(!v7.rules().has_head_char());
+        assert_eq!(v7.rules().gedc_form(), None);
+    }
+    assert_eq!(GedcomVersion::V7_0.as_str(), "7.0");
+    assert_eq!(GedcomVersion::V7_1.as_str(), "7.1");
 }
 
 /// Test parsing version strings.
@@ -288,9 +265,12 @@ fn test_version_parsing() {
         GedcomVersion::from_version_str("7.0.14"),
         GedcomVersion::V7_0
     );
-
-    let unknown = GedcomVersion::from_version_str("6.0");
-    assert!(unknown.is_unknown());
+    assert_eq!(GedcomVersion::from_version_str("7.1"), GedcomVersion::V7_1);
+    // Anything that is not 7.x follows the 5.5.1 rules.
+    assert_eq!(
+        GedcomVersion::from_version_str("6.0"),
+        GedcomVersion::V5_5_1
+    );
 }
 
 /// Test that is_empty works correctly with shared notes.
