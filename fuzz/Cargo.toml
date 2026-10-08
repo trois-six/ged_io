@@ -1,0 +1,25 @@
+[package]
+name = "ged_io-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "cargo-fuzz targets for ged_io (not part of the crate's build)."
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+ged_io = { path = "..", features = ["json", "gedzip"] }
+serde_json = "1.0"
+
+# A stand-alone workspace, so the crate's own builds never see this package.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "entry_points"
+path = "fuzz_targets/entry_points.rs"
+test = false
+doc = false
+bench = false
