@@ -41,11 +41,26 @@
 //! | At most the permitted number of each substructure | `Cardinality` |
 //! | Every required substructure; 7.x: a note translation has a `MIME` or a `LANG` | `MissingRequired` |
 //! | Payloads of their type: none, `Y`, integers, names, dates, ages, times, languages, media types (7.x `MIME` of a text: `text/…`), file paths, URIs, coordinates, tag definitions, pointers where pointers belong and only there; 7.x: a structure has a payload or a substructure (records and pseudo-structures aside) | `Payload` |
-//! | Enumeration values: 7.x exact or an extension value, 5.5.1 in any case (p. 21); open sets admit any value | `EnumValue` |
+//! | Enumeration values: 7.x exact or an extension value, 5.5.1 in any case (p. 21); open sets admit any value; 5.5.1 file formats are open, but a media type is no format ([accepted practice](#accepted-practice)) | `EnumValue` |
 //! | Pointers name a record of the type the structure points to | `PointerTarget` |
 //! | Pointers name a record of the file (7.x `@VOID@` and 5.5.1 substructure and network pointers aside) | `DanglingPointer` |
 //! | `HEAD` first and once, `TRLR` last, once and empty, `GEDC.VERS` naming the version | `Header` |
 //! | No banned character in a payload: 7.x C0 controls but tab and line breaks, DEL, C1 controls, U+FFFE and U+FFFF; 5.5.1 no control character at all | `Character` |
+//!
+//! ## Accepted practice
+//!
+//! One deliberate exception to strict conformance, an owner decision: the
+//! 5.5.1 file formats (`MULTIMEDIA_FORMAT`, p. 54) are an open list. The
+//! specification lists the seven formats of 1999 (`bmp`, `gif`, `jpg`,
+//! `ole`, `pcx`, `tif`, `wav`), while files name `png`, `pdf`, `webp` and
+//! the like, and no other 5.5.1 structure says what a file is: holding the
+//! list closed would write every such `FORM` as an extension, then its
+//! `FILE` (which requires a `FORM`), then the `OBJE` (which requires a
+//! `FILE`), then every pointer to it. So the validator reports no
+//! deviation for any word as a 5.5.1 `FORM` of a file (a value of the list
+//! in any case, as every 5.5.1 value); a media type (`image/png`) is no
+//! format and is reported. Strict reading therefore accepts any 5.5.1
+//! format but a media type. 7.x, whose `FORM` is a media type, is unchanged.
 //!
 //! Extension structures (`_TAG`) are checked for what holds everywhere —
 //! tags, identifiers, pointers, characters — and their substructures mean
@@ -72,6 +87,7 @@
 //! |---|---|---|---|
 //! | a | Closed-enumeration value not in the set | `OTHER` and a `PHRASE` with the value, where the set has `OTHER` and the structure takes a `PHRASE` it has not; otherwise `_TAG` (a list with such a value too) | `_TAG` |
 //! | b | Value in the wrong case | Upper case; a list is written `A, B` | The specification's spelling |
+//! | b | A media type as a 5.5.1 file format ([accepted practice](#accepted-practice)) | — | Its file format, lower case: the extension of a known type (`image/jpeg` is `jpg`, `application/pdf` is `pdf`), else the subtype without `x-`, `vnd.` and `+…` (`image/png` is `png`); any other format as written |
 //! | c | Text or nothing where a pointer belongs, a dangling pointer | `@VOID@`, and a `PHRASE` with the text or the pointer, where the structure takes one it has not; nothing becomes `@VOID@`; otherwise `_TAG` with the text | `_TAG` with the text (an empty nullable pointer stays) |
 //! | c | A pointer where text belongs | The pointer as text | Same |
 //! | c | A pointer to a record of another type | `_TAG` with the pointer | Same |
@@ -92,8 +108,9 @@
 //! extension that cannot stay standard is never given such a tag.
 //!
 //! Synthesised substructures (g), besides the header's: a `FORM` of a `FILE` from the file's extension (7.x a media type,
-//! `application/octet-stream` when unknown; 5.5.1 a format of its list, else
-//! the `FILE` becomes `_FILE`); 7.x `LANG` of a translation (`und`),
+//! `application/octet-stream` when unknown; 5.5.1 the extension, lower case,
+//! in the list's spelling when it has one, `jpeg` as `jpg`, and `unknown`
+//! for a path without one); 7.x `LANG` of a translation (`und`),
 //! `ASSO.ROLE` (`OTHER`) and `SLGC.FAMC` (`@VOID@`); any other required
 //! text without required parts of its own, such as `TYPE`, `RELA` or a
 //! record's `NAME`: `Unknown`. Dates, ages, coordinates and files are never

@@ -2,8 +2,7 @@
 //! output is stable: for any bytes, reading never panics; for every
 //! version, the written output reads back with every structure the model
 //! types read typed (`ledger::untyped`), and writing what was read back
-//! gives the same structures (records and siblings of different tags in
-//! any order).
+//! gives the same bytes: write(read(write(x))) == write(x).
 #![no_main]
 
 use ged_io::next::{ledger, read_bytes, read_str, write_string};
@@ -26,21 +25,9 @@ fuzz_target!(|data: &[u8]| {
         let again = read_str(&out);
         let untyped = ledger::untyped(&again);
         assert!(untyped.is_empty(), "{version}: {untyped:?}");
+        // Writing is idempotent: what was written, read back and written
+        // again, is the same bytes.
         let twice = write_string(&again, &writer).expect("a written dataset writes");
-        let canonical = |text: &str| {
-            let mut records = ged_io::tree::parse_tree(text).to_structures();
-            fn sort(s: &mut ged_io::tree::Structure) {
-                s.substructures.iter_mut().for_each(sort);
-                s.substructures
-                    .sort_by(|a, b| a.tag.as_str().cmp(b.tag.as_str()));
-            }
-            records.iter_mut().for_each(sort);
-            records.sort_by(|a, b| a.tag.as_str().cmp(b.tag.as_str()));
-            records
-        };
-        assert!(
-            canonical(&twice) == canonical(&out),
-            "{version}: not stable"
-        );
+        assert!(twice == out, "{version}: not stable\n{out}\n{twice}");
     }
 });

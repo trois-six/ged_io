@@ -38,8 +38,8 @@ gedcom4j/sample/issue81.ged	OK	11	cardinality-min
 gedcom4j/sample/issue95.ged	OK	0	
 gedcom4j/sample/issue96.ged	OK	9	
 gedcom4j/sample/john_of_sea_20101009.ged	OK	0	cardinality-min,misplaced
-gedcom4j/sample/legacycustomtags.ged	OK	2	cardinality-min,misplaced,payload-date,payload-unexpected,pointer-dangling
-gedcom4j/sample/legacynocustomtags.ged	OK	2	cardinality-min,misplaced,payload-date,payload-unexpected,pointer-dangling
+gedcom4j/sample/legacycustomtags.ged	OK	2	cardinality-min,misplaced,payload-date,pointer-dangling
+gedcom4j/sample/legacynocustomtags.ged	OK	2	cardinality-min,misplaced,payload-date,pointer-dangling
 gedcom4j/sample/minimal55.ged	OK	4	
 gedcom4j/sample/minimal55indented.ged	OK	4	
 gedcom4j/sample/problemFile.ged	OK	0	cardinality-min,misplaced,payload-date
@@ -63,15 +63,15 @@ gramps/data/tests/exp_sample_ged.ged	FATAL	0
 gramps/data/tests/imp_ANSEL_CR.ged	OK	66	
 gramps/data/tests/imp_ANSEL_CRLF.ged	OK	66	
 gramps/data/tests/imp_ANSEL_LF.ged	OK	66	
-gramps/data/tests/imp_CustTags.ged	OK	0	payload-unexpected
+gramps/data/tests/imp_CustTags.ged	OK	0	
 gramps/data/tests/imp_FTM_16dec2015a-mod1.ged	OK	6	cardinality-min,payload-date
 gramps/data/tests/imp_FTM_LINK.ged	OK	0	cardinality-min
 gramps/data/tests/imp_FTM_OCCU_bug.ged	OK	0	cardinality-min
-gramps/data/tests/imp_FTM_PHOTO.ged	OK	0	cardinality-min,payload-enum
+gramps/data/tests/imp_FTM_PHOTO.ged	OK	0	cardinality-min
 gramps/data/tests/imp_Latin_1_CR.ged	OK	0	payload-enum
 gramps/data/tests/imp_Latin_1_CRLF.ged	OK	0	payload-enum
 gramps/data/tests/imp_Latin_1_LF.ged	OK	0	payload-enum
-gramps/data/tests/imp_MediaTest.ged	OK	20	cardinality-min,misplaced,payload-enum
+gramps/data/tests/imp_MediaTest.ged	OK	20	cardinality-min,misplaced
 gramps/data/tests/imp_MixInlineXrefNote.ged	OK	0	
 gramps/data/tests/imp_Paris.ged	OK	2	
 gramps/data/tests/imp_PhonFax_dfs.ged	OK	0	misplaced

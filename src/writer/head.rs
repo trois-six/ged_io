@@ -11,7 +11,9 @@
 //!   has none) and `SUBM` pointer;
 //! - no cross-reference identifier.
 //!
-//! Every other substructure is kept, in its order.
+//! Every other substructure is kept, in its order. The structures added go
+//! where the typed model writes them: `GEDC`, `CHAR` and `SOUR` first, `SUBM`
+//! after `DEST` and `DATE`.
 
 use crate::tree::{Payload, Structure, Xref};
 use crate::version::VersionRules;
@@ -36,6 +38,9 @@ pub(crate) fn complete(
     charset: &str,
     submitter: Option<String>,
 ) {
+    if submitter.is_none() && is_complete(head, rules, charset) {
+        return;
+    }
     head.xref = None;
     head.tag = "HEAD".into();
     head.payload = Payload::None;
@@ -69,11 +74,55 @@ pub(crate) fn complete(
     }
     head.substructures.splice(0..0, front);
     if let Some(submitter) = submitter {
-        head.substructures.push(Structure {
-            payload: Payload::Pointer(Xref::new(submitter)),
-            ..Structure::new("SUBM")
-        });
+        // After what the typed model writes before it (`next::Header`), so
+        // that a header read back from the output is written the same.
+        let at = head
+            .substructures
+            .iter()
+            .rposition(|s| matches!(s.tag.as_str(), "GEDC" | "CHAR" | "SOUR" | "DEST" | "DATE"))
+            .map_or(0, |i| i + 1);
+        head.substructures.insert(
+            at,
+            Structure {
+                payload: Payload::Pointer(Xref::new(submitter)),
+                ..Structure::new("SUBM")
+            },
+        );
     }
+}
+
+/// Whether [`complete`] leaves `head` as it is (with no submitter to add):
+/// a header the writer completed already, written again.
+fn is_complete(head: &Structure, rules: &VersionRules, charset: &str) -> bool {
+    let is_text = |s: &Structure, tag: &str, value: &str| {
+        s.tag == tag
+            && s.xref.is_none()
+            && matches!(&s.payload, Payload::Text(t) if **t == *value)
+            && s.substructures.is_empty()
+    };
+    let mut subs = head.substructures.iter();
+    let Some(gedc) = subs.next() else {
+        return false;
+    };
+    let mut gedc_subs = gedc.substructures.iter();
+    let gedc_ok = gedc.tag == "GEDC"
+        && gedc.xref.is_none()
+        && gedc.payload == Payload::None
+        && gedc_subs
+            .next()
+            .is_some_and(|v| is_text(v, "VERS", rules.vers_payload))
+        && rules
+            .gedc_form
+            .is_none_or(|form| gedc_subs.next().is_some_and(|f| is_text(f, "FORM", form)))
+        && gedc_subs.all(|s| s.tag != "VERS" && s.tag != "FORM");
+    let char_ok = !rules.head_char || subs.next().is_some_and(|c| is_text(c, "CHAR", charset));
+    head.xref.is_none()
+        && head.tag == "HEAD"
+        && head.payload == Payload::None
+        && gedc_ok
+        && char_ok
+        && subs.all(|s| s.tag != "CHAR" && s.tag != "GEDC")
+        && (!rules.head_sour_subm || head.first("SOUR").is_some())
 }
 
 /// The stub submitter record a 5.5.1 file without one points to.
@@ -113,6 +162,22 @@ mod tests {
             h.to_gedcom(0, crate::GedcomVersion::V7_0),
             "0 HEAD\n1 GEDC\n2 VERS 7.0\n1 _X y\n"
         );
+    }
+
+    /// A header completed already is written as it is, without a copy.
+    #[test]
+    fn a_complete_header_is_left_as_it_is() {
+        for rules in [&V551, &V70] {
+            let mut h = head("0 HEAD\n1 SOUR Sample\n1 GEDC\n2 VERS 5.5\n1 CHAR ANSEL\n1 _X y\n");
+            assert!(!is_complete(&h, rules, "UTF-8"));
+            complete(&mut h, rules, "UTF-8", None);
+            assert!(is_complete(&h, rules, "UTF-8"));
+            let mut again = h.clone();
+            complete(&mut again, rules, "UTF-8", None);
+            assert_eq!(again, h);
+            // Another output encoding is another header.
+            assert_eq!(is_complete(&h, rules, "UTF-16"), !rules.head_char);
+        }
     }
 
     #[test]

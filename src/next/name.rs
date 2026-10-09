@@ -1,12 +1,11 @@
 //! Personal names, their pieces, translations and variations.
 
-use std::borrow::Cow;
-
 use crate::tree::{Flat, Structure};
 
 use super::citation::Citation;
 use super::driver::{
-    gedcom_struct, leaf_structure, tag_enum, FromNode, NodeRef, ReadCx, TagField, ToNodes, WriteCx,
+    gedcom_struct, leaf_structure, tag_enum, FromNode, NodeRef, ReadCx, StdTag, TagField, ToNodes,
+    WriteCx,
 };
 use super::enums::{NameType, PhoneticType, Phrased, RomanizedType};
 use super::list::ThinVec;
@@ -61,8 +60,9 @@ impl ToNodes for NamePiece {
         leaf_structure(self.kind.tag(), cx.text(&self.value))
     }
 
-    fn to_flat<'s>(&'s self, _tag: &'static str, cx: &WriteCx<'s>, out: &mut Flat<'s>) {
-        out.leaf(Cow::Borrowed(self.kind.tag()), cx.text_flat(&self.value));
+    fn to_flat<'s>(&'s self, _tag: StdTag, cx: &WriteCx<'s>, out: &mut Flat<'s>) {
+        let tag = self.kind.std_tag();
+        out.leaf_typed(tag.name, tag.index, cx.text_flat(&self.value), None);
     }
 }
 

@@ -4,13 +4,18 @@
 //! inline note left to move out: the limit is a recommendation (p. 10), and
 //! no lossless rewriting makes such a record smaller.
 //!
+//! The writer, which repairs what it writes, is idempotent: what it writes
+//! needs no repair, and read back and written again, is the same bytes —
+//! write(read(write(x))) == write(x) — for a tree and for the typed model
+//! read from it.
+//!
 //! Checked on every fixture of the repository, on generated trees (fixed
 //! seeds, no dependency), and, opt-in, on the fetched corpora and on a
 //! fuzz corpus.
 
 use ged_io::spec::{conform, validate, DeviationKind};
 use ged_io::tree::{Payload, Structure, Tag, Tree, Xref};
-use ged_io::GedcomVersion;
+use ged_io::{next, Bom, GedcomVersion, GedcomWriter};
 use std::path::{Path, PathBuf};
 
 /// The versions a dataset is conformed to.
@@ -39,8 +44,48 @@ fn property(name: &str, records: &[Structure]) -> Option<String> {
             let again: Vec<String> = again.iter().take(5).map(ToString::to_string).collect();
             return Some(format!("{name} as {v}: a second pass repairs {again:?}"));
         }
+        if let Some(why) = idempotent(records, v) {
+            return Some(format!("{name} as {v}: {why}"));
+        }
     }
     None
+}
+
+/// `None` when writing `records` in `v` is idempotent, for the tree and for
+/// the typed model read from it; else the first output that is not.
+fn idempotent(records: &[Structure], v: GedcomVersion) -> Option<String> {
+    let writer = GedcomWriter::new().gedcom_version(v).bom(Bom::Never);
+    let write = |records: &[Structure]| {
+        let mut out = Vec::new();
+        writer.write_structures(&mut out, records).expect("repairs");
+        String::from_utf8(out).expect("UTF-8")
+    };
+    let out = write(records);
+    let mut back = Tree::parse(out.as_str()).to_structures();
+    let repairs = conform(&mut back, v);
+    if !repairs.is_empty() {
+        let repairs: Vec<String> = repairs.iter().take(5).map(ToString::to_string).collect();
+        return Some(format!("the output needs repairs {repairs:?}\n{out}"));
+    }
+    let again = write(&back);
+    if again != out {
+        return Some(format!(
+            "the tree is written anew: {}",
+            difference(&out, &again)
+        ));
+    }
+    let text: String = records.iter().map(|r| r.to_gedcom(0, v)).collect();
+    let out = next::write_string(&next::read_str(&text), &writer).expect("repairs");
+    let again = next::write_string(&next::read_str(&out), &writer).expect("repairs");
+    (again != out).then(|| format!("the model is written anew: {}", difference(&out, &again)))
+}
+
+/// The lines around the first line where `a` and `b` differ.
+fn difference(a: &str, b: &str) -> String {
+    let (a, b): (Vec<&str>, Vec<&str>) = (a.lines().collect(), b.lines().collect());
+    let at = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let around = |l: &[&str]| l[at.saturating_sub(4)..(at + 6).min(l.len())].join("\n");
+    format!("line {}\n{}\n---\n{}", at + 1, around(&a), around(&b))
 }
 
 fn files_under(dir: &Path, out: &mut Vec<PathBuf>) {

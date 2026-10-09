@@ -28,18 +28,14 @@ fn names(dir: &str) -> Vec<String> {
 }
 
 /// Files whose input is not conformant 5.5.1 (leniency cases), with the reason.
-const LENIENT: [(&str, &str); 10] = [
+const LENIENT: [(&str, &str); 9] = [
     ("5/age-invalid", "ages outside the grammar"),
-    (
-        "5/age-valid",
-        "lower-case age keywords, and descriptions on EVEN, which takes no payload in 5.5.1",
-    ),
     ("5/atsign", "single `@` in text"),
     ("5/char_ascii_2", "CHAR LATIN1 is not a 5.5.1 character set"),
     ("5/char_utf8-2", "UTF-8 bytes labelled UNICODE"),
     ("5/date-all", "records over 32K and one-digit dual years"),
     ("5/date-dual-invalid", "invalid dual years"),
-    ("5/obje-1", "FORM `other` is not a 5.5.1 multimedia format"),
+    ("5/obje-1", "header without SOUR or SUBM"),
     ("5/tiny-1", "header without GEDC, SOUR or SUBM"),
     (
         "5/xref-case",

@@ -949,7 +949,9 @@ fn armidale_test_files() {
         ("5/filename-1.ged", Valid),
         ("5/lang-all.ged", Valid),
         ("5/notes-1.ged", Valid),
-        ("5/obje-1.ged", Invalid(Some(19), &[K::EnumValue])),
+        // `FORM other` is a 5.5.1 format (accepted practice: the list is
+        // open); the header lacks SOUR and SUBM.
+        ("5/obje-1.ged", Invalid(Some(1), &[K::MissingRequired])),
         ("5/obsolete-1.ged", Valid),
         ("5/pedi-1.ged", Valid),
         ("5/rela_1.ged", Valid),

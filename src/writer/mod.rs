@@ -57,11 +57,11 @@ use std::borrow::Cow;
 use std::fmt;
 use std::io;
 
-use crate::spec::conform::{conform_records, with_node, Build, Rec, RecRef};
-use crate::tree::{Flat, Node, PayloadRef, Structure, Tree};
+use crate::spec::conform::{conform_records, with_node, Build, FieldOrder, Rec, RecRef};
+use crate::tree::{Flat, FlatRef, Node, PayloadRef, Structure, Tree};
 use crate::types::GedcomData;
 use crate::version::{GedcomVersion, VersionRules};
-use emit::{emit, emit_tagged, LineSink};
+use emit::{emit, emit_known, emit_tagged, LineSink};
 use xref::XrefMap;
 
 pub(crate) use emit::{extension_tag, new_xref, special_bytes, CONTROL, MAYBE_BANNED, TAB};
@@ -568,7 +568,7 @@ impl GedcomWriter {
         let rules = self.rules_for(tree.declared_version());
         let mut records = Vec::with_capacity(tree.records().count());
         records.extend(tree.records().map(Rec::given));
-        self.write_conformed(&mut writer, rules, records)
+        self.write_conformed(&mut writer, rules, records, None)
     }
 
     /// Writes owned records — such as [`Tree::to_structures`] gives — like
@@ -584,7 +584,26 @@ impl GedcomWriter {
         records: &[Structure],
     ) -> Result<WriteReport, WriteError> {
         let rules = self.rules_for_records(records);
-        self.write_conformed(&mut writer, rules, records.iter().map(Rec::given).collect())
+        self.write_conformed(
+            &mut writer,
+            rules,
+            records.iter().map(Rec::given).collect(),
+            None,
+        )
+    }
+
+    /// [`write_structures`](Self::write_structures) of the owned structures
+    /// of a typed model, repaired in its order ([`FieldOrder`]), as the
+    /// model itself is written ([`write_built`](Self::write_built)).
+    pub(crate) fn write_model_structures<W: io::Write>(
+        &self,
+        mut writer: W,
+        records: &[Structure],
+        order: fn(GedcomVersion) -> &'static FieldOrder,
+    ) -> Result<WriteReport, WriteError> {
+        let rules = self.rules_for_records(records);
+        let records = records.iter().map(Rec::given).collect();
+        self.write_conformed(&mut writer, rules, records, Some(order(rules.version)))
     }
 
     /// The version owned records are written in: the configured one, else
@@ -602,26 +621,34 @@ impl GedcomWriter {
     /// Writes records that write their own structures when needed (a
     /// typed dataset: [`crate::next::write`]) like
     /// [`write_structures`](Self::write_structures).
+    /// `order` gives the order of the typed model they come from, in the
+    /// target version ([`FieldOrder`]).
     pub(crate) fn write_built<'n, W: io::Write>(
         &self,
         mut writer: W,
         records: &'n [impl Build<'n>],
+        order: fn(GedcomVersion) -> &'static FieldOrder,
     ) -> Result<WriteReport, WriteError> {
         let records: Vec<Rec<'n, &'n Structure>> = records.iter().map(|r| Rec::built(r)).collect();
         let rules = self.rules_for_built(&records);
-        self.write_conformed(&mut writer, rules, records)
+        self.write_conformed(&mut writer, rules, records, Some(order(rules.version)))
     }
 
     /// [`write_built`](Self::write_built) as text, as
     /// [`write_to_string`](Self::write_to_string) writes a dataset.
+    /// `size` is about the size of the output (the size of the input the
+    /// records were read from), the room the text starts with.
     pub(crate) fn write_built_to_string<'n>(
         &self,
         records: &'n [impl Build<'n>],
+        order: fn(GedcomVersion) -> &'static FieldOrder,
+        size: usize,
     ) -> Result<(String, WriteReport), WriteError> {
         let mut records: Vec<Rec<'n, &'n Structure>> =
             records.iter().map(|r| Rec::built(r)).collect();
         let rules = self.rules_for_built(&records);
-        let mut conformed = conform_records(&mut records, rules.version);
+        let mut conformed =
+            conform_records(&mut records, rules.version, Some(order(rules.version)));
         let mut repairs = std::mem::take(&mut conformed.repairs);
         if self.config.on_nonconformant == RepairPolicy::Error {
             if let Some(first) = repairs.into_iter().next() {
@@ -630,6 +657,8 @@ impl GedcomWriter {
             repairs = Vec::new();
         }
         let mut sink = self.sink(None, rules, OutputEncoding::Utf8);
+        // A little more than the input: the header is completed, `@` doubled.
+        sink.reserve(size.saturating_add(size / 16).saturating_add(256));
         if self.wants_bom(rules, OutputEncoding::Utf8, true) {
             sink.bom();
         }
@@ -637,6 +666,7 @@ impl GedcomWriter {
             rules,
             &mut sink,
             &mut records,
+            &conformed.arena,
             Some(&|x| conformed.knows(x)),
         )?;
         repairs.append(&mut sink.repairs);
@@ -648,7 +678,7 @@ impl GedcomWriter {
     fn rules_for_built<'n, N: Node<'n>>(&self, records: &[Rec<'n, N>]) -> &'static VersionRules {
         let mut scratch = Flat::default();
         let declared = records.iter().find(|r| r.tag() == "HEAD").and_then(|h| {
-            with_node!(h.get(), scratch, |h| h
+            with_node!(h.get(&Flat::default()), scratch, |h| h
                 .children()
                 .find(|c| c.tag() == "GEDC")
                 .and_then(|g| g.children().find(|c| c.tag() == "VERS"))
@@ -667,17 +697,19 @@ impl GedcomWriter {
         writer: &mut dyn io::Write,
         rules: &'static VersionRules,
         mut records: Vec<Rec<'n, N>>,
+        order: Option<&'static FieldOrder>,
     ) -> Result<WriteReport, WriteError> {
-        let mut conformed = conform_records(&mut records, rules.version);
+        let mut conformed = conform_records(&mut records, rules.version, order);
         let repairs = std::mem::take(&mut conformed.repairs);
         let known = |x: &str| conformed.knows(x);
+        let arena = &conformed.arena;
         if self.config.on_nonconformant == RepairPolicy::Error {
             if let Some(first) = repairs.into_iter().next() {
                 return Err(WriteError::NonConformant(Box::new(first)));
             }
-            return self.write_nodes(writer, rules, &mut records, &known);
+            return self.write_nodes(writer, rules, &mut records, arena, &known);
         }
-        let mut report = self.write_nodes(writer, rules, &mut records, &known)?;
+        let mut report = self.write_nodes(writer, rules, &mut records, arena, &known)?;
         report.repairs.splice(0..0, repairs);
         Ok(report)
     }
@@ -687,6 +719,7 @@ impl GedcomWriter {
         writer: &mut dyn io::Write,
         rules: &'static VersionRules,
         records: &mut [Rec<'n, N>],
+        arena: &Flat<'n>,
         known: &dyn Fn(&str) -> bool,
     ) -> Result<WriteReport, WriteError> {
         let encoding = self.encoding(rules);
@@ -694,7 +727,7 @@ impl GedcomWriter {
         if self.wants_bom(rules, encoding, false) {
             sink.bom();
         }
-        write_records(rules, &mut sink, records, Some(known))?;
+        write_records(rules, &mut sink, records, arena, Some(known))?;
         sink.finish()?;
         Ok(WriteReport {
             repairs: sink.repairs,
@@ -732,11 +765,12 @@ fn write_records<'n, N: Node<'n>>(
     rules: &'static VersionRules,
     sink: &mut LineSink<'_>,
     records: &mut [Rec<'n, N>],
+    arena: &Flat<'n>,
     known: Option<&dyn Fn(&str) -> bool>,
 ) -> Result<(), WriteError> {
     let head_at = records.iter().position(|r| r.tag() == "HEAD");
     let mut head = match head_at.and_then(|i| records.get_mut(i)) {
-        Some(h) => h.take_structure(),
+        Some(h) => h.take_structure(arena),
         None => Structure::new("HEAD"),
     };
     let records = &*records;
@@ -782,15 +816,17 @@ fn write_records<'n, N: Node<'n>>(
     for (index, record) in others.enumerate() {
         let xref = xrefs.record(index, record.xref());
         let xref = xref.as_deref();
-        match record.get() {
+        match record.get(arena) {
             RecRef::Given(n) => put_record(&mut out, &mut xrefs, xref, n, &mut given)?,
             RecRef::Owned(s) => put_record(&mut out, &mut xrefs, xref, s, &mut owned)?,
             RecRef::Built(b) => {
                 scratch.clear();
                 b.build(&mut scratch);
-                put_flat(&mut out, &mut xrefs, xref, &scratch)?;
+                if let Some(root) = scratch.root() {
+                    put_flat(&mut out, &mut xrefs, xref, root)?;
+                }
             }
-            RecRef::Kept(flat) => put_flat(&mut out, &mut xrefs, xref, flat)?,
+            RecRef::Kept(root) => put_flat(&mut out, &mut xrefs, xref, root)?,
         }
     }
     out.sink.source_line = 0;
@@ -837,14 +873,30 @@ fn put_flat(
     out: &mut Emitter<'_, '_>,
     xrefs: &mut XrefMap<'_>,
     xref: Option<&str>,
-    flat: &Flat<'_>,
+    root: FlatRef<'_>,
 ) -> Result<(), WriteError> {
-    let mut nodes = flat.preorder();
+    let mut nodes = root.preorder();
     if let Some((_, record)) = nodes.next() {
         put_record_line(out, xrefs, xref, record)?;
         for (level, n) in nodes {
             let standard = n.standard_tag().is_some();
-            put_node(out, xrefs, level, n.xref(), n.tag(), standard, n.payload())?;
+            match n.payload() {
+                // A text, its special bytes found as it was written.
+                text @ PayloadRef::Text(_) => {
+                    let (rules, sink) = (out.rules, &mut *out.sink);
+                    emit_known(
+                        rules,
+                        sink,
+                        level,
+                        n.xref(),
+                        n.tag(),
+                        standard,
+                        text,
+                        n.special(),
+                    )?;
+                }
+                payload => put_node(out, xrefs, level, n.xref(), n.tag(), standard, payload)?,
+            }
         }
     }
     Ok(())
@@ -891,7 +943,8 @@ fn put_node(
     match payload {
         PayloadRef::Pointer(p) => {
             let p = xrefs.pointer(p);
-            emit_tagged(
+            // Mapped, it is valid.
+            emit_known(
                 rules,
                 sink,
                 level,
@@ -899,6 +952,7 @@ fn put_node(
                 tag,
                 standard,
                 PayloadRef::Pointer(&p),
+                Some(0),
             )
         }
         payload => emit_tagged(rules, sink, level, xref, tag, standard, payload),

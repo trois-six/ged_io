@@ -31,7 +31,7 @@ use super::validate::{
     bounds, encoded_len, is_external_pointer, pick, xref_error, Aliases, Pick, Picker,
     MAX_RECORD_BYTES,
 };
-use crate::tree::{Flat, Node, Payload, PayloadRef, Structure, Tag, Xref};
+use crate::tree::{Flat, FlatPayload, FlatRef, Node, Payload, PayloadRef, Structure, Tag, Xref};
 use crate::version::VersionRules;
 use crate::writer::{
     complete_head, extension_tag, needs_submitter, new_xref, numbered_xref, stub_submitter, Repair,
@@ -60,9 +60,104 @@ const LOOKUP_BATCH: usize = 1 << 16;
 /// [`DeviationKind::RecordSize`]: super::DeviationKind::RecordSize
 pub fn conform(records: &mut Vec<Structure>, version: GedcomVersion) -> Vec<Repair> {
     let mut recs: Vec<Rec<'_, &Structure>> = records.drain(..).map(Rec::owned).collect();
-    let repairs = conform_records(&mut recs, version).repairs;
+    let repairs = conform_records(&mut recs, version, None).repairs;
     records.extend(recs.into_iter().map(Rec::into_structure));
     repairs
+}
+
+/// The order in which a typed model writes the substructures of each
+/// structure type: the substructures its fields hold, field after field in
+/// their declared order, then those it keeps aside (`extra`), in their
+/// order. A dataset of the model read back from what it wrote holds its
+/// structures so, whatever their order in the file.
+///
+/// A record of such a model is written so: in that order. When the pass
+/// repairs one, it puts its structures back in the order the model, reading
+/// the record back, would write them ([`Conformer::model_order`]), as a
+/// repair can change where they go: what becomes an extension goes aside,
+/// what is added (a required substructure, a `PHRASE`, `HEAD.SCHMA`) or
+/// made to fit (a pointer where text belongs, written as text) goes to its
+/// field. A record that becomes an extension record goes after the others.
+/// Writing what was written then writes the same lines. Without it (a
+/// tree, whose order is the file's), the pass repairs in place.
+#[derive(Debug, Default)]
+pub(crate) struct FieldOrder {
+    /// For each structure type, the fields of the typed structure that
+    /// stands for it ([`Field`]), by the standard tags they take.
+    fields: Box<[FieldsByTag]>,
+}
+
+/// The fields of a typed structure, by the indices of the standard tags
+/// they take (`crate::tree::STANDARD_TAGS`).
+type FieldsByTag = Box<[(u16, Field)]>;
+
+/// A field of a typed structure, as [`FieldOrder`] needs it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Field {
+    /// Its position among the fields.
+    pub(crate) rank: u16,
+    /// Whether it holds a value without substructures: a structure with
+    /// substructures does not fit it.
+    pub(crate) leaf: bool,
+    /// Whether it holds any number of structures rather than one.
+    pub(crate) many: bool,
+}
+
+impl FieldOrder {
+    /// The order of `fields`: for each structure type (by [`StructId`]),
+    /// the index of each standard tag its fields take, with the field.
+    pub(crate) fn new(fields: Vec<Vec<(u16, Field)>>) -> Self {
+        Self {
+            fields: fields.into_iter().map(Vec::into_boxed_slice).collect(),
+        }
+    }
+
+    /// The field of a `ty` structure that takes substructures with the
+    /// standard tag `standard`.
+    fn field(&self, ty: StructId, standard: u16) -> Option<Field> {
+        self.fields
+            .get(usize::from(ty))
+            .and_then(|f| f.iter().find(|&&(t, _)| t == standard))
+            .map(|&(_, field)| field)
+    }
+}
+
+/// Where the typed model reads each substructure of a structure, one after
+/// the other ([`Conformer::model_order`]): the fields that hold one
+/// structure and have it, and the standard tags of substructures kept
+/// aside, as bit sets.
+#[derive(Default)]
+struct ModelRead {
+    full: [u64; 4],
+    aside: [u64; 8],
+}
+
+impl ModelRead {
+    /// The rank of the field `c`, a substructure of a `ty` structure, goes
+    /// to; `None` when it is kept aside.
+    fn read(&mut self, order: &FieldOrder, ty: StructId, c: &Structure) -> Option<u16> {
+        fn bit(set: &mut [u64], i: u16) -> Option<(&mut u64, u64)> {
+            let word = set.get_mut(usize::from(i / 64))?;
+            Some((word, 1 << (i % 64)))
+        }
+        let standard = c.tag.standard_index()?;
+        let field = order.field(ty, standard);
+        let fits = field.filter(|f| {
+            let blocked = bit(&mut self.aside, standard).is_none_or(|(w, b)| *w & b != 0);
+            let full = !f.many && bit(&mut self.full, f.rank).is_none_or(|(w, b)| *w & b != 0);
+            c.xref.is_none() && (!f.leaf || c.substructures.is_empty()) && !blocked && !full
+        });
+        if let Some(f) = fits {
+            if let (false, Some((w, b))) = (f.many, bit(&mut self.full, f.rank)) {
+                *w |= b;
+            }
+            return Some(f.rank);
+        }
+        if let (Some(_), Some((w, b))) = (field, bit(&mut self.aside, standard)) {
+            *w |= b;
+        }
+        None
+    }
 }
 
 /// What [`conform_records`] did, and the identifiers it left.
@@ -70,6 +165,9 @@ pub(crate) struct Conformed<'n> {
     /// The repairs, in the order they were made.
     pub(crate) repairs: Vec<Repair>,
     xrefs: XrefIndex<'n, Option<StructId>>,
+    /// The records that write themselves kept once written
+    /// ([`Rec::get`]).
+    pub(crate) arena: Flat<'n>,
 }
 
 impl Conformed<'_> {
@@ -82,24 +180,32 @@ impl Conformed<'_> {
 
 /// [`conform`] on records as they are given ([`Rec`]): only the records
 /// that need a repair are copied.
+///
+/// `order` is the order of the typed model the records come from, when
+/// they do ([`FieldOrder`]).
 pub(crate) fn conform_records<'n, N: Node<'n>>(
     records: &mut Vec<Rec<'n, N>>,
     version: GedcomVersion,
+    order: Option<&'static FieldOrder>,
 ) -> Conformed<'n> {
     let mut c = Conformer::new(version);
+    c.order = order;
     for pass in 0..MAX_PASSES {
         let before = c.repairs.len();
         c.pass(records, pass);
         if pass == 0 && c.family == Family::V551 {
             c.record_sizes(records);
         }
-        if c.repairs.len() == before && pass > 0 {
+        // A pass that repaired nothing and added no record leaves nothing
+        // for another pass to find.
+        if c.repairs.len() == before && (pass > 0 || !c.added) {
             break;
         }
     }
     Conformed {
         repairs: c.repairs,
         xrefs: c.xrefs,
+        arena: c.arena,
     }
 }
 
@@ -124,9 +230,10 @@ pub(crate) struct Rec<'n, N> {
     /// records over 32K: [`Conformer::record_sizes`]); `u32::MAX` when
     /// unknown.
     size: u32,
-    /// The structures of a record that writes itself, kept from its first
+    /// Where the structures of a record that writes itself start in the
+    /// arena of kept records ([`Conformed::arena`]), kept from its first
     /// writing while the dataset is small ([`KEEP_BUILT`]).
-    built: Option<Box<Flat<'n>>>,
+    built: Option<u32>,
 }
 
 /// The most structures of records that write themselves kept once written
@@ -151,6 +258,11 @@ pub(crate) trait Build<'n> {
     fn is_empty(&self) -> bool;
     /// Writes the record, and its substructures, into `out`.
     fn build(&self, out: &mut Flat<'n>);
+    /// The record as an owned structure, for a record the writer copies
+    /// anyway (the header, which it completes): `None` for the others.
+    fn owned(&self) -> Option<Structure> {
+        None
+    }
 }
 
 /// A record, borrowed: given, written on demand (or written already), or
@@ -158,7 +270,7 @@ pub(crate) trait Build<'n> {
 pub(crate) enum RecRef<'b, 'n, N> {
     Given(N),
     Built(&'n dyn Build<'n>),
-    Kept(&'b Flat<'n>),
+    Kept(FlatRef<'b>),
     Owned(&'b Structure),
 }
 
@@ -169,14 +281,7 @@ macro_rules! with_node {
         match $rec {
             RecRef::Given($n) => $body,
             RecRef::Owned($n) => $body,
-            RecRef::Kept(flat) => match flat.root() {
-                Some($n) => $body,
-                None => {
-                    let empty = Structure::default();
-                    let $n = &empty;
-                    $body
-                }
-            },
+            RecRef::Kept($n) => $body,
             RecRef::Built(b) => {
                 $scratch.clear();
                 b.build(&mut $scratch);
@@ -205,8 +310,12 @@ impl<'n, N: Node<'n>> Rec<'n, N> {
         )
     }
 
-    /// A record that writes itself when needed.
+    /// A record that writes itself when needed; owned at once when the
+    /// writer copies it anyway ([`Build::owned`]).
     pub(crate) fn built(record: &'n dyn Build<'n>) -> Self {
+        if let Some(s) = record.owned() {
+            return Self::owned(s);
+        }
         let tag = record.tag();
         let standard = crate::tree::node::standard_index(tag);
         Self::of(tag, record.xref(), standard, Body::Built(record))
@@ -230,28 +339,37 @@ impl<'n, N: Node<'n>> Rec<'n, N> {
         }
     }
 
-    /// The record, borrowed.
-    pub(crate) fn get(&self) -> RecRef<'_, 'n, N> {
-        match (&self.body, &self.built) {
+    /// The record, borrowed; one kept is in `arena`.
+    pub(crate) fn get<'b>(&'b self, arena: &'b Flat<'n>) -> RecRef<'b, 'n, N> {
+        match (&self.body, self.built.and_then(|at| arena.root_at(at))) {
             (Body::Given(n), _) => RecRef::Given(*n),
-            (Body::Built(_), Some(flat)) => RecRef::Kept(flat),
+            (Body::Built(_), Some(root)) => RecRef::Kept(root),
             (Body::Built(b), None) => RecRef::Built(*b),
             (Body::Owned(s), _) => RecRef::Owned(s),
         }
     }
 
-    /// Writes a record that writes itself once and keeps it, while `kept`
-    /// (the structures kept so far) allows; written in `scratch`, kept at
-    /// its size.
-    fn keep_built(&mut self, kept: &mut usize, scratch: &mut Flat<'n>) {
-        if let (Body::Built(b), None) = (&self.body, &self.built) {
-            if *kept < KEEP_BUILT {
-                scratch.clear();
-                b.build(scratch);
-                *kept += scratch.len();
-                self.built = Some(Box::new(scratch.clone()));
-            }
+    /// A record that writes itself and was not kept yet: written at the
+    /// end of `arena`, typed as `arena` types (see [`Typing`]), then
+    /// checked by `check`, and kept there while the arena holds fewer than
+    /// [`KEEP_BUILT`] structures. `None` for any other record.
+    fn write_typed<T>(
+        &mut self,
+        arena: &mut Flat<'n>,
+        check: impl FnOnce(&Flat<'n>) -> T,
+    ) -> Option<T> {
+        let (Body::Built(b), None) = (&self.body, self.built) else {
+            return None;
+        };
+        let start = arena.begin();
+        b.build(arena);
+        let checked = check(arena);
+        if arena.len() <= KEEP_BUILT {
+            self.built = u32::try_from(start).ok();
+        } else {
+            arena.truncate(start);
         }
+        Some(checked)
     }
 
     pub(crate) fn tag<'b>(&'b self) -> &'b str
@@ -300,15 +418,15 @@ impl<'n, N: Node<'n>> Rec<'n, N> {
     }
 
     /// The record as an owned structure, as it is.
-    fn to_structure(&self) -> Structure {
+    fn to_structure(&self, arena: &Flat<'n>) -> Structure {
         let mut scratch = Flat::default();
-        with_node!(self.get(), scratch, |n| n.to_owned_structure())
+        with_node!(self.get(arena), scratch, |n| n.to_owned_structure())
     }
 
     /// The record, copied first if it is not owned yet.
-    fn make_owned(&mut self) -> &mut Structure {
+    fn make_owned(&mut self, arena: &Flat<'n>) -> &mut Structure {
         if !matches!(self.body, Body::Owned(_)) {
-            self.body = Body::Owned(Box::new(self.to_structure()));
+            self.body = Body::Owned(Box::new(self.to_structure(arena)));
             self.built = None;
         }
         match &mut self.body {
@@ -319,10 +437,10 @@ impl<'n, N: Node<'n>> Rec<'n, N> {
 
     /// The record as an owned structure, taken out (an owned record is
     /// left empty).
-    pub(crate) fn take_structure(&mut self) -> Structure {
+    pub(crate) fn take_structure(&mut self, arena: &Flat<'n>) -> Structure {
         match &mut self.body {
             Body::Owned(s) => std::mem::take(s),
-            Body::Given(_) | Body::Built(_) => self.to_structure(),
+            Body::Given(_) | Body::Built(_) => self.to_structure(arena),
         }
     }
 
@@ -330,7 +448,7 @@ impl<'n, N: Node<'n>> Rec<'n, N> {
     pub(crate) fn into_structure(self) -> Structure {
         match self.body {
             Body::Owned(s) => *s,
-            Body::Given(_) | Body::Built(_) => self.to_structure(),
+            Body::Given(_) | Body::Built(_) => self.to_structure(&Flat::default()),
         }
     }
 }
@@ -348,7 +466,7 @@ struct Conformer<'n> {
     /// Extension tags of relocated standard structures, with their URIs.
     schma: Vec<(String, String)>,
     /// The tags from the record to the structure being repaired.
-    path: Vec<String>,
+    path: Vec<Tag>,
     /// The submitter a synthesised 5.5.1 `HEAD.SUBM` points to.
     submitter: Option<Box<str>>,
     /// Records to add before the trailer.
@@ -370,8 +488,13 @@ struct Conformer<'n> {
     /// Room for a record that writes itself ([`Build`]), kept from pass to
     /// pass.
     scratch: Flat<'n>,
-    /// The structures of records that write themselves kept so far.
-    kept: usize,
+    /// The records that write themselves, written once and kept, one after
+    /// the other (each typed as it is written: [`Typing`]).
+    arena: Flat<'n>,
+    /// Whether the last pass added records.
+    added: bool,
+    /// The order of the typed model the records come from, if they do.
+    order: Option<&'static FieldOrder>,
 }
 
 /// A required substructure: its tag, its minimum and the first
@@ -446,6 +569,127 @@ impl TypeTables {
     }
 }
 
+/// What a record of the typed model checks of itself as it writes itself
+/// into a [`Flat`] arena ([`Flat::open_typed`]), so that the check of the
+/// pass does not walk it again: each structure is placed by its standard
+/// tag under the type of its superstructure, and a payload made valid by
+/// its type (an enumeration value, a date of the commonest shapes, a
+/// number) is trusted; texts, pointers and anything untyped are left to
+/// the check ([`Conformer::is_clean_typed`]).
+#[derive(Clone, Copy)]
+pub(crate) struct Typing {
+    picker: Picker,
+    schema: &'static Schema,
+    tables: &'static TypeTables,
+    v7: bool,
+}
+
+impl Typing {
+    /// The tables of `version`.
+    pub(crate) fn of(version: GedcomVersion) -> Typing {
+        let rules = version.rules();
+        Typing {
+            picker: Picker::of(rules),
+            schema: rules.spec,
+            tables: TypeTables::of(rules.spec),
+            v7: Family::of(rules) == Family::V7,
+        }
+    }
+
+    /// The type of a structure tagged with the standard tag `standard`
+    /// under a structure of type `sup`, as [`Conformer::clean`] picks it;
+    /// `None` when the tag has no place there, or when it is occurrence
+    /// `count` of its tag there and the type takes fewer.
+    #[inline]
+    pub(crate) fn place(
+        &self,
+        sup: StructId,
+        standard: Option<u16>,
+        is_pointer: bool,
+        count: u32,
+    ) -> Option<StructId> {
+        let (ty, tag) = self.picker.place(sup, standard?, is_pointer)?;
+        if count > 1
+            && self
+                .picker
+                .max(sup, tag)
+                .is_some_and(|max| count > u32::from(max))
+        {
+            return None;
+        }
+        Some(ty)
+    }
+
+    /// Whether the payload of a structure of type `ty` is valid without a
+    /// look ([`Conformer::clean_payload`]): none where none is valid, or a
+    /// text made valid for `claim`, the kind of payload of its type. A
+    /// typed enumeration value stands for the values of several sets (the
+    /// statuses of each ordinance): it is looked up in its type's set.
+    #[inline]
+    pub(crate) fn trusts(
+        &self,
+        ty: StructId,
+        payload: &FlatPayload<'_>,
+        claim: Option<Kind>,
+    ) -> bool {
+        let (kind, arg) = self.schema.kind(ty);
+        match payload {
+            FlatPayload::None => match kind {
+                Kind::Pointer => false,
+                Kind::NullablePointer => true,
+                kind => payload::empty_is_valid(kind),
+            },
+            FlatPayload::Text(_) if claim != Some(kind) => false,
+            FlatPayload::Text(t) => match kind {
+                Kind::Enum | Kind::ListEnum => {
+                    let family = if self.v7 { Family::V7 } else { Family::V551 };
+                    self.schema.enum_set(arg).is_some_and(|set| {
+                        if kind == Kind::Enum {
+                            clean::is_canonical(set, t, family)
+                        } else {
+                            clean::is_canonical_list(set, t, family)
+                        }
+                    })
+                }
+                _ => true,
+            },
+            FlatPayload::Pointer(_) => false,
+        }
+    }
+
+    /// The required substructures of a type: the tag (an index in the
+    /// tables' tags) and the fewest occurrences.
+    #[inline]
+    pub(crate) fn required(&self, ty: StructId) -> impl Iterator<Item = (u8, u8)> + 'static {
+        self.tables
+            .required
+            .get(usize::from(ty))
+            .map_or(&[][..], |r| r)
+            .iter()
+            .map(|&(t, min, _)| (t, min))
+    }
+
+    /// The index in the tables' tags of a standard tag.
+    #[inline]
+    pub(crate) fn spec_tag(&self, standard: u16) -> Option<u8> {
+        self.picker.spec_tag(standard)
+    }
+
+    /// Whether the version is 7.x, where a structure has a payload or a
+    /// substructure.
+    #[inline]
+    pub(crate) fn v7(&self) -> bool {
+        self.v7
+    }
+
+    /// Whether a type is a 7.x note translation, which says its language
+    /// or its media type.
+    #[inline]
+    pub(crate) fn is_note_tran(&self, ty: StructId) -> bool {
+        self.tables.note_tran.contains(&ty)
+    }
+}
+
 /// What becomes of a structure after its repair.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Fate {
@@ -470,44 +714,75 @@ fn pointer(tag: &str, xref: &str) -> Structure {
     }
 }
 
+/// File extensions and their media types; the first extension of a type
+/// is its 5.5.1 file format (`image/jpeg` is `jpg`).
+const FILE_TYPES: [(&[&str], &str); 16] = [
+    (&["jpg", "jpeg"], "image/jpeg"),
+    (&["png"], "image/png"),
+    (&["gif"], "image/gif"),
+    (&["bmp"], "image/bmp"),
+    (&["tif", "tiff"], "image/tiff"),
+    (&["webp"], "image/webp"),
+    (&["svg"], "image/svg+xml"),
+    (&["pdf"], "application/pdf"),
+    (&["txt"], "text/plain"),
+    (&["htm", "html"], "text/html"),
+    (&["wav"], "audio/wav"),
+    (&["mp3"], "audio/mpeg"),
+    (&["ogg"], "audio/ogg"),
+    (&["mp4"], "video/mp4"),
+    (&["mpg", "mpeg"], "video/mpeg"),
+    (&["avi"], "video/x-msvideo"),
+];
+
 /// The media type of a file from its extension; `application/octet-stream`
 /// when unknown.
 fn media_type(path: &str) -> &'static str {
     let ext = extension(path);
+    FILE_TYPES
+        .iter()
+        .find(|(exts, _)| exts.contains(&ext.as_str()))
+        .map_or("application/octet-stream", |&(_, media_type)| media_type)
+}
+
+/// The 5.5.1 file format of a file from its extension (p. 54): a format of
+/// the list under its own spelling (`jpeg` is `jpg`), else the extension
+/// (accepted practice: the list is open), else `unknown`.
+fn multimedia_format(path: &str) -> String {
+    let ext = extension(path);
     match ext.as_str() {
-        "jpg" | "jpeg" => "image/jpeg",
-        "png" => "image/png",
-        "gif" => "image/gif",
-        "bmp" => "image/bmp",
-        "tif" | "tiff" => "image/tiff",
-        "webp" => "image/webp",
-        "svg" => "image/svg+xml",
-        "pdf" => "application/pdf",
-        "txt" => "text/plain",
-        "htm" | "html" => "text/html",
-        "wav" => "audio/wav",
-        "mp3" => "audio/mpeg",
-        "ogg" => "audio/ogg",
-        "mp4" => "video/mp4",
-        "mpg" | "mpeg" => "video/mpeg",
-        "avi" => "video/x-msvideo",
-        _ => "application/octet-stream",
+        "jpeg" => "jpg".into(),
+        "tiff" => "tif".into(),
+        "" => "unknown".into(),
+        _ => ext,
     }
 }
 
-/// The 5.5.1 `MULTIMEDIA_FORMAT` of a file from its extension (p. 54), if
-/// the list has one.
-fn multimedia_format(path: &str) -> Option<&'static str> {
-    match extension(path).as_str() {
-        "bmp" => Some("bmp"),
-        "gif" => Some("gif"),
-        "jpg" | "jpeg" => Some("jpg"),
-        "ole" => Some("ole"),
-        "pcx" => Some("pcx"),
-        "tif" | "tiff" => Some("tif"),
-        "wav" => Some("wav"),
-        _ => None,
+/// The 5.5.1 file format of a media type: the extension of a known type
+/// (`application/pdf` is `pdf`, `image/jpeg` is `jpg`), else the subtype
+/// without its `x-` or `vnd.` prefix and `+` suffix (`image/x-icon` is
+/// `icon`), else the type, else `unknown`; lower case.
+fn file_format_of_media_type(media_type: &str) -> String {
+    let lower = media_type.to_ascii_lowercase();
+    let mt = lower.split(';').next().unwrap_or("").trim();
+    if let Some((exts, _)) = FILE_TYPES.iter().find(|&&(_, t)| t == mt) {
+        return exts.first().copied().unwrap_or("unknown").to_string();
     }
+    let (ty, sub) = mt.split_once('/').unwrap_or((mt, ""));
+    let sub = sub.split('+').next().unwrap_or("");
+    let sub = sub
+        .strip_prefix("x-")
+        .or_else(|| sub.strip_prefix("vnd."))
+        .unwrap_or(sub);
+    let token = |s: &str| -> String {
+        s.chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+            .collect()
+    };
+    [token(sub), token(ty)]
+        .into_iter()
+        .find(|t| !t.is_empty())
+        .unwrap_or_else(|| "unknown".into())
 }
 
 fn extension(path: &str) -> String {
@@ -529,8 +804,9 @@ impl<'n> Conformer<'n> {
 
     /// The path of the structure being repaired, ending with `tag`.
     fn here(&self, tag: &str) -> String {
-        let mut p = self.path.join(".");
-        if !p.is_empty() {
+        let mut p = String::new();
+        for t in &self.path {
+            p.push_str(t.as_str());
             p.push('.');
         }
         p.push_str(tag);
@@ -541,7 +817,7 @@ impl<'n> Conformer<'n> {
         let rules = version.rules();
         let schema = rules.spec;
         let family = Family::of(rules);
-        Conformer {
+        let mut c = Conformer {
             rules,
             schema,
             family,
@@ -559,8 +835,12 @@ impl<'n> Conformer<'n> {
             tables: TypeTables::of(schema),
             picker: Picker::of(rules),
             scratch: Flat::default(),
-            kept: 0,
-        }
+            arena: Flat::default(),
+            added: false,
+            order: None,
+        };
+        c.arena.set_typing(Some(Typing::of(version)));
+        c
     }
 
     fn pass<N: Node<'n>>(&mut self, records: &mut Vec<Rec<'n, N>>, pass: usize) {
@@ -571,7 +851,7 @@ impl<'n> Conformer<'n> {
         let quiet = quiet && self.repairs.len() == self.pass_start;
         let mut scratch = std::mem::take(&mut self.scratch);
         let head = records.first().filter(|r| r.tag() == "HEAD");
-        let aliases = match head.map(Rec::get) {
+        let aliases = match head.map(|h| h.get(&self.arena)) {
             Some(h) => with_node!(h, scratch, |h| Aliases::of(Some(h), self.schema)),
             None => Aliases::of(None::<&Structure>, self.schema),
         };
@@ -604,7 +884,7 @@ impl<'n> Conformer<'n> {
             records
                 .first()
                 .filter(|r| r.tag() == "HEAD")
-                .map(|h| extension_tags(h))
+                .map(|h| extension_tags(h, &self.arena))
         } else {
             None
         };
@@ -622,18 +902,32 @@ impl<'n> Conformer<'n> {
         self.used = (self.family == Family::V7 && any_dirty).then(|| {
             let mut used: HashSet<String> = head_tags.unwrap_or_default();
             for r in records.iter().skip(1) {
-                used.extend(extension_tags(r));
+                used.extend(extension_tags(r, &self.arena));
             }
             used
         });
 
-        self.repair_dirty(records, head_ty, dirty);
+        let extensions = self.repair_dirty(records, head_ty, dirty);
+        if self.order.is_some() && !extensions.is_empty() {
+            // Records that became extension records go after the others,
+            // before the trailer, where the typed model writes them.
+            let end = records
+                .iter()
+                .rposition(|r| r.tag() == "TRLR")
+                .unwrap_or(records.len());
+            let mut moved = Vec::with_capacity(extensions.len());
+            for &i in extensions.iter().rev() {
+                moved.push(records.remove(i));
+            }
+            moved.reverse();
+            let at = end.saturating_sub(moved.len());
+            records.splice(at..at, moved);
+        }
         self.path.clear();
-        if !self.new_records.is_empty() {
-            // Room for them only: doubling the records would cost more.
-            records.reserve_exact(self.new_records.len());
-            let at = records.len().saturating_sub(1);
-            records.splice(at..at, self.new_records.drain(..).map(Rec::owned));
+        self.added = !self.new_records.is_empty();
+        if self.added {
+            let added = std::mem::take(&mut self.new_records);
+            insert_records(records, added);
         }
         if self.family == Family::V7 {
             self.declare(records);
@@ -653,17 +947,27 @@ impl<'n> Conformer<'n> {
         let mut dirty: Vec<usize> = Vec::new();
         let mut pending = Vec::with_capacity(LOOKUP_BATCH.min(4 * records.len()));
         let mut failed = Vec::new();
+        let mut arena = std::mem::take(&mut self.arena);
+        // Room for records of a dozen structures, as most are, once one
+        // writes itself.
+        let room = records.len().saturating_mul(12).min(KEEP_BUILT);
         for (i, r) in records.iter_mut().enumerate() {
+            if arena.len() == 0 && matches!(r.body, Body::Built(_)) {
+                arena.reserve(room);
+            }
             let clean = match r.tag() {
                 "TRLR" => true,
                 "HEAD" if i == 0 && r.clean == self.state => true,
                 "HEAD" if i == 0 => {
+                    let mut walk = Walk::default();
                     let clean = match head_ty {
-                        Some(ty) => with_node!(r.get(), *scratch, |h| self.is_clean(h, ty, true)),
+                        Some(ty) => with_node!(r.get(&arena), *scratch, |h| self
+                            .is_clean_walked(h, ty, &mut walk)),
                         None => true,
                     };
                     if clean {
                         r.clean = self.state;
+                        r.size = u32::try_from(walk.size).unwrap_or(u32::MAX);
                     }
                     clean
                 }
@@ -676,10 +980,41 @@ impl<'n> Conformer<'n> {
                         record: u32::try_from(i).unwrap_or(u32::MAX),
                         rtype: DATASET,
                     };
-                    r.keep_built(&mut self.kept, scratch);
-                    let xref = r.xref();
-                    let clean = with_node!(r.get(), *scratch, |n| self
-                        .is_clean_record(n, xref, &mut walk));
+                    // A record that writes itself is written once, typed:
+                    // when it is so, only what needs a look is looked at.
+                    let written =
+                        r.write_typed(&mut arena, |flat| {
+                            let typed = flat
+                                .typed()
+                                .then(|| self.is_clean_typed(flat, &mut walk))
+                                .flatten();
+                            // What the typed record trusts, the walk of any
+                            // record finds so too (its pointers are looked up
+                            // with the others).
+                            #[cfg(debug_assertions)]
+                            if typed == Some(true) {
+                                let mut deferred = Vec::new();
+                                let mut check = Walk {
+                                    pending: Some(&mut deferred),
+                                    ..Walk::default()
+                                };
+                                assert!(
+                                flat.root()
+                                    .is_some_and(|n| self.is_clean_record(n, n.xref(), &mut check)),
+                                "a record of the typed model trusted as written is not clean: {:?}",
+                                flat.root().map(Node::to_owned_structure)
+                            );
+                            }
+                            typed.unwrap_or_else(|| {
+                                flat.root()
+                                    .is_some_and(|n| self.is_clean_record(n, n.xref(), &mut walk))
+                            })
+                        });
+                    let clean = written.unwrap_or_else(|| {
+                        let xref = r.xref();
+                        with_node!(r.get(&arena), *scratch, |n| self
+                            .is_clean_record(n, xref, &mut walk))
+                    });
                     let (size, rtype) = (walk.size, walk.rtype);
                     if clean {
                         r.clean = self.state;
@@ -698,6 +1033,7 @@ impl<'n> Conformer<'n> {
                 dirty.push(i);
             }
         }
+        self.arena = arena;
         self.look_up(&mut pending, &mut failed);
         if !failed.is_empty() {
             for &i in &failed {
@@ -714,12 +1050,15 @@ impl<'n> Conformer<'n> {
 
     /// The repairs, in record order: the dirty records repaired, the others
     /// counted.
+    ///
+    /// Returns the records that became extension records.
     fn repair_dirty<N: Node<'n>>(
         &mut self,
         records: &mut [Rec<'n, N>],
         head_ty: Option<StructId>,
         dirty: Vec<usize>,
-    ) {
+    ) -> Vec<usize> {
+        let mut extensions = Vec::new();
         let mut counts: Vec<(u8, u32)> = Vec::new();
         let mut next_dirty = dirty.into_iter().peekable();
         for (i, r) in records.iter_mut().enumerate() {
@@ -730,16 +1069,22 @@ impl<'n> Conformer<'n> {
                     if let (Some(head), true) = (head_ty, is_dirty) {
                         self.path.clear();
                         r.clean = 0;
-                        let _ = self.fix(r.make_owned(), head, true);
+                        let r = r.make_owned(&self.arena);
+                        let _ = self.fix(r, head, true);
+                        self.model_order(r, head);
                     }
                     continue;
                 }
                 _ => {}
             }
             self.path.clear();
+            let was_extension = r.tag().starts_with('_');
             if is_dirty {
                 (r.clean, r.size) = (0, u32::MAX);
-                self.record(r.make_owned(), &mut counts);
+                self.record(r.make_owned(&self.arena), &mut counts);
+                if !was_extension && r.tag().starts_with('_') {
+                    extensions.push(i);
+                }
                 continue;
             }
             #[cfg(debug_assertions)]
@@ -758,17 +1103,21 @@ impl<'n> Conformer<'n> {
                         *n -= 1;
                     }
                     (r.clean, r.size) = (0, u32::MAX);
-                    self.record(r.make_owned(), &mut counts);
+                    self.record(r.make_owned(&self.arena), &mut counts);
+                    if !was_extension && r.tag().starts_with('_') {
+                        extensions.push(i);
+                    }
                 }
             }
         }
+        extensions
     }
 
     /// Checks, in debug builds, that a record found clean is one the repair
     /// leaves as it is.
     #[cfg(debug_assertions)]
     fn assert_clean<N: Node<'n>>(&mut self, r: &Rec<'n, N>) {
-        let original = r.to_structure();
+        let original = r.to_structure(&self.arena);
         let mut copy = original.clone();
         let before = self.repairs.len();
         let mut counts = Vec::new();
@@ -792,7 +1141,7 @@ impl<'n> Conformer<'n> {
             return;
         };
         head.clean = 0;
-        let head = head.make_owned();
+        let head = head.make_owned(&self.arena);
         let submitter = needs_submitter(head, self.rules).then(|| {
             if let Some(x) = &self.submitter {
                 return x.to_string();
@@ -803,6 +1152,11 @@ impl<'n> Conformer<'n> {
             x
         });
         complete_head(head, self.rules, "UTF-8", submitter);
+        // Completing changes the header's substructures and those of its
+        // `GEDC` only; a repair puts the rest in order.
+        if let Some(head_ty) = self.record_of("HEAD") {
+            self.model_order_to(head, head_ty, 2);
+        }
     }
 
     /// The first `@<prefix>n@` no record holds; taken, for a record of type
@@ -838,8 +1192,10 @@ impl<'n> Conformer<'n> {
                             format!("a {tag} record more than the {max} permitted, written as an extension record"),
                         );
                         self.make_extension(r);
+                        return;
                     }
                 }
+                self.model_order(r, ty);
             }
             // A documented alias of a standard record is that record.
             Pick::Extension => match self.aliases.structs.get(&tag).copied() {
@@ -877,7 +1233,7 @@ impl<'n> Conformer<'n> {
             }
         }
         for r in records.iter_mut().skip(1).filter(|r| r.tag() == "HEAD") {
-            r.make_owned().tag = Tag::new("_HEAD");
+            r.make_owned(&self.arena).tag = Tag::new("_HEAD");
             self.repair(
                 r.line(),
                 RepairKind::Header,
@@ -885,7 +1241,7 @@ impl<'n> Conformer<'n> {
             );
         }
         if let Some(head) = records.first_mut().filter(|h| h.xref().is_some()) {
-            if let Some(x) = head.make_owned().xref.take() {
+            if let Some(x) = head.make_owned(&self.arena).xref.take() {
                 self.repair(
                     head.line(),
                     RepairKind::Xref,
@@ -916,7 +1272,7 @@ impl<'n> Conformer<'n> {
             if t.is_empty() {
                 records.remove(i);
             } else {
-                let t = t.make_owned();
+                let t = t.make_owned(&self.arena);
                 t.tag = Tag::new("_TRLR");
                 t.xref = None;
                 self.repair(
@@ -963,7 +1319,7 @@ impl<'n> Conformer<'n> {
             if ok {
                 continue;
             }
-            let r = r.make_owned();
+            let r = r.make_owned(&self.arena);
             let Some(old) = r.xref.take() else { continue };
             let ty = self.record_type(r.tag.as_str());
             let new = self.unique(&new_xref(self.rules, &old), ty);
@@ -1116,6 +1472,67 @@ impl<'n> Conformer<'n> {
         }
     }
 
+    /// Puts the substructures of `s`, a repaired structure of type `ty` of
+    /// a typed model's record, and those of its substructures, in the order
+    /// the model writes them once it reads them back ([`FieldOrder`]). The
+    /// model reads a substructure into the field its tag selects unless a
+    /// substructure of that tag went aside before it, it has an identifier,
+    /// it has substructures and the field holds a value without any, or the
+    /// field holds one structure and has it; anything else goes aside
+    /// (`next::driver::read_into`, [`ModelRead`]). `s` is repaired: every
+    /// payload fits its field. Substructures already in that order, as
+    /// nearly all are, stay where they are.
+    fn model_order(&self, s: &mut Structure, ty: StructId) {
+        self.model_order_to(s, ty, usize::MAX);
+    }
+
+    /// [`Conformer::model_order`] of `s` and its substructures down to
+    /// `levels` levels (1: `s`'s own substructures).
+    fn model_order_to(&self, s: &mut Structure, ty: StructId, levels: usize) {
+        let Some(order) = self.order else {
+            return;
+        };
+        let mut read = ModelRead::default();
+        let (mut last, mut aside) = (0, false);
+        let in_order = s.substructures.iter().all(|c| {
+            let Some(rank) = read.read(order, ty, c) else {
+                aside = true;
+                return true;
+            };
+            let ok = !aside && rank >= last;
+            last = rank;
+            ok
+        });
+        if !in_order {
+            let mut read = ModelRead::default();
+            let mut fields: Vec<(u16, Structure)> = Vec::with_capacity(s.substructures.len());
+            let mut kept: Vec<Structure> = Vec::new();
+            for c in std::mem::take(&mut s.substructures) {
+                match read.read(order, ty, &c) {
+                    Some(rank) => fields.push((rank, c)),
+                    None => kept.push(c),
+                }
+            }
+            // Stable: the substructures of a field keep their order.
+            fields.sort_by_key(|&(rank, _)| rank);
+            s.substructures.extend(fields.into_iter().map(|(_, c)| c));
+            s.substructures.append(&mut kept);
+        }
+        if levels <= 1 {
+            return;
+        }
+        let mut read = ModelRead::default();
+        for c in &mut s.substructures {
+            if read.read(order, ty, c).is_none() || c.substructures.is_empty() {
+                continue;
+            }
+            let is_ptr = matches!(c.payload, Payload::Pointer(_));
+            if let Pick::Type(cty) = self.picker.pick(ty, &*c, is_ptr) {
+                self.model_order_to(c, cty, levels - 1);
+            }
+        }
+    }
+
     fn drop_xref(&mut self, s: &mut Structure) {
         if let Some(x) = s.xref.take() {
             self.repair(
@@ -1204,7 +1621,8 @@ impl<'n> Conformer<'n> {
         let children = std::mem::take(&mut s.substructures);
         let mut kept = Vec::with_capacity(children.len());
         let mut counts: Vec<(u8, u32)> = Vec::new();
-        self.path.push(s.tag.as_str().to_string());
+        // A standard tag is an index: no copy of its text.
+        self.path.push(s.tag.clone());
         for mut c in children {
             if self.child(&mut c, ty, &mut counts) {
                 kept.push(c);
@@ -1346,7 +1764,7 @@ impl<'n> Conformer<'n> {
             return;
         };
         head.clean = 0;
-        let head = head.make_owned();
+        let head = head.make_owned(&self.arena);
         let at = head
             .substructures
             .iter()
@@ -1370,6 +1788,9 @@ impl<'n> Conformer<'n> {
                     .substructures
                     .push(text("TAG", &format!("{tag} {uri}")));
             }
+        }
+        if let Some(head_ty) = self.record_of("HEAD") {
+            self.model_order(head, head_ty);
         }
     }
 
@@ -1504,6 +1925,24 @@ impl<'n> Conformer<'n> {
                 s.payload = Payload::Text(fixed.into());
             }
             return Fate::Keep;
+        }
+        // The 5.5.1 file formats are open (accepted practice): a word is
+        // written as it is, a media type as its file format (`image/png`
+        // as `png`).
+        if self.family == Family::V551 && set.name == payload::OPEN_551_FORMATS {
+            if payload::is_open_format(raw) {
+                return Fate::Keep;
+            }
+            if raw.contains('/') {
+                let fixed = file_format_of_media_type(raw);
+                self.repair(
+                    s.line,
+                    RepairKind::EnumValue,
+                    format!("{here} {raw:?}: a media type; written as the file format {fixed}"),
+                );
+                s.payload = Payload::Text(fixed.into());
+                return Fate::Keep;
+            }
         }
         if self.family == Family::V7
             && set.values.contains(&"OTHER")
@@ -1728,7 +2167,7 @@ impl<'n> Conformer<'n> {
                 if v7 {
                     text("FORM", media_type(file))
                 } else {
-                    text("FORM", multimedia_format(file)?)
+                    text("FORM", &multimedia_format(file))
                 }
             }
             ("TRAN", "LANG") if v7 => text("LANG", "und"),
@@ -1785,11 +2224,15 @@ impl<'n> Conformer<'n> {
             if rec.size as usize <= MAX_RECORD_BYTES {
                 continue;
             }
-            let mut size = with_node!(rec.get(), scratch, |n| encoded_len(n, 0, self.family));
+            let mut size = with_node!(rec.get(&self.arena), scratch, |n| encoded_len(
+                n,
+                0,
+                self.family
+            ));
             if size <= MAX_RECORD_BYTES {
                 continue;
             }
-            let r = rec.make_owned();
+            let r = rec.make_owned(&self.arena);
             let mut notes = Vec::new();
             movable_notes(self.rules, r, ty, &mut Vec::new(), &mut notes);
             // The bytes each move saves: the note's lines, less the pointer
@@ -1831,15 +2274,59 @@ impl<'n> Conformer<'n> {
         }
         self.scratch = scratch;
         if !added.is_empty() {
-            records.reserve_exact(added.len());
-            let at = records.len().saturating_sub(1);
-            records.splice(at..at, added.into_iter().map(Rec::owned));
+            insert_records(records, added);
         }
     }
 }
 
+/// Where a record goes in the order the typed model writes records in
+/// (`next::Dataset::records`): the header, submitters, submissions,
+/// individuals, families, shared notes, sources, repositories, multimedia
+/// objects, other records, the trailer.
+fn record_rank(tag: &str) -> u8 {
+    match tag {
+        "HEAD" => 0,
+        "SUBM" => 1,
+        "SUBN" => 2,
+        "INDI" => 3,
+        "FAM" => 4,
+        "NOTE" | "SNOTE" => 5,
+        "SOUR" => 6,
+        "REPO" => 7,
+        "OBJE" => 8,
+        "TRLR" => 10,
+        _ => 9,
+    }
+}
+
+/// Inserts the records a repair made (a stub submitter, notes moved out of
+/// a 5.5.1 record), in order, each before the first record of a later
+/// [`record_rank`]: where the typed model, which keeps records by type,
+/// writes them once read back, and where a tree, which keeps records in
+/// file order, keeps them. Either way, writing what was written again
+/// changes nothing.
+fn insert_records<'n, N: Node<'n>>(records: &mut Vec<Rec<'n, N>>, mut added: Vec<Structure>) {
+    // Room for them only: doubling the records would cost more.
+    records.reserve_exact(added.len());
+    // Stable: records of a rank keep their order.
+    added.sort_by_key(|s| record_rank(s.tag.as_str()));
+    let mut added = added.into_iter().peekable();
+    while let Some(first) = added.next() {
+        let rank = record_rank(first.tag.as_str());
+        let mut run = vec![first];
+        while let Some(s) = added.next_if(|s| record_rank(s.tag.as_str()) == rank) {
+            run.push(s);
+        }
+        let at = records
+            .iter()
+            .position(|r| record_rank(r.tag()) > rank)
+            .unwrap_or(records.len());
+        records.splice(at..at, run.into_iter().map(Rec::owned));
+    }
+}
+
 /// The extension tags of a record and its substructures.
-fn extension_tags<'n, N: Node<'n>>(r: &Rec<'n, N>) -> HashSet<String> {
+fn extension_tags<'n, N: Node<'n>>(r: &Rec<'n, N>, arena: &Flat<'n>) -> HashSet<String> {
     fn walk<'a, M: Node<'a>>(n: M, out: &mut HashSet<String>) {
         let mut stack = vec![n];
         while let Some(n) = stack.pop() {
@@ -1852,7 +2339,7 @@ fn extension_tags<'n, N: Node<'n>>(r: &Rec<'n, N>) -> HashSet<String> {
     }
     let mut out = HashSet::new();
     let mut scratch = Flat::default();
-    with_node!(r.get(), scratch, |n| walk(n, &mut out));
+    with_node!(r.get(arena), scratch, |n| walk(n, &mut out));
     out
 }
 

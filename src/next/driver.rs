@@ -28,6 +28,7 @@
 
 use std::borrow::Cow;
 
+use crate::spec::schema::Kind;
 use crate::tree::{
     unescape_spans, Escaping, Flat, FlatPayload, Payload, RawKind, RawNode, RawSpan, Structure,
     Tag, TextPiece, Xref, STANDARD_TAGS,
@@ -404,6 +405,26 @@ impl<'a> WriteCx<'a> {
     }
 }
 
+/// What a `[convert = …]` function of [`gedcom_struct!`] makes of a value
+/// for the target version.
+pub(crate) enum Converted<T> {
+    /// Written as it is: valid in the target's grammar as this kind of
+    /// payload when known ([`PayloadField::claim`]).
+    AsIs(Option<Kind>),
+    /// Written as this value instead.
+    Into(T),
+}
+
+impl<T> Converted<T> {
+    /// The value to write instead, if any.
+    pub(crate) fn into_value(self) -> Option<T> {
+        match self {
+            Converted::Into(v) => Some(v),
+            Converted::AsIs(_) => None,
+        }
+    }
+}
+
 /// A type read from a node and its substructures.
 pub(crate) trait FromNode: Sized {
     /// Whether the type is a leaf: a payload without substructures (and
@@ -422,8 +443,8 @@ pub(crate) trait ToNodes {
     /// The same structure, written into `out` with its texts borrowed from
     /// the model and its source where they can be: what the writer checks
     /// and emits. By default, [`ToNodes::to_node`]'s structure.
-    fn to_flat<'s>(&'s self, tag: &'static str, cx: &WriteCx<'s>, out: &mut Flat<'s>) {
-        out.push_structure(self.to_node(tag, cx));
+    fn to_flat<'s>(&'s self, tag: StdTag, cx: &WriteCx<'s>, out: &mut Flat<'s>) {
+        out.push_structure(self.to_node(tag.name, cx));
     }
 
     /// Calls `f` with this value and its tag when it is a typed structure
@@ -455,6 +476,15 @@ pub(crate) trait PayloadField: Sized {
     /// [`PayloadField::write`]'s.
     fn payload<'s>(&'s self, cx: &WriteCx<'s>) -> FlatPayload<'s> {
         self.write(cx).into()
+    }
+
+    /// The kind of payload [`PayloadField::payload`] is valid for by
+    /// construction (a known enumeration value, a number), which the
+    /// conformance check then trusts ([`Flat::open_typed`]); `None` for a
+    /// value that may be invalid (a text). By default, none.
+    fn claim(&self, cx: &WriteCx<'_>) -> Option<Kind> {
+        let _ = cx;
+        None
     }
 }
 
@@ -499,6 +529,39 @@ pub(crate) trait TagField: Sized {
     fn from_tag(tag: &'static str) -> Option<Self>;
     /// The tag to write.
     fn tag(&self) -> &'static str;
+    /// The same, with its index among the standard tags.
+    fn std_tag(&self) -> StdTag {
+        StdTag::of(self.tag())
+    }
+}
+
+/// A standard tag a typed structure is written with, and its index among
+/// the standard tags ([`crate::tree::standard_index`]), found once: in a
+/// constant for the tags of fields.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct StdTag {
+    /// The tag.
+    pub(crate) name: &'static str,
+    /// Its index among the standard tags.
+    pub(crate) index: Option<u16>,
+}
+
+impl StdTag {
+    /// A tag, its index found by a search (for a constant).
+    pub(crate) const fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            index: crate::tree::standard_index_const(name),
+        }
+    }
+
+    /// A tag known at run time.
+    pub(crate) fn of(name: &'static str) -> Self {
+        Self {
+            name,
+            index: crate::tree::standard_index(name),
+        }
+    }
 }
 
 /// Declares a fieldless enumeration of tags, for a [`TagField`]:
@@ -544,6 +607,13 @@ macro_rules! tag_enum {
             fn tag(&self) -> &'static str {
                 (*self).tag()
             }
+
+            fn std_tag(&self) -> $crate::next::driver::StdTag {
+                match self {
+                    Self::$first => const { $crate::next::driver::StdTag::new($ftag) },
+                    $(Self::$variant => const { $crate::next::driver::StdTag::new($tag) },)*
+                }
+            }
         }
     };
 }
@@ -561,9 +631,9 @@ pub(crate) trait Slot {
     /// Writes the occurrences.
     fn write(&self, tag: &'static str, cx: &WriteCx<'_>, out: &mut Vec<Structure>);
     /// Writes the occurrences into a flat arena ([`ToNodes::to_flat`]).
-    fn to_flat<'s>(&'s self, tag: &'static str, cx: &WriteCx<'s>, out: &mut Flat<'s>) {
+    fn to_flat<'s>(&'s self, tag: StdTag, cx: &WriteCx<'s>, out: &mut Flat<'s>) {
         let mut owned = Vec::new();
-        self.write(tag, cx, &mut owned);
+        self.write(tag.name, cx, &mut owned);
         for s in owned {
             out.push_structure(s);
         }
@@ -595,7 +665,7 @@ impl<T: FromNode + ToNodes> Slot for Option<T> {
         }
     }
 
-    fn to_flat<'s>(&'s self, tag: &'static str, cx: &WriteCx<'s>, out: &mut Flat<'s>) {
+    fn to_flat<'s>(&'s self, tag: StdTag, cx: &WriteCx<'s>, out: &mut Flat<'s>) {
         if let Some(v) = self {
             v.to_flat(tag, cx, out);
         }
@@ -646,8 +716,9 @@ impl<T: FromNode + ToNodes> Slot for Vec<T> {
         }
     }
 
-    fn to_flat<'s>(&'s self, tag: &'static str, cx: &WriteCx<'s>, out: &mut Flat<'s>) {
-        for v in self {
+    fn to_flat<'s>(&'s self, tag: StdTag, cx: &WriteCx<'s>, out: &mut Flat<'s>) {
+        for (i, v) in self.iter().enumerate() {
+            out.repeat(i > 0);
             v.to_flat(tag, cx, out);
         }
     }
@@ -689,8 +760,9 @@ impl<T: FromNode + ToNodes> Slot for ThinVec<T> {
         }
     }
 
-    fn to_flat<'s>(&'s self, tag: &'static str, cx: &WriteCx<'s>, out: &mut Flat<'s>) {
-        for v in self {
+    fn to_flat<'s>(&'s self, tag: StdTag, cx: &WriteCx<'s>, out: &mut Flat<'s>) {
+        for (i, v) in self.iter().enumerate() {
+            out.repeat(i > 0);
             v.to_flat(tag, cx, out);
         }
     }
@@ -723,7 +795,7 @@ impl<T: ToNodes> ToNodes for Box<T> {
         (**self).to_node(tag, cx)
     }
 
-    fn to_flat<'s>(&'s self, tag: &'static str, cx: &WriteCx<'s>, out: &mut Flat<'s>) {
+    fn to_flat<'s>(&'s self, tag: StdTag, cx: &WriteCx<'s>, out: &mut Flat<'s>) {
         (**self).to_flat(tag, cx, out);
     }
 
@@ -793,11 +865,11 @@ pub(crate) fn write_leaf<T: PayloadField>(
 /// A leaf's structure, into a flat arena.
 pub(crate) fn write_leaf_flat<'s, T: PayloadField>(
     value: &'s T,
-    tag: &'static str,
+    tag: StdTag,
     cx: &WriteCx<'s>,
     out: &mut Flat<'s>,
 ) {
-    out.leaf(Cow::Borrowed(tag), value.payload(cx));
+    out.leaf_typed(tag.name, tag.index, value.payload(cx), value.claim(cx));
 }
 
 /// A structure with a tag and a payload.
@@ -834,7 +906,7 @@ macro_rules! leaf {
 
             fn to_flat<'s>(
                 &'s self,
-                tag: &'static str,
+                tag: $crate::next::driver::StdTag,
                 cx: &$crate::next::driver::WriteCx<'s>,
                 out: &mut $crate::tree::Flat<'s>,
             ) {
@@ -874,6 +946,10 @@ impl PayloadField for u32 {
 
     fn write(&self, _cx: &WriteCx<'_>) -> Payload {
         Payload::Text(self.to_string().into())
+    }
+
+    fn claim(&self, _cx: &WriteCx<'_>) -> Option<Kind> {
+        Some(Kind::Int)
     }
 }
 
@@ -980,6 +1056,11 @@ pub(crate) trait Fields {
         self.write_xref(cx)
             .map(|x| Cow::Owned(x.as_str().to_string()))
     }
+    /// [`PayloadField::claim`] of the payload.
+    fn payload_claim(&self, cx: &WriteCx<'_>) -> Option<Kind> {
+        let _ = cx;
+        None
+    }
     /// Calls `f` with every typed substructure held by a field, and its
     /// tag.
     fn walk(&self, f: &mut dyn FnMut(&'static str, &dyn Fields));
@@ -1063,17 +1144,24 @@ pub(crate) fn read_into(s: &mut dyn Fields, node: NodeRef<'_>, cx: &mut ReadCx<'
     true
 }
 
-/// [`write`] into a flat arena, the texts borrowed where they can be.
+/// [`write`] into a flat arena, the texts borrowed where they can be:
+/// typed ([`Flat::open_typed`]), the payload trusted as `claim` (or the
+/// type's [`Fields::payload_claim`]) says.
 pub(crate) fn write_flat<'s>(
     s: &'s dyn Fields,
-    tag: &'static str,
+    tag: StdTag,
     cx: &WriteCx<'s>,
     out: &mut Flat<'s>,
+    claim: Option<Kind>,
 ) {
     let mut xref = s.write_xref_flat(cx);
     let mut payload = s.write_payload_flat(cx);
+    let mut claim = claim.or_else(|| s.payload_claim(cx));
     let extra = s.extra();
     for node in extra.iter().filter(|n| n.tag == TagId::ASIDE) {
+        // What the type has no place for is no typed value.
+        out.untrusted();
+        claim = None;
         if xref.is_none() {
             xref = node.xref.map(|x| Cow::Borrowed(cx.store.xref(x)));
         }
@@ -1082,7 +1170,7 @@ pub(crate) fn write_flat<'s>(
             p => payload = p,
         }
     }
-    let at = out.open(Cow::Borrowed(tag), xref, payload);
+    let at = out.open_typed(tag.name, tag.index, xref, payload, claim);
     s.write_fields_flat(cx, out);
     let lookup = s.lookup();
     for node in extra.iter().filter(|n| n.tag != TagId::ASIDE) {
@@ -1166,7 +1254,8 @@ pub(crate) fn write(s: &dyn Fields, tag: &'static str, cx: &WriteCx<'_>) -> Stru
 /// (`fn(&Self, &'static str, &WriteCx) -> &'static str`); a
 /// `[convert = path, path]` after it, a function giving the structure to
 /// write in place of this one for the target version
-/// (`fn(&Self, &WriteCx) -> Option<Self>`, `None`: as it is), and one
+/// (`fn(&Self, &WriteCx) -> Converted<Self>`: [`Converted::AsIs`] with the
+/// kind of payload it is valid as, when it is known valid), and one
 /// reading the type from an untyped node (`fn(&Node, &Store) ->
 /// Option<Self>`), with which the nodes of its tag kept in `extra` are
 /// converted alike.
@@ -1422,11 +1511,21 @@ macro_rules! gedcom_struct {
                 cx: &$crate::next::driver::WriteCx<'s>,
                 out: &mut $crate::tree::Flat<'s>,
             ) {
-                $($crate::next::driver::Slot::to_flat(&self.$field, $tag, cx, out);)*
+                $($crate::next::driver::Slot::to_flat(
+                    &self.$field,
+                    const { $crate::next::driver::StdTag::new($tag) },
+                    cx,
+                    out,
+                );)*
                 $(
                     if let Some(d) = &self.detail {
                         let d: &$dname = d;
-                        $($crate::next::driver::Slot::to_flat(&d.$gfield, $gtag, cx, out);)*
+                        $($crate::next::driver::Slot::to_flat(
+                            &d.$gfield,
+                            const { $crate::next::driver::StdTag::new($gtag) },
+                            cx,
+                            out,
+                        );)*
                     }
                 )?
             }
@@ -1436,6 +1535,13 @@ macro_rules! gedcom_struct {
                 cx: &$crate::next::driver::WriteCx<'s>,
             ) -> Option<std::borrow::Cow<'s, str>> {
                 gedcom_struct!(@xref_flat self cx $($xfield)?)
+            }
+
+            fn payload_claim(
+                &self,
+                cx: &$crate::next::driver::WriteCx<'_>,
+            ) -> Option<$crate::spec::schema::Kind> {
+                gedcom_struct!(@payload_claim self cx $($pfield $pty)?)
             }
         }
 
@@ -1458,8 +1564,10 @@ macro_rules! gedcom_struct {
                 $(let tag = { let _ = tag; $crate::next::driver::TagField::tag(&self.$tfield) };)?
                 $(let tag = $tagfn(self, tag, cx);)?
                 $(
-                    if let Some(converted) = cx.convert.then(|| $convfn(self, cx)).flatten() {
-                        return $crate::next::driver::write(&converted, tag, cx);
+                    if cx.convert {
+                        if let $crate::next::driver::Converted::Into(converted) = $convfn(self, cx) {
+                            return $crate::next::driver::write(&converted, tag, cx);
+                        }
                     }
                 )?
                 $crate::next::driver::write(self, tag, cx)
@@ -1467,20 +1575,28 @@ macro_rules! gedcom_struct {
 
             fn to_flat<'s>(
                 &'s self,
-                tag: &'static str,
+                tag: $crate::next::driver::StdTag,
                 cx: &$crate::next::driver::WriteCx<'s>,
                 out: &mut $crate::tree::Flat<'s>,
             ) {
-                $(let tag = { let _ = tag; $crate::next::driver::TagField::tag(&self.$tfield) };)?
-                $(let tag = $tagfn(self, tag, cx);)?
+                $(let tag = { let _ = tag; $crate::next::driver::TagField::std_tag(&self.$tfield) };)?
+                $(let tag = $crate::next::driver::StdTag::of($tagfn(self, tag.name, cx));)?
+                let claim = None;
                 $(
-                    // A converted structure is a temporary: owned.
-                    if let Some(converted) = cx.convert.then(|| $convfn(self, cx)).flatten() {
-                        out.push_structure($crate::next::driver::write(&converted, tag, cx));
-                        return;
-                    }
+                    let claim = if cx.convert {
+                        match $convfn(self, cx) {
+                            // A converted structure is a temporary: owned.
+                            $crate::next::driver::Converted::Into(converted) => {
+                                out.push_structure($crate::next::driver::write(&converted, tag.name, cx));
+                                return;
+                            }
+                            $crate::next::driver::Converted::AsIs(kind) => kind,
+                        }
+                    } else {
+                        claim
+                    };
                 )?
-                $crate::next::driver::write_flat(self, tag, cx, out);
+                $crate::next::driver::write_flat(self, tag, cx, out, claim);
             }
 
             fn visit(
@@ -1498,7 +1614,7 @@ macro_rules! gedcom_struct {
                     cx: &$crate::next::driver::WriteCx<'_>,
                 ) -> Option<$crate::tree::Structure> {
                     let value: Self = $untypedfn(node, cx.store)?;
-                    let converted = $convfn(&value, cx)?;
+                    let converted = $convfn(&value, cx).into_value()?;
                     Some($crate::next::driver::write(&converted, tag, cx))
                 }
             )?
@@ -1553,6 +1669,13 @@ macro_rules! gedcom_struct {
     }};
     (@write_payload $self:ident $cx:ident $pfield:ident $pty:ty) => {
         $crate::next::driver::PayloadField::write(&$self.$pfield, $cx)
+    };
+    (@payload_claim $self:ident $cx:ident) => {{
+        let _ = $cx;
+        None
+    }};
+    (@payload_claim $self:ident $cx:ident $pfield:ident $pty:ty) => {
+        $crate::next::driver::PayloadField::claim(&$self.$pfield, $cx)
     };
     (@xref_flat $self:ident $cx:ident) => {{
         let _ = $cx;

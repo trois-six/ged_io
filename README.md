@@ -381,6 +381,13 @@ assert!(validate(&records, GedcomVersion::V7_0).is_empty());
 Every rule the validator checks and every repair are listed in the
 [`spec` module documentation](https://docs.rs/ged_io/latest/ged_io/spec/).
 
+One deliberate exception to strict conformance: the 5.5.1 file formats
+(`FILE.FORM`, `MULTIMEDIA_FORMAT`) are treated as an open list. The
+specification lists only `bmp`, `gif`, `jpg`, `ole`, `pcx`, `tif` and `wav`;
+`png`, `pdf` or `webp` are accepted and written as given, a media type
+(`image/png`) is written as its file format (`png`), and a missing `FORM` is
+derived from the file's extension. GEDCOM 7.0 output keeps media types.
+
 ---
 
 ## Supported GEDCOM Tags

@@ -607,3 +607,28 @@ fn list_items_are_written_as_they_read_back() {
     assert_has(&out, "2 EVEN BIRT, CHR\n");
     assert_eq!(write_as(&read_str(&out), GedcomVersion::V5_5_1), out);
 }
+
+/// A 5.5.1 multimedia record whose files are of formats outside the 5.5.1
+/// list stays a record, its pointers pointers (accepted practice: the list
+/// is open); a 7.x media type is written in 5.5.1 as its file format.
+#[test]
+fn file_formats_outside_the_551_list_are_kept() {
+    let data = read_str(&v551(
+        "0 @I1@ INDI\n1 OBJE @M1@\n0 @M1@ OBJE\n1 FILE scan.pdf\n2 FORM pdf\n1 FILE photo.png\n",
+    ));
+    let out = write_as(&data, GedcomVersion::V5_5_1);
+    assert_has(&out, "1 OBJE @M1@\n");
+    assert_has(
+        &out,
+        "0 @M1@ OBJE\n1 FILE scan.pdf\n2 FORM pdf\n1 FILE photo.png\n2 FORM png\n",
+    );
+    assert!(
+        !out.contains("_OBJE") && !out.contains("_FILE") && !out.contains("_FORM"),
+        "{out}"
+    );
+    assert_eq!(write_as(&read_str(&out), GedcomVersion::V5_5_1), out);
+
+    let data = read_str(&v7("0 @M1@ OBJE\n1 FILE photo.png\n2 FORM image/png\n"));
+    let out = write_as(&data, GedcomVersion::V5_5_1);
+    assert_has(&out, "1 FILE photo.png\n2 FORM png\n");
+}

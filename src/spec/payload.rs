@@ -55,8 +55,13 @@ pub(crate) fn is_banned(c: char, rules: &VersionRules) -> bool {
 /// of it, is tested eight bytes at a time ([`special_bytes`]).
 #[inline]
 pub(crate) fn has_banned(text: &str, rules: &VersionRules) -> bool {
-    special_bytes(text) & (TAB | CONTROL | MAYBE_BANNED) != 0
-        && text.chars().any(|c| is_banned(c, rules))
+    has_banned_known(text, special_bytes(text), rules)
+}
+
+/// [`has_banned`] of a text whose [`special_bytes`] are `special`.
+#[inline]
+pub(crate) fn has_banned_known(text: &str, special: u8, rules: &VersionRules) -> bool {
+    special & (TAB | CONTROL | MAYBE_BANNED) != 0 && text.chars().any(|c| is_banned(c, rules))
 }
 
 /// Whether `text` is a valid payload of `kind` ([`check`] finds nothing).
@@ -201,12 +206,39 @@ pub(crate) fn list_items(text: &str) -> impl Iterator<Item = &str> {
     text.split(',').map(|i| i.trim_matches(' '))
 }
 
+/// The 5.5.1 set treated as open: the one deliberate exception to strict
+/// conformance (see the [module documentation](super#accepted-practice)).
+/// `MULTIMEDIA_FORMAT` (p. 54) lists seven formats of 1999 (`bmp`, `gif`,
+/// `jpg`, `ole`, `pcx`, `tif`, `wav`); files name `png`, `pdf` and the
+/// like, and no other 5.5.1 structure says what a file is.
+pub(crate) const OPEN_551_FORMATS: &str = "MULTIMEDIA_FORMAT";
+
+/// Whether `value` is a 5.5.1 file format as it is written ([`open_format`]).
+pub(crate) fn is_open_format(value: &str) -> bool {
+    !value.is_empty() && !value.contains('/')
+}
+
+/// Why `value` is no 5.5.1 file format: any word is one, as written, but a
+/// media type (`image/png`), which the repair writes as its file format.
+fn open_format(value: &str) -> Option<String> {
+    if value.is_empty() {
+        Some("an empty file format".into())
+    } else if value.contains('/') {
+        Some("a media type, not a 5.5.1 file format".into())
+    } else {
+        None
+    }
+}
+
 /// Why `value` is not a value of `set`. 5.5.1 values are matched without
 /// regard to case (p. 21); 7.x values are exact, and any extension tag is a
 /// value of every set (§1.5.2).
 pub(crate) fn enum_value(set: &EnumSet, value: &str, family: Family) -> Option<String> {
     if set.open && !value.is_empty() {
         return None;
+    }
+    if family == Family::V551 && set.name == OPEN_551_FORMATS {
+        return open_format(value);
     }
     let ok = match family {
         Family::V551 => set.values.iter().any(|v| v.eq_ignore_ascii_case(value)),

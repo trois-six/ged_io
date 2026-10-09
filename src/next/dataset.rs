@@ -4,7 +4,7 @@
 use crate::tree::{Flat, Structure};
 use crate::version::GedcomVersion;
 
-use super::driver::{FromNode, NodeRef, ReadCx, ToNodes, WriteCx};
+use super::driver::{FromNode, NodeRef, ReadCx, StdTag, ToNodes, WriteCx};
 use super::header::Header;
 use super::node::{Extra, Node, Value};
 use super::records::{
@@ -144,15 +144,15 @@ impl<'a> RecordRef<'a> {
     /// The record, into a flat arena, its texts borrowed.
     pub(crate) fn to_flat(self, cx: &WriteCx<'a>, out: &mut Flat<'a>) {
         match self {
-            RecordRef::Header(r) => r.to_flat("HEAD", cx, out),
-            RecordRef::Individual(r) => r.to_flat("INDI", cx, out),
-            RecordRef::Family(r) => r.to_flat("FAM", cx, out),
-            RecordRef::Source(r) => r.to_flat("SOUR", cx, out),
-            RecordRef::Repository(r) => r.to_flat("REPO", cx, out),
-            RecordRef::Multimedia(r) => r.to_flat("OBJE", cx, out),
-            RecordRef::Submitter(r) => r.to_flat("SUBM", cx, out),
-            RecordRef::Submission(r) => r.to_flat("SUBN", cx, out),
-            RecordRef::Note(r) => r.to_flat("SNOTE", cx, out),
+            RecordRef::Header(r) => r.to_flat(const { StdTag::new("HEAD") }, cx, out),
+            RecordRef::Individual(r) => r.to_flat(const { StdTag::new("INDI") }, cx, out),
+            RecordRef::Family(r) => r.to_flat(const { StdTag::new("FAM") }, cx, out),
+            RecordRef::Source(r) => r.to_flat(const { StdTag::new("SOUR") }, cx, out),
+            RecordRef::Repository(r) => r.to_flat(const { StdTag::new("REPO") }, cx, out),
+            RecordRef::Multimedia(r) => r.to_flat(const { StdTag::new("OBJE") }, cx, out),
+            RecordRef::Submitter(r) => r.to_flat(const { StdTag::new("SUBM") }, cx, out),
+            RecordRef::Submission(r) => r.to_flat(const { StdTag::new("SUBN") }, cx, out),
+            RecordRef::Note(r) => r.to_flat(const { StdTag::new("SNOTE") }, cx, out),
             RecordRef::Other(n) => n.to_flat(cx.store, out),
         }
     }
