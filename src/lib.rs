@@ -73,6 +73,17 @@ pub use indexed::IndexedDataset;
 pub use model::Dataset;
 pub use stream::{GedcomStreamParser, StreamedRecord};
 pub use version::{GedcomVersion, VersionRules};
+/// The examples of the README, compiled and run as documentation tests.
+#[cfg(all(doctest, feature = "serde", feature = "gedzip"))]
+#[doc = include_str!("../README.md")]
+pub struct ReadmeExamples;
+
+/// The examples of the migration guide, compiled and run as documentation
+/// tests.
+#[cfg(doctest)]
+#[doc = include_str!("../MIGRATION.md")]
+pub struct MigrationExamples;
+
 pub use writer::{
     Bom, GedcomWriter, LineEnding, OutputEncoding, Repair, RepairKind, RepairPolicy, Unencodable,
     WriteError, WriteReport, WriterConfig,
