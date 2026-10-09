@@ -2,6 +2,9 @@
 //! structures a dataset kept untyped although the model has a type for
 //! them.
 
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
 use super::dataset::Dataset;
 use super::driver::{FieldDesc, Fields, SpecNames, Struct};
 use super::enums::{LdsStatus, PHRASED_FIELDS};
@@ -22,6 +25,9 @@ use super::{
     PlaceTranslation, Refn, RepositoryCitation, RomanizedName, RomanizedVariation, SourceText,
     SpouseLink, TextTranslation,
 };
+use crate::spec::conform::{Field, FieldOrder};
+use crate::spec::schema::StructId;
+use crate::GedcomVersion;
 
 /// The typed structures and the structure types each stands for.
 macro_rules! structures {
@@ -185,4 +191,45 @@ fn check(s: &dyn Fields, store: &Store, path: &mut Vec<&'static str>, out: &mut 
         check(child, store, path, out);
         path.pop();
     });
+}
+
+/// The order in which the model writes the substructures of each structure
+/// type of `version` ([`FieldOrder`]): the fields of the typed structure
+/// that stands for it, in their declared order, and their shapes.
+pub(crate) fn field_order(version: GedcomVersion) -> &'static FieldOrder {
+    static ORDERS: [OnceLock<FieldOrder>; 3] = [const { OnceLock::new() }; 3];
+    let (slot, names): (_, fn(&SpecNames) -> &'static [&'static str]) =
+        match version.rules().spec.version {
+            "5.5.1" => (&ORDERS[0], |s| s.v551),
+            "7.0" => (&ORDERS[1], |s| s.v70),
+            _ => (&ORDERS[2], |s| s.v71),
+        };
+    slot.get_or_init(|| {
+        let schema = version.rules().spec;
+        let ids = (0..schema.structs.len()).filter_map(|i| StructId::try_from(i).ok());
+        let by_name: HashMap<&str, StructId> = ids.map(|id| (schema.name(id), id)).collect();
+        let mut ranks = vec![Vec::new(); schema.structs.len()];
+        for (_, spec, fields) in STRUCTURES {
+            for name in names(spec) {
+                let Some(slot) = by_name
+                    .get(name)
+                    .and_then(|&id| ranks.get_mut(usize::from(id)))
+                else {
+                    continue;
+                };
+                if !slot.is_empty() {
+                    continue;
+                }
+                for (rank, field) in (0_u16..).zip(fields.iter()) {
+                    let field_shape = Field {
+                        rank,
+                        leaf: field.leaf,
+                        many: field.many,
+                    };
+                    slot.extend(field.tags.iter().map(|&tag| (tag, field_shape)));
+                }
+            }
+        }
+        FieldOrder::new(ranks)
+    })
 }

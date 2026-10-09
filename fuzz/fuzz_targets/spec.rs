@@ -1,12 +1,13 @@
 //! The validator and the conformance repair are total and agree: for any
 //! bytes, validation never panics, and for every version the repaired tree
-//! validates (but for 5.5.1 records over 32K that hold no note to move) and
-//! a second repair changes nothing.
+//! validates (but for 5.5.1 records over 32K that hold no note to move), a
+//! second repair changes nothing, and the written output needs no repair
+//! and is written again as it was: write(read(write(x))) == write(x).
 #![no_main]
 
 use ged_io::spec::{conform, validate, validate_bytes, DeviationKind};
 use ged_io::tree::Tree;
-use ged_io::GedcomVersion;
+use ged_io::{Bom, GedcomVersion, GedcomWriter};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -26,5 +27,21 @@ fuzz_target!(|data: &[u8]| {
             .collect();
         assert!(left.is_empty(), "{version}: {left:?}");
         assert!(conform(&mut t, version).is_empty(), "{version}");
+        // What the writer writes, read back, needs no repair, and is
+        // written again as it was: write(read(write(x))) == write(x).
+        let write = |records: &[ged_io::tree::Structure]| {
+            let mut out = Vec::new();
+            GedcomWriter::new()
+                .gedcom_version(version)
+                .bom(Bom::Never)
+                .write_structures(&mut out, records)
+                .expect("repairs, never fails");
+            String::from_utf8(out).expect("UTF-8")
+        };
+        let out = write(&records);
+        let mut back = Tree::parse(out.as_str()).to_structures();
+        let repairs = conform(&mut back, version);
+        assert!(repairs.is_empty(), "{version}: {repairs:?}\n{out}");
+        assert!(write(&back) == out, "{version}: not stable\n{out}");
     }
 });

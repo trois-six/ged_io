@@ -60,9 +60,64 @@ const LOOKUP_BATCH: usize = 1 << 16;
 /// [`DeviationKind::RecordSize`]: super::DeviationKind::RecordSize
 pub fn conform(records: &mut Vec<Structure>, version: GedcomVersion) -> Vec<Repair> {
     let mut recs: Vec<Rec<'_, &Structure>> = records.drain(..).map(Rec::owned).collect();
-    let repairs = conform_records(&mut recs, version).repairs;
+    let repairs = conform_records(&mut recs, version, None).repairs;
     records.extend(recs.into_iter().map(Rec::into_structure));
     repairs
+}
+
+/// The order in which a typed model writes the substructures of each
+/// structure type: the substructures its fields hold, field after field in
+/// their declared order, then those it keeps aside (`extra`), in their
+/// order. A dataset of the model read back from what it wrote holds its
+/// structures so, whatever their order in the file.
+///
+/// A record of such a model is written so: in that order. When the pass
+/// repairs one, it puts its structures back in the order the model, reading
+/// the record back, would write them ([`Conformer::model_order`]), as a
+/// repair can change where they go: what becomes an extension goes aside,
+/// what is added (a required substructure, a `PHRASE`, `HEAD.SCHMA`) or
+/// made to fit (a pointer where text belongs, written as text) goes to its
+/// field. A record that becomes an extension record goes after the others.
+/// Writing what was written then writes the same lines. Without it (a
+/// tree, whose order is the file's), the pass repairs in place.
+#[derive(Debug, Default)]
+pub(crate) struct FieldOrder {
+    /// For each structure type, the fields of the typed structure that
+    /// stands for it ([`Field`]), by tag.
+    fields: Box<[FieldsByTag]>,
+}
+
+/// The fields of a typed structure, by the tags they take.
+type FieldsByTag = Box<[(&'static str, Field)]>;
+
+/// A field of a typed structure, as [`FieldOrder`] needs it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Field {
+    /// Its position among the fields.
+    pub(crate) rank: u16,
+    /// Whether it holds a value without substructures: a structure with
+    /// substructures does not fit it.
+    pub(crate) leaf: bool,
+    /// Whether it holds any number of structures rather than one.
+    pub(crate) many: bool,
+}
+
+impl FieldOrder {
+    /// The order of `fields`: for each structure type (by [`StructId`]),
+    /// each tag its fields take, with the field.
+    pub(crate) fn new(fields: Vec<Vec<(&'static str, Field)>>) -> Self {
+        Self {
+            fields: fields.into_iter().map(Vec::into_boxed_slice).collect(),
+        }
+    }
+
+    /// The field of a `ty` structure that takes `tag` substructures.
+    fn field(&self, ty: StructId, tag: &str) -> Option<Field> {
+        self.fields
+            .get(usize::from(ty))
+            .and_then(|f| f.iter().find(|(t, _)| *t == tag))
+            .map(|&(_, field)| field)
+    }
 }
 
 /// What [`conform_records`] did, and the identifiers it left.
@@ -85,11 +140,16 @@ impl Conformed<'_> {
 
 /// [`conform`] on records as they are given ([`Rec`]): only the records
 /// that need a repair are copied.
+///
+/// `order` is the order of the typed model the records come from, when
+/// they do ([`FieldOrder`]).
 pub(crate) fn conform_records<'n, N: Node<'n>>(
     records: &mut Vec<Rec<'n, N>>,
     version: GedcomVersion,
+    order: Option<&'static FieldOrder>,
 ) -> Conformed<'n> {
     let mut c = Conformer::new(version);
+    c.order = order;
     for pass in 0..MAX_PASSES {
         let before = c.repairs.len();
         c.pass(records, pass);
@@ -393,6 +453,8 @@ struct Conformer<'n> {
     arena: Flat<'n>,
     /// Whether the last pass added records.
     added: bool,
+    /// The order of the typed model the records come from, if they do.
+    order: Option<&'static FieldOrder>,
 }
 
 /// A required substructure: its tag, its minimum and the first
@@ -703,6 +765,7 @@ impl<'n> Conformer<'n> {
             scratch: Flat::default(),
             arena: Flat::default(),
             added: false,
+            order: None,
         };
         c.arena.set_typing(Some(Typing::of(version)));
         c
@@ -772,14 +835,27 @@ impl<'n> Conformer<'n> {
             used
         });
 
-        self.repair_dirty(records, head_ty, dirty);
+        let extensions = self.repair_dirty(records, head_ty, dirty);
+        if self.order.is_some() && !extensions.is_empty() {
+            // Records that became extension records go after the others,
+            // before the trailer, where the typed model writes them.
+            let end = records
+                .iter()
+                .rposition(|r| r.tag() == "TRLR")
+                .unwrap_or(records.len());
+            let mut moved = Vec::with_capacity(extensions.len());
+            for &i in extensions.iter().rev() {
+                moved.push(records.remove(i));
+            }
+            moved.reverse();
+            let at = end.saturating_sub(moved.len());
+            records.splice(at..at, moved);
+        }
         self.path.clear();
         self.added = !self.new_records.is_empty();
         if self.added {
-            // Room for them only: doubling the records would cost more.
-            records.reserve_exact(self.new_records.len());
-            let at = records.len().saturating_sub(1);
-            records.splice(at..at, self.new_records.drain(..).map(Rec::owned));
+            let added = std::mem::take(&mut self.new_records);
+            insert_records(records, added);
         }
         if self.family == Family::V7 {
             self.declare(records);
@@ -902,12 +978,15 @@ impl<'n> Conformer<'n> {
 
     /// The repairs, in record order: the dirty records repaired, the others
     /// counted.
+    ///
+    /// Returns the records that became extension records.
     fn repair_dirty<N: Node<'n>>(
         &mut self,
         records: &mut [Rec<'n, N>],
         head_ty: Option<StructId>,
         dirty: Vec<usize>,
-    ) {
+    ) -> Vec<usize> {
+        let mut extensions = Vec::new();
         let mut counts: Vec<(u8, u32)> = Vec::new();
         let mut next_dirty = dirty.into_iter().peekable();
         for (i, r) in records.iter_mut().enumerate() {
@@ -918,16 +997,22 @@ impl<'n> Conformer<'n> {
                     if let (Some(head), true) = (head_ty, is_dirty) {
                         self.path.clear();
                         r.clean = 0;
-                        let _ = self.fix(r.make_owned(&self.arena), head, true);
+                        let r = r.make_owned(&self.arena);
+                        let _ = self.fix(r, head, true);
+                        self.model_order(r, head);
                     }
                     continue;
                 }
                 _ => {}
             }
             self.path.clear();
+            let was_extension = r.tag().starts_with('_');
             if is_dirty {
                 (r.clean, r.size) = (0, u32::MAX);
                 self.record(r.make_owned(&self.arena), &mut counts);
+                if !was_extension && r.tag().starts_with('_') {
+                    extensions.push(i);
+                }
                 continue;
             }
             #[cfg(debug_assertions)]
@@ -947,9 +1032,13 @@ impl<'n> Conformer<'n> {
                     }
                     (r.clean, r.size) = (0, u32::MAX);
                     self.record(r.make_owned(&self.arena), &mut counts);
+                    if !was_extension && r.tag().starts_with('_') {
+                        extensions.push(i);
+                    }
                 }
             }
         }
+        extensions
     }
 
     /// Checks, in debug builds, that a record found clean is one the repair
@@ -991,6 +1080,9 @@ impl<'n> Conformer<'n> {
             x
         });
         complete_head(head, self.rules, "UTF-8", submitter);
+        if let Some(head_ty) = self.record_of("HEAD") {
+            self.model_order(head, head_ty);
+        }
     }
 
     /// The first `@<prefix>n@` no record holds; taken, for a record of type
@@ -1026,8 +1118,10 @@ impl<'n> Conformer<'n> {
                             format!("a {tag} record more than the {max} permitted, written as an extension record"),
                         );
                         self.make_extension(r);
+                        return;
                     }
                 }
+                self.model_order(r, ty);
             }
             // A documented alias of a standard record is that record.
             Pick::Extension => match self.aliases.structs.get(&tag).copied() {
@@ -1304,6 +1398,55 @@ impl<'n> Conformer<'n> {
         }
     }
 
+    /// Puts the substructures of `s`, a repaired structure of type `ty` of
+    /// a typed model's record, and those of its substructures, in the order
+    /// the model writes them once it reads them back ([`FieldOrder`]). The
+    /// model reads a substructure into the field its tag selects unless a
+    /// substructure of that tag went aside before it, it has an identifier,
+    /// it has substructures and the field holds a value without any, or the
+    /// field holds one structure and has it; anything else goes aside
+    /// (`next::driver::read_into`). `s` is repaired: every payload fits its
+    /// field.
+    fn model_order(&self, s: &mut Structure, ty: StructId) {
+        let Some(order) = self.order else {
+            return;
+        };
+        let children = std::mem::take(&mut s.substructures);
+        let mut fields: Vec<(u16, Structure)> = Vec::with_capacity(children.len());
+        let mut aside: Vec<Structure> = Vec::new();
+        let mut full: Vec<u16> = Vec::new();
+        for c in children {
+            let field = (!c.tag.as_str().starts_with('_'))
+                .then(|| order.field(ty, c.tag.as_str()))
+                .flatten()
+                .filter(|f| {
+                    let fits = c.xref.is_none() && (!f.leaf || c.substructures.is_empty());
+                    let room = f.many || !full.contains(&f.rank);
+                    fits && room && !aside.iter().any(|a| a.tag == c.tag)
+                });
+            match field {
+                Some(f) => {
+                    if !f.many {
+                        full.push(f.rank);
+                    }
+                    fields.push((f.rank, c));
+                }
+                None => aside.push(c),
+            }
+        }
+        // Stable: the substructures of a field keep their order.
+        fields.sort_by_key(|&(rank, _)| rank);
+        s.substructures.reserve_exact(fields.len() + aside.len());
+        for (_, mut c) in fields {
+            let is_ptr = matches!(c.payload, Payload::Pointer(_));
+            if let Pick::Type(cty) = self.picker.pick(ty, &c, is_ptr) {
+                self.model_order(&mut c, cty);
+            }
+            s.substructures.push(c);
+        }
+        s.substructures.append(&mut aside);
+    }
+
     fn drop_xref(&mut self, s: &mut Structure) {
         if let Some(x) = s.xref.take() {
             self.repair(
@@ -1558,6 +1701,9 @@ impl<'n> Conformer<'n> {
                     .substructures
                     .push(text("TAG", &format!("{tag} {uri}")));
             }
+        }
+        if let Some(head_ty) = self.record_of("HEAD") {
+            self.model_order(head, head_ty);
         }
     }
 
@@ -2023,10 +2169,54 @@ impl<'n> Conformer<'n> {
         }
         self.scratch = scratch;
         if !added.is_empty() {
-            records.reserve_exact(added.len());
-            let at = records.len().saturating_sub(1);
-            records.splice(at..at, added.into_iter().map(Rec::owned));
+            insert_records(records, added);
         }
+    }
+}
+
+/// Where a record goes in the order the typed model writes records in
+/// (`next::Dataset::records`): the header, submitters, submissions,
+/// individuals, families, shared notes, sources, repositories, multimedia
+/// objects, other records, the trailer.
+fn record_rank(tag: &str) -> u8 {
+    match tag {
+        "HEAD" => 0,
+        "SUBM" => 1,
+        "SUBN" => 2,
+        "INDI" => 3,
+        "FAM" => 4,
+        "NOTE" | "SNOTE" => 5,
+        "SOUR" => 6,
+        "REPO" => 7,
+        "OBJE" => 8,
+        "TRLR" => 10,
+        _ => 9,
+    }
+}
+
+/// Inserts the records a repair made (a stub submitter, notes moved out of
+/// a 5.5.1 record), in order, each before the first record of a later
+/// [`record_rank`]: where the typed model, which keeps records by type,
+/// writes them once read back, and where a tree, which keeps records in
+/// file order, keeps them. Either way, writing what was written again
+/// changes nothing.
+fn insert_records<'n, N: Node<'n>>(records: &mut Vec<Rec<'n, N>>, mut added: Vec<Structure>) {
+    // Room for them only: doubling the records would cost more.
+    records.reserve_exact(added.len());
+    // Stable: records of a rank keep their order.
+    added.sort_by_key(|s| record_rank(s.tag.as_str()));
+    let mut added = added.into_iter().peekable();
+    while let Some(first) = added.next() {
+        let rank = record_rank(first.tag.as_str());
+        let mut run = vec![first];
+        while let Some(s) = added.next_if(|s| record_rank(s.tag.as_str()) == rank) {
+            run.push(s);
+        }
+        let at = records
+            .iter()
+            .position(|r| record_rank(r.tag()) > rank)
+            .unwrap_or(records.len());
+        records.splice(at..at, run.into_iter().map(Rec::owned));
     }
 }
 

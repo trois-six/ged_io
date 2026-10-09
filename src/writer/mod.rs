@@ -57,7 +57,7 @@ use std::borrow::Cow;
 use std::fmt;
 use std::io;
 
-use crate::spec::conform::{conform_records, with_node, Build, Rec, RecRef};
+use crate::spec::conform::{conform_records, with_node, Build, FieldOrder, Rec, RecRef};
 use crate::tree::{Flat, FlatRef, Node, PayloadRef, Structure, Tree};
 use crate::types::GedcomData;
 use crate::version::{GedcomVersion, VersionRules};
@@ -566,7 +566,7 @@ impl GedcomWriter {
         let rules = self.rules_for(tree.declared_version());
         let mut records = Vec::with_capacity(tree.records().count());
         records.extend(tree.records().map(Rec::given));
-        self.write_conformed(&mut writer, rules, records)
+        self.write_conformed(&mut writer, rules, records, None)
     }
 
     /// Writes owned records — such as [`Tree::to_structures`] gives — like
@@ -582,7 +582,26 @@ impl GedcomWriter {
         records: &[Structure],
     ) -> Result<WriteReport, WriteError> {
         let rules = self.rules_for_records(records);
-        self.write_conformed(&mut writer, rules, records.iter().map(Rec::given).collect())
+        self.write_conformed(
+            &mut writer,
+            rules,
+            records.iter().map(Rec::given).collect(),
+            None,
+        )
+    }
+
+    /// [`write_structures`](Self::write_structures) of the owned structures
+    /// of a typed model, repaired in its order ([`FieldOrder`]), as the
+    /// model itself is written ([`write_built`](Self::write_built)).
+    pub(crate) fn write_model_structures<W: io::Write>(
+        &self,
+        mut writer: W,
+        records: &[Structure],
+        order: fn(GedcomVersion) -> &'static FieldOrder,
+    ) -> Result<WriteReport, WriteError> {
+        let rules = self.rules_for_records(records);
+        let records = records.iter().map(Rec::given).collect();
+        self.write_conformed(&mut writer, rules, records, Some(order(rules.version)))
     }
 
     /// The version owned records are written in: the configured one, else
@@ -600,14 +619,17 @@ impl GedcomWriter {
     /// Writes records that write their own structures when needed (a
     /// typed dataset: [`crate::next::write`]) like
     /// [`write_structures`](Self::write_structures).
+    /// `order` gives the order of the typed model they come from, in the
+    /// target version ([`FieldOrder`]).
     pub(crate) fn write_built<'n, W: io::Write>(
         &self,
         mut writer: W,
         records: &'n [impl Build<'n>],
+        order: fn(GedcomVersion) -> &'static FieldOrder,
     ) -> Result<WriteReport, WriteError> {
         let records: Vec<Rec<'n, &'n Structure>> = records.iter().map(|r| Rec::built(r)).collect();
         let rules = self.rules_for_built(&records);
-        self.write_conformed(&mut writer, rules, records)
+        self.write_conformed(&mut writer, rules, records, Some(order(rules.version)))
     }
 
     /// [`write_built`](Self::write_built) as text, as
@@ -615,11 +637,13 @@ impl GedcomWriter {
     pub(crate) fn write_built_to_string<'n>(
         &self,
         records: &'n [impl Build<'n>],
+        order: fn(GedcomVersion) -> &'static FieldOrder,
     ) -> Result<(String, WriteReport), WriteError> {
         let mut records: Vec<Rec<'n, &'n Structure>> =
             records.iter().map(|r| Rec::built(r)).collect();
         let rules = self.rules_for_built(&records);
-        let mut conformed = conform_records(&mut records, rules.version);
+        let mut conformed =
+            conform_records(&mut records, rules.version, Some(order(rules.version)));
         let mut repairs = std::mem::take(&mut conformed.repairs);
         if self.config.on_nonconformant == RepairPolicy::Error {
             if let Some(first) = repairs.into_iter().next() {
@@ -666,8 +690,9 @@ impl GedcomWriter {
         writer: &mut dyn io::Write,
         rules: &'static VersionRules,
         mut records: Vec<Rec<'n, N>>,
+        order: Option<&'static FieldOrder>,
     ) -> Result<WriteReport, WriteError> {
-        let mut conformed = conform_records(&mut records, rules.version);
+        let mut conformed = conform_records(&mut records, rules.version, order);
         let repairs = std::mem::take(&mut conformed.repairs);
         let known = |x: &str| conformed.knows(x);
         let arena = &conformed.arena;

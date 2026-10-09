@@ -463,6 +463,63 @@ fn test_tabs_are_spaces_in_551_and_kept_in_7() {
     assert!(write(&data, GedcomVersion::V7_0).contains("1 NOTE a\tb\n"));
 }
 
+/// Whether a line's payload starts with white space, which the token reader
+/// still trims (D16) until the builder reads through the tree.
+fn starts_with_white_space(line: &str) -> bool {
+    let rest = line.split_once(' ').map_or("", |(_, r)| r);
+    let rest = match rest.strip_prefix('@') {
+        Some(r) => r.split_once("@ ").map_or("", |(_, r)| r),
+        None => rest,
+    };
+    rest.split_once(' ')
+        .is_some_and(|(_, p)| p.starts_with(char::is_whitespace))
+}
+
+/// Writing is idempotent: write(read(write(x))) == write(x), on every
+/// fixture, in every version, for the model and for the lossless tree.
+#[test]
+fn test_writing_is_idempotent() {
+    fn ged_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                ged_files(&p, out);
+            } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("ged")) {
+                out.push(p);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    ged_files(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures"),
+        &mut files,
+    );
+    files.sort();
+    assert!(files.len() > 20);
+    for path in files {
+        let bytes = std::fs::read(&path).unwrap();
+        for version in VERSIONS {
+            if let Ok(data) = GedcomBuilder::new().build_from_bytes(&bytes) {
+                let out = write(&data, version);
+                if !out.split_terminator('\n').any(starts_with_white_space) {
+                    assert_eq!(write(&read(&out), version), out, "{}", path.display());
+                }
+            }
+            let tree = |bytes: &[u8]| {
+                let mut out = Vec::new();
+                GedcomWriter::new()
+                    .gedcom_version(version)
+                    .bom(Bom::Never)
+                    .write_tree(&mut out, &Tree::from_bytes(bytes))
+                    .unwrap();
+                out
+            };
+            let out = tree(&bytes);
+            assert_eq!(tree(&out), out, "{}", path.display());
+        }
+    }
+}
+
 /// A date or an age is converted as it is written, without the characters
 /// the version bans: `> \u{81}69y` (a C1 control) is the 5.5.1 age `>69y`,
 /// not `> 69y` once the control is left out, which the next write would

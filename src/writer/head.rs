@@ -11,7 +11,9 @@
 //!   has none) and `SUBM` pointer;
 //! - no cross-reference identifier.
 //!
-//! Every other substructure is kept, in its order.
+//! Every other substructure is kept, in its order. The structures added go
+//! where the typed model writes them: `GEDC`, `CHAR` and `SOUR` first, `SUBM`
+//! after `DEST` and `DATE`.
 
 use crate::tree::{Payload, Structure, Xref};
 use crate::version::VersionRules;
@@ -72,10 +74,20 @@ pub(crate) fn complete(
     }
     head.substructures.splice(0..0, front);
     if let Some(submitter) = submitter {
-        head.substructures.push(Structure {
-            payload: Payload::Pointer(Xref::new(submitter)),
-            ..Structure::new("SUBM")
-        });
+        // After what the typed model writes before it (`next::Header`), so
+        // that a header read back from the output is written the same.
+        let at = head
+            .substructures
+            .iter()
+            .rposition(|s| matches!(s.tag.as_str(), "GEDC" | "CHAR" | "SOUR" | "DEST" | "DATE"))
+            .map_or(0, |i| i + 1);
+        head.substructures.insert(
+            at,
+            Structure {
+                payload: Payload::Pointer(Xref::new(submitter)),
+                ..Structure::new("SUBM")
+            },
+        );
     }
 }
 

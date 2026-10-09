@@ -211,7 +211,23 @@ pub fn write<W: io::Write>(
     writer: &GedcomWriter,
     out: W,
 ) -> Result<WriteReport, WriteError> {
-    writer.write_built(out, &data.built(writer))
+    writer.write_built(out, &data.built(writer), ledger_impl::field_order)
+}
+
+/// Writes the owned structures of a dataset, as
+/// [`Dataset::to_structures_for`] gives them, as [`write`] writes the
+/// dataset itself: what the repair adds or makes an extension goes where
+/// the model writes it.
+///
+/// # Errors
+///
+/// As [`GedcomWriter::write`].
+pub fn write_structures<W: io::Write>(
+    records: &[Structure],
+    writer: &GedcomWriter,
+    out: W,
+) -> Result<WriteReport, WriteError> {
+    writer.write_model_structures(out, records, ledger_impl::field_order)
 }
 
 /// Writes a dataset as text, as [`GedcomWriter::write_to_string`] does.
@@ -222,7 +238,7 @@ pub fn write<W: io::Write>(
 /// [`RepairPolicy::Error`](crate::writer::RepairPolicy::Error).
 pub fn write_string(data: &Dataset, writer: &GedcomWriter) -> Result<String, WriteError> {
     writer
-        .write_built_to_string(&data.built(writer))
+        .write_built_to_string(&data.built(writer), ledger_impl::field_order)
         .map(|(text, _)| text)
 }
 

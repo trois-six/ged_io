@@ -1,7 +1,8 @@
 //! Writer output re-parses and follows the line grammar: for any input,
 //! the typed model and the lossless tree read from it are written in each
 //! version without panicking, every written line passes the line rules of
-//! the version, and the output reads back with the same records.
+//! the version, the output reads back with the same records, and writing
+//! it again gives the same bytes: write(read(write(x))) == write(x).
 #![no_main]
 
 use ged_io::tree::{parse_tree, Tree};
@@ -69,6 +70,17 @@ fn check_lines(out: &str, version: GedcomVersion) {
     assert!(out.ends_with("0 TRLR\n"), "no trailer");
 }
 
+/// Whether a line's payload starts with white space.
+fn starts_with_white_space(line: &str) -> bool {
+    let rest = line.split_once(' ').map_or("", |(_, r)| r);
+    let rest = match rest.strip_prefix('@') {
+        Some(r) => r.split_once("@ ").map_or("", |(_, r)| r),
+        None => rest,
+    };
+    rest.split_once(' ')
+        .is_some_and(|(_, p)| p.starts_with(char::is_whitespace))
+}
+
 /// The number of level-0 lines.
 fn records(out: &str) -> usize {
     out.split_terminator('\n')
@@ -95,6 +107,13 @@ fuzz_target!(|data: &[u8]| {
             assert_eq!(back.multimedia.len(), model.multimedia.len());
             assert_eq!(back.shared_notes.len(), model.shared_notes.len());
             assert_eq!(back.custom_data.len(), model.custom_data.len());
+            // Writing is idempotent: write(read(write(x))) == write(x). The
+            // token reader still trims the white space a value starts with
+            // (D16), which the tree keeps, until the builder reads through it.
+            if !out.split_terminator('\n').any(starts_with_white_space) {
+                let again = writer.write_to_string(&back).expect("repairs, never fails");
+                assert!(again == out, "{version}: not stable\n{out}\n{again}");
+            }
             for encoding in [
                 OutputEncoding::Ansel,
                 OutputEncoding::Ascii,
@@ -139,5 +158,13 @@ fuzz_target!(|data: &[u8]| {
             "{written} records written for {kept}"
         );
         assert_eq!(parse_tree(&out).records().count(), records(&out));
+        // Writing is idempotent: write(read(write(x))) == write(x).
+        let mut again = Vec::new();
+        GedcomWriter::new()
+            .gedcom_version(version)
+            .bom(ged_io::Bom::Never)
+            .write_tree(&mut again, &Tree::from_bytes(out.as_bytes()))
+            .expect("repairs, never fails");
+        assert!(again == out.as_bytes(), "{version}: not stable\n{out}");
     }
 });
