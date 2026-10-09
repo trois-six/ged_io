@@ -295,14 +295,24 @@ impl VersionRules {
                         .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
             }
             XrefGrammar::V551 { max_len } => {
-                // Bytes bound characters: most identifiers need no count.
-                let ascii = id.is_ascii();
-                (xref.len() <= max_len || xref.chars().count() <= max_len)
-                    && id.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+                let bytes = id.as_bytes();
+                let first = bytes
+                    .first()
+                    .is_some_and(|&b| b.is_ascii_alphanumeric() || b == b'_');
+                // One pass over the bytes of an ASCII identifier, as nearly
+                // all are; bytes bound characters, so it needs no count.
+                let mut ascii = true;
+                for &b in bytes {
+                    if b == b'@' || b.is_ascii_control() {
+                        return false;
+                    }
+                    ascii &= b.is_ascii();
+                }
+                first
                     && if ascii {
-                        !id.bytes().any(|b| b == b'@' || b.is_ascii_control())
+                        xref.len() <= max_len
                     } else {
-                        !id.chars().any(|c| c == '@' || c.is_control())
+                        xref.chars().count() <= max_len && !id.chars().any(char::is_control)
                     }
             }
         }
