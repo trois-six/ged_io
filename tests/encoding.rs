@@ -1,16 +1,15 @@
-//! Integration tests for GEDCOM encoding support.
-//!
-//! Tests parsing of GEDCOM files with various character encodings:
-//! - UTF-8 (with and without BOM)
-//! - UTF-16 LE and BE (with BOM)
-//! - ISO-8859-1 (Latin-1)
-//! - ISO-8859-15 (Latin-9)
+//! Reading GEDCOM bytes of every encoding: UTF-8 (with and without a byte
+//! order mark), UTF-16 LE and BE, ISO-8859-1, ISO-8859-15, Windows-1252
+//! (`CHAR ANSI`) and ANSEL; the detection of the encoding from the byte
+//! order mark, the bytes and `HEAD.CHAR`; and the encoder. Every name and
+//! place is fictitious.
 
-use ged_io::encoding::{decode, encode_to_bytes, GedcomEncoding};
-use ged_io::GedcomBuilder;
+use ged_io::encoding::{decode, detect_encoding, encode, GedcomEncoding};
+use ged_io::model::NoteContent;
+use ged_io::{Dataset, GedcomBuilder, GedcomError};
 
-/// Helper to create a minimal GEDCOM string with a name containing special characters.
-fn create_gedcom_with_name(name: &str, char_tag: &str) -> String {
+/// A minimal 5.5.1 file declaring `char_tag` whose individual has `name`.
+fn file_with_name(name: &str, char_tag: &str) -> String {
     format!(
         "0 HEAD\n\
          1 GEDC\n\
@@ -22,664 +21,457 @@ fn create_gedcom_with_name(name: &str, char_tag: &str) -> String {
     )
 }
 
-// ============================================================================
-// UTF-8 Tests
-// ============================================================================
+fn read(bytes: impl Into<Vec<u8>>) -> Dataset {
+    GedcomBuilder::new().build_from_bytes(bytes).unwrap()
+}
+
+/// The first name of the `index`th individual, as written.
+fn name(data: &Dataset, index: usize) -> String {
+    data.individuals[index].names[0]
+        .value
+        .to_str(data)
+        .into_owned()
+}
+
+/// The text of the first note of the first individual.
+fn note(data: &Dataset) -> String {
+    match &data.individuals[0].notes[0].content {
+        NoteContent::Text(text) => text.to_str(data).into_owned(),
+        NoteContent::Shared(_) => panic!("a shared note"),
+    }
+}
+
+// UTF-8
 
 #[test]
-fn test_parse_utf8_without_bom() {
-    let content = create_gedcom_with_name("José /García/", "UTF-8");
-    let bytes = content.as_bytes();
-
-    let data = GedcomBuilder::new().build_from_bytes(bytes).unwrap();
-
+fn utf8_without_bom() {
+    let data = read(file_with_name("Zoé /Exámple/", "UTF-8"));
     assert_eq!(data.individuals.len(), 1);
-    let name = data.individuals[0].names.first().unwrap();
-    assert_eq!(name.value.as_ref().unwrap(), "José /García/");
+    assert_eq!(name(&data, 0), "Zoé /Exámple/");
 }
 
 #[test]
-fn test_parse_utf8_with_bom() {
-    let content = create_gedcom_with_name("Müller /Schröder/", "UTF-8");
-    let mut bytes = vec![0xEF, 0xBB, 0xBF]; // UTF-8 BOM
-    bytes.extend_from_slice(content.as_bytes());
-
-    let data = GedcomBuilder::new().build_from_bytes(&bytes).unwrap();
-
+fn utf8_with_bom() {
+    let mut bytes = vec![0xEF, 0xBB, 0xBF];
+    bytes.extend_from_slice(file_with_name("Jörg /Müstermann/", "UTF-8").as_bytes());
+    let data = read(bytes);
     assert_eq!(data.individuals.len(), 1);
-    let name = data.individuals[0].names.first().unwrap();
-    assert_eq!(name.value.as_ref().unwrap(), "Müller /Schröder/");
+    assert_eq!(name(&data, 0), "Jörg /Müstermann/");
 }
 
 #[test]
-fn test_parse_utf8_chinese_characters() {
-    let content = create_gedcom_with_name("王 /伟/", "UTF-8");
-    let bytes = content.as_bytes();
-
-    let data = GedcomBuilder::new().build_from_bytes(bytes).unwrap();
-
-    assert_eq!(data.individuals.len(), 1);
-    let name = data.individuals[0].names.first().unwrap();
-    assert_eq!(name.value.as_ref().unwrap(), "王 /伟/");
+fn utf8_chinese_and_cyrillic_characters() {
+    for sample in ["示例 /测试/", "Иван /Примеров/"] {
+        let data = read(file_with_name(sample, "UTF-8"));
+        assert_eq!(name(&data, 0), sample);
+    }
 }
 
 #[test]
-fn test_parse_utf8_cyrillic_characters() {
-    let content = create_gedcom_with_name("Иван /Петров/", "UTF-8");
-    let bytes = content.as_bytes();
-
-    let data = GedcomBuilder::new().build_from_bytes(bytes).unwrap();
-
-    assert_eq!(data.individuals.len(), 1);
-    let name = data.individuals[0].names.first().unwrap();
-    assert_eq!(name.value.as_ref().unwrap(), "Иван /Петров/");
-}
-
-#[test]
-fn test_parse_utf8_emoji() {
-    // GEDCOM 7.0 allows any Unicode characters
+fn utf8_emoji_in_gedcom_7() {
+    // GEDCOM 7.0 allows any Unicode character.
     let content = "0 HEAD\n\
                    1 GEDC\n\
                    2 VERS 7.0\n\
                    0 @I1@ INDI\n\
-                   1 NAME Test /User/\n\
+                   1 NAME Ann /Example/\n\
                    1 NOTE Family reunion 🎉👨‍👩‍👧‍👦\n\
                    0 TRLR\n";
-    let bytes = content.as_bytes();
-
-    let data = GedcomBuilder::new().build_from_bytes(bytes).unwrap();
-
+    let data = read(content);
     assert_eq!(data.individuals.len(), 1);
+    assert_eq!(note(&data), "Family reunion 🎉👨‍👩‍👧‍👦");
 }
 
-// ============================================================================
-// ISO-8859-1 (Latin-1) Tests
-// ============================================================================
+// ISO-8859-1 (Latin-1)
 
 #[test]
-fn test_parse_iso8859_1_accented_characters() {
-    // Create GEDCOM with ISO-8859-1 encoded characters
-    // José = J(0x4A) o(0x6F) s(0x73) é(0xE9)
-    // García = G(0x47) a(0x61) r(0x72) c(0x63) í(0xED) a(0x61)
-    let bytes: &[u8] = b"0 HEAD\n\
-                         1 GEDC\n\
-                         2 VERS 5.5.1\n\
-                         1 CHAR ISO-8859-1\n\
-                         0 @I1@ INDI\n\
-                         1 NAME Jos\xE9 /Garc\xEDa/\n\
-                         0 TRLR\n";
-
-    let data = GedcomBuilder::new().build_from_bytes(bytes).unwrap();
-
-    assert_eq!(data.individuals.len(), 1);
-    let name = data.individuals[0].names.first().unwrap();
-    assert_eq!(name.value.as_ref().unwrap(), "José /García/");
+fn iso8859_1_accented_letters() {
+    // é (0xE9), á (0xE1), ü (0xFC), ö (0xF6), ç (0xE7), ø (0xF8), Å (0xC5).
+    for (bytes, expected) in [
+        (&b"Zo\xE9 /Ex\xE1mple/"[..], "Zoé /Exámple/"),
+        (b"J\xF6rg /M\xFCstermann/", "Jörg /Müstermann/"),
+        (b"Ren\xE9e /Fran\xE7aise/", "Renée /Française/"),
+        (b"S\xF8ren /\xC5mple/", "Søren /Åmple/"),
+    ] {
+        let mut file =
+            b"0 HEAD\n1 GEDC\n2 VERS 5.5.1\n1 CHAR ISO-8859-1\n0 @I1@ INDI\n1 NAME ".to_vec();
+        file.extend_from_slice(bytes);
+        file.extend_from_slice(b"\n0 TRLR\n");
+        let data = read(file);
+        assert_eq!(data.individuals.len(), 1);
+        assert_eq!(name(&data, 0), expected);
+    }
 }
 
 #[test]
-fn test_parse_iso8859_1_german_umlauts() {
-    // German umlauts: ä(0xE4) ö(0xF6) ü(0xFC) ß(0xDF)
-    let bytes: &[u8] = b"0 HEAD\n\
-                         1 GEDC\n\
-                         2 VERS 5.5.1\n\
-                         1 CHAR ISO-8859-1\n\
-                         0 @I1@ INDI\n\
-                         1 NAME M\xFCller /Schr\xF6der/\n\
-                         0 TRLR\n";
-
-    let data = GedcomBuilder::new().build_from_bytes(bytes).unwrap();
-
-    assert_eq!(data.individuals.len(), 1);
-    let name = data.individuals[0].names.first().unwrap();
-    assert_eq!(name.value.as_ref().unwrap(), "Müller /Schröder/");
-}
-
-#[test]
-fn test_parse_iso8859_1_french_accents() {
-    // French: é(0xE9) è(0xE8) ê(0xEA) ë(0xEB) à(0xE0) â(0xE2) ç(0xE7)
-    let bytes: &[u8] = b"0 HEAD\n\
-                         1 GEDC\n\
-                         2 VERS 5.5.1\n\
-                         1 CHAR ISO-8859-1\n\
-                         0 @I1@ INDI\n\
-                         1 NAME Ren\xE9 /Fran\xE7ois/\n\
-                         0 TRLR\n";
-
-    let data = GedcomBuilder::new().build_from_bytes(bytes).unwrap();
-
-    assert_eq!(data.individuals.len(), 1);
-    let name = data.individuals[0].names.first().unwrap();
-    assert_eq!(name.value.as_ref().unwrap(), "René /François/");
-}
-
-#[test]
-fn test_parse_iso8859_1_nordic_characters() {
-    // Nordic: å(0xE5) ø(0xF8) æ(0xE6)
-    let bytes: &[u8] = b"0 HEAD\n\
-                         1 GEDC\n\
-                         2 VERS 5.5.1\n\
-                         1 CHAR ISO-8859-1\n\
-                         0 @I1@ INDI\n\
-                         1 NAME S\xF8ren /\xC5berg/\n\
-                         0 TRLR\n";
-
-    let data = GedcomBuilder::new().build_from_bytes(bytes).unwrap();
-
-    assert_eq!(data.individuals.len(), 1);
-    let name = data.individuals[0].names.first().unwrap();
-    assert_eq!(name.value.as_ref().unwrap(), "Søren /Åberg/");
-}
-
-#[test]
-fn test_parse_iso8859_1_with_latin1_tag() {
-    // Some GEDCOM files use LATIN1 instead of ISO-8859-1
+fn iso8859_1_declared_as_latin1() {
     let bytes: &[u8] = b"0 HEAD\n\
                          1 GEDC\n\
                          2 VERS 5.5.1\n\
                          1 CHAR LATIN1\n\
                          0 @I1@ INDI\n\
-                         1 NAME Jos\xE9 /Garc\xEDa/\n\
+                         1 NAME Zo\xE9 /Ex\xE1mple/\n\
                          0 TRLR\n";
-
-    let data = GedcomBuilder::new().build_from_bytes(bytes).unwrap();
-
-    assert_eq!(data.individuals.len(), 1);
-    let name = data.individuals[0].names.first().unwrap();
-    assert_eq!(name.value.as_ref().unwrap(), "José /García/");
+    assert_eq!(name(&read(bytes), 0), "Zoé /Exámple/");
 }
 
-// ============================================================================
-// ISO-8859-15 (Latin-9) Tests
-// ============================================================================
+// ISO-8859-15 (Latin-9)
 
 #[test]
-fn test_parse_iso8859_15_euro_sign() {
-    // Euro sign in ISO-8859-15: €(0xA4)
+fn iso8859_15_euro_sign() {
+    // The euro sign is 0xA4 in ISO-8859-15.
+    for label in ["ISO-8859-15", "LATIN9"] {
+        let mut bytes = format!(
+            "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n1 CHAR {label}\n\
+             0 @I1@ INDI\n1 NAME Ann /Example/\n1 NOTE Cost: 100"
+        )
+        .into_bytes();
+        bytes.extend_from_slice(b"\xA4\n0 TRLR\n");
+        let data = read(bytes);
+        assert_eq!(note(&data), "Cost: 100€", "{label}");
+    }
+}
+
+#[test]
+fn iso8859_15_oe_ligature() {
+    // œ (0xBD) is in ISO-8859-15, not in ISO-8859-1.
     let bytes: &[u8] = b"0 HEAD\n\
                          1 GEDC\n\
                          2 VERS 5.5.1\n\
                          1 CHAR ISO-8859-15\n\
                          0 @I1@ INDI\n\
-                         1 NAME Test /User/\n\
-                         1 NOTE Cost: 100\xA4\n\
+                         1 NAME Ann /Exampl\xBDuf/\n\
                          0 TRLR\n";
+    assert_eq!(name(&read(bytes), 0), "Ann /Examplœuf/");
+}
 
-    let data = GedcomBuilder::new().build_from_bytes(bytes).unwrap();
+// Windows-1252 (`CHAR ANSI`), carried over from upstream PR #105
 
-    assert_eq!(data.individuals.len(), 1);
-    let note = &data.individuals[0].notes[0];
-    assert!(note.value.as_ref().unwrap().contains("100€"));
+/// A 5.5.1 file declaring `CHAR ANSI` whose names hold Windows-1252 bytes:
+/// `é` (0xE9, shared with Latin-1), `œ` (0x9C) and `€` (0x80), the latter two
+/// only in Windows-1252.
+const ANSI_FILE: &[u8] = b"0 HEAD\n\
+                           1 GEDC\n\
+                           2 VERS 5.5.1\n\
+                           1 CHAR ANSI\n\
+                           0 @I1@ INDI\n\
+                           1 NAME Ren\xE9e /Exampl\x9Cuf/\n\
+                           1 NOTE Paid 5 \x80\n\
+                           0 TRLR\n";
+
+#[test]
+fn ansi_file_is_read_as_windows_1252() {
+    let data = read(ANSI_FILE);
+    assert_eq!(name(&data, 0), "Renée /Examplœuf/");
+    assert_eq!(note(&data), "Paid 5 €");
 }
 
 #[test]
-fn test_parse_iso8859_15_oe_ligatures() {
-    // ISO-8859-15 includes Œ(0xBC) and œ(0xBD) which are not in ISO-8859-1
-    let bytes: &[u8] = b"0 HEAD\n\
-                         1 GEDC\n\
-                         2 VERS 5.5.1\n\
-                         1 CHAR ISO-8859-15\n\
-                         0 @I1@ INDI\n\
-                         1 NAME Test /B\xBDuf/\n\
-                         0 TRLR\n";
-
-    let data = GedcomBuilder::new().build_from_bytes(bytes).unwrap();
-
-    assert_eq!(data.individuals.len(), 1);
-    let name = data.individuals[0].names.first().unwrap();
-    assert_eq!(name.value.as_ref().unwrap(), "Test /Bœuf/");
+fn ansi_bytes_are_decoded_as_windows_1252() {
+    assert_eq!(detect_encoding(ANSI_FILE), GedcomEncoding::Windows1252);
+    let decoded = decode(ANSI_FILE);
+    assert_eq!(decoded.encoding, GedcomEncoding::Windows1252);
+    assert_eq!(decoded.declared.as_deref(), Some("ANSI"));
+    assert!(decoded.text.contains("1 NAME Renée /Examplœuf/\n"));
+    assert!(decoded.text.contains("1 NOTE Paid 5 €\n"));
 }
 
 #[test]
-fn test_parse_iso8859_15_with_latin9_tag() {
-    // Some GEDCOM files use LATIN9 instead of ISO-8859-15
-    let bytes: &[u8] = b"0 HEAD\n\
-                         1 GEDC\n\
-                         2 VERS 5.5.1\n\
-                         1 CHAR LATIN9\n\
-                         0 @I1@ INDI\n\
-                         1 NAME Test /User/\n\
-                         1 NOTE 50\xA4 donation\n\
-                         0 TRLR\n";
-
-    let data = GedcomBuilder::new().build_from_bytes(bytes).unwrap();
-
-    assert_eq!(data.individuals.len(), 1);
-    let note = &data.individuals[0].notes[0];
-    assert!(note.value.as_ref().unwrap().contains("50€"));
-}
-
-// ============================================================================
-// UTF-16 Tests
-// ============================================================================
-
-#[test]
-fn test_parse_utf16_le_with_bom() {
-    let content = create_gedcom_with_name("José /García/", "UTF-16");
-    let bytes = encode_to_bytes(&content, GedcomEncoding::Utf16Le).unwrap();
-
-    let data = GedcomBuilder::new().build_from_bytes(&bytes).unwrap();
-
-    assert_eq!(data.individuals.len(), 1);
-    let name = data.individuals[0].names.first().unwrap();
-    assert_eq!(name.value.as_ref().unwrap(), "José /García/");
+fn ansi_file_holding_utf8_is_read_as_utf8() {
+    // Some producers declare `ANSI` and write UTF-8: the bytes win.
+    let bytes = file_with_name("Renée /Example/", "ANSI").into_bytes();
+    assert_eq!(detect_encoding(&bytes), GedcomEncoding::Utf8);
+    assert_eq!(name(&read(bytes), 0), "Renée /Example/");
 }
 
 #[test]
-fn test_parse_utf16_be_with_bom() {
-    let content = create_gedcom_with_name("Müller /Schröder/", "UTF-16");
-    let bytes = encode_to_bytes(&content, GedcomEncoding::Utf16Be).unwrap();
+fn ansi_file_holding_ascii_only() {
+    let data = read(file_with_name("Ann /Example/", "ANSI"));
+    assert_eq!(name(&data, 0), "Ann /Example/");
+}
 
-    let data = GedcomBuilder::new().build_from_bytes(&bytes).unwrap();
+// UTF-16
 
-    assert_eq!(data.individuals.len(), 1);
-    let name = data.individuals[0].names.first().unwrap();
-    assert_eq!(name.value.as_ref().unwrap(), "Müller /Schröder/");
+#[test]
+fn utf16_with_bom() {
+    for (sample, encoding) in [
+        ("Zoé /Exámple/", GedcomEncoding::Utf16Le),
+        ("Jörg /Müstermann/", GedcomEncoding::Utf16Be),
+        ("示例 /测试/", GedcomEncoding::Utf16Le),
+        ("Иван /Примеров/", GedcomEncoding::Utf16Be),
+    ] {
+        let bytes = encode(&file_with_name(sample, "UNICODE"), encoding).unwrap();
+        let data = read(bytes);
+        assert_eq!(data.individuals.len(), 1);
+        assert_eq!(name(&data, 0), sample, "{encoding}");
+    }
 }
 
 #[test]
-fn test_parse_utf16_le_chinese_characters() {
-    let content = create_gedcom_with_name("王 /伟/", "UTF-16");
-    let bytes = encode_to_bytes(&content, GedcomEncoding::Utf16Le).unwrap();
-
-    let data = GedcomBuilder::new().build_from_bytes(&bytes).unwrap();
-
-    assert_eq!(data.individuals.len(), 1);
-    let name = data.individuals[0].names.first().unwrap();
-    assert_eq!(name.value.as_ref().unwrap(), "王 /伟/");
+fn utf16_round_trips_through_the_encoder() {
+    for (sample, encoding) in [
+        ("日本語 /テスト/", GedcomEncoding::Utf16Le),
+        ("Ελληνικά /Κείμενο/", GedcomEncoding::Utf16Be),
+    ] {
+        let original = file_with_name(sample, "UTF-16");
+        let bytes = encode(&original, encoding).unwrap();
+        let decoded = decode(&bytes);
+        assert_eq!(decoded.encoding, encoding);
+        assert_eq!(decoded.text, original);
+        assert_eq!(decoded.declared.as_deref(), Some("UTF-16"));
+        assert_eq!(name(&read(bytes), 0), sample);
+    }
 }
 
-#[test]
-fn test_parse_utf16_be_cyrillic_characters() {
-    let content = create_gedcom_with_name("Иван /Петров/", "UTF-16");
-    let bytes = encode_to_bytes(&content, GedcomEncoding::Utf16Be).unwrap();
-
-    let data = GedcomBuilder::new().build_from_bytes(&bytes).unwrap();
-
-    assert_eq!(data.individuals.len(), 1);
-    let name = data.individuals[0].names.first().unwrap();
-    assert_eq!(name.value.as_ref().unwrap(), "Иван /Петров/");
-}
-
-// ============================================================================
-// Encoding Detection Tests
-// ============================================================================
+// Detection
 
 #[test]
-fn test_detect_encoding_utf8_bom() {
+fn detection_by_byte_order_mark() {
     let mut bytes = vec![0xEF, 0xBB, 0xBF];
     bytes.extend_from_slice(b"0 HEAD\n0 TRLR\n");
-
-    let encoding = decode(&bytes).encoding;
-    assert_eq!(encoding, GedcomEncoding::Utf8);
+    assert_eq!(decode(&bytes).encoding, GedcomEncoding::Utf8);
+    for encoding in [GedcomEncoding::Utf16Le, GedcomEncoding::Utf16Be] {
+        let bytes = encode("0 HEAD\n0 TRLR\n", encoding).unwrap();
+        assert_eq!(decode(&bytes).encoding, encoding);
+        assert_eq!(detect_encoding(&bytes), encoding);
+    }
 }
 
 #[test]
-fn test_detect_encoding_utf16_le_bom() {
-    let content = "0 HEAD\n0 TRLR\n";
-    let bytes = encode_to_bytes(content, GedcomEncoding::Utf16Le).unwrap();
-
-    let encoding = decode(&bytes).encoding;
-    assert_eq!(encoding, GedcomEncoding::Utf16Le);
+fn detection_by_char_tag() {
+    for (label, encoding) in [
+        ("UTF-8", GedcomEncoding::Utf8),
+        ("ISO-8859-1", GedcomEncoding::Iso8859_1),
+        ("ISO-8859-15", GedcomEncoding::Iso8859_15),
+        ("ANSEL", GedcomEncoding::Ansel),
+    ] {
+        let bytes = format!("0 HEAD\n1 CHAR {label}\n0 TRLR\n");
+        let decoded = decode(bytes.as_bytes());
+        assert_eq!(decoded.encoding, encoding, "{label}");
+        assert_eq!(decoded.declared.as_deref(), Some(label));
+    }
 }
 
 #[test]
-fn test_detect_encoding_utf16_be_bom() {
-    let content = "0 HEAD\n0 TRLR\n";
-    let bytes = encode_to_bytes(content, GedcomEncoding::Utf16Be).unwrap();
-
-    let encoding = decode(&bytes).encoding;
-    assert_eq!(encoding, GedcomEncoding::Utf16Be);
+fn detection_without_char_is_ascii() {
+    let decoded = decode(b"0 HEAD\n1 GEDC\n2 VERS 5.5\n0 TRLR\n");
+    assert_eq!(decoded.encoding, GedcomEncoding::Ascii);
+    assert_eq!(decoded.declared, None);
 }
 
 #[test]
-fn test_detect_encoding_from_char_tag_utf8() {
-    let bytes = b"0 HEAD\n1 CHAR UTF-8\n0 TRLR\n";
-
-    let encoding = decode(bytes).encoding;
-    assert_eq!(encoding, GedcomEncoding::Utf8);
-}
-
-#[test]
-fn test_detect_encoding_from_char_tag_iso8859_1() {
-    let bytes = b"0 HEAD\n1 CHAR ISO-8859-1\n0 TRLR\n";
-
-    let encoding = decode(bytes).encoding;
-    assert_eq!(encoding, GedcomEncoding::Iso8859_1);
-}
-
-#[test]
-fn test_detect_encoding_from_char_tag_iso8859_15() {
-    let bytes = b"0 HEAD\n1 CHAR ISO-8859-15\n0 TRLR\n";
-
-    let encoding = decode(bytes).encoding;
-    assert_eq!(encoding, GedcomEncoding::Iso8859_15);
-}
-
-#[test]
-fn test_detect_encoding_ascii_fallback() {
-    let bytes = b"0 HEAD\n1 GEDC\n2 VERS 5.5\n0 TRLR\n";
-
-    let encoding = decode(bytes).encoding;
-    assert_eq!(encoding, GedcomEncoding::Ascii);
-}
-
-// ============================================================================
-// Explicit Encoding Tests (build_from_bytes_with_encoding)
-// ============================================================================
-
-#[test]
-fn test_build_with_explicit_utf8_encoding() {
-    let content = create_gedcom_with_name("José /García/", "UTF-8");
-    let bytes = content.as_bytes();
-
-    let data = GedcomBuilder::new()
-        .build_from_bytes_with_encoding(bytes, GedcomEncoding::Utf8)
-        .unwrap();
-
-    assert_eq!(data.individuals.len(), 1);
-    let name = data.individuals[0].names.first().unwrap();
-    assert_eq!(name.value.as_ref().unwrap(), "José /García/");
-}
-
-#[test]
-fn test_build_with_explicit_iso8859_1_encoding() {
+fn char_tag_after_other_header_lines() {
     let bytes: &[u8] = b"0 HEAD\n\
-                         1 GEDC\n\
-                         2 VERS 5.5.1\n\
-                         0 @I1@ INDI\n\
-                         1 NAME Jos\xE9 /Garc\xEDa/\n\
-                         0 TRLR\n";
-
-    let data = GedcomBuilder::new()
-        .build_from_bytes_with_encoding(bytes, GedcomEncoding::Iso8859_1)
-        .unwrap();
-
-    assert_eq!(data.individuals.len(), 1);
-    let name = data.individuals[0].names.first().unwrap();
-    assert_eq!(name.value.as_ref().unwrap(), "José /García/");
-}
-
-#[test]
-fn test_build_with_explicit_utf16_le_encoding() {
-    let content = create_gedcom_with_name("José /García/", "UTF-16");
-    let bytes = encode_to_bytes(&content, GedcomEncoding::Utf16Le).unwrap();
-
-    let data = GedcomBuilder::new()
-        .build_from_bytes_with_encoding(&bytes, GedcomEncoding::Utf16Le)
-        .unwrap();
-
-    assert_eq!(data.individuals.len(), 1);
-    let name = data.individuals[0].names.first().unwrap();
-    assert_eq!(name.value.as_ref().unwrap(), "José /García/");
-}
-
-// ============================================================================
-// Round-trip Tests
-// ============================================================================
-
-#[test]
-fn test_roundtrip_utf8_special_characters() {
-    let original = create_gedcom_with_name("José María /García López/", "UTF-8");
-    let bytes = original.as_bytes();
-
-    // Parse
-    let data = GedcomBuilder::new().build_from_bytes(bytes).unwrap();
-
-    // Verify
-    let name = data.individuals[0].names.first().unwrap();
-    assert_eq!(name.value.as_ref().unwrap(), "José María /García López/");
-}
-
-#[test]
-fn test_roundtrip_utf16_le_special_characters() {
-    let original = create_gedcom_with_name("日本語 /テスト/", "UTF-16");
-    let bytes = encode_to_bytes(&original, GedcomEncoding::Utf16Le).unwrap();
-
-    // Decode
-    let decoded = decode(&bytes).text;
-
-    // Verify content is preserved
-    assert!(decoded.contains("日本語 /テスト/"));
-
-    // Parse
-    let data = GedcomBuilder::new().build_from_bytes(&bytes).unwrap();
-    let name = data.individuals[0].names.first().unwrap();
-    assert_eq!(name.value.as_ref().unwrap(), "日本語 /テスト/");
-}
-
-#[test]
-fn test_roundtrip_utf16_be_special_characters() {
-    let original = create_gedcom_with_name("Ελληνικά /Κείμενο/", "UTF-16");
-    let bytes = encode_to_bytes(&original, GedcomEncoding::Utf16Be).unwrap();
-
-    // Decode
-    let decoded = decode(&bytes).text;
-
-    // Verify content is preserved
-    assert!(decoded.contains("Ελληνικά /Κείμενο/"));
-
-    // Parse
-    let data = GedcomBuilder::new().build_from_bytes(&bytes).unwrap();
-    let name = data.individuals[0].names.first().unwrap();
-    assert_eq!(name.value.as_ref().unwrap(), "Ελληνικά /Κείμενο/");
-}
-
-// ============================================================================
-// Error Handling Tests
-// ============================================================================
-
-#[test]
-fn test_ansel_encoding_supported() {
-    // Test ANSEL encoding with a simple file
-    let bytes = b"0 HEAD\n1 CHAR ANSEL\n0 TRLR\n";
-
-    // ANSEL is now supported
-    let result = GedcomBuilder::new().build_from_bytes_with_encoding(bytes, GedcomEncoding::Ansel);
-    assert!(result.is_ok());
-}
-
-#[test]
-fn test_ansel_encoding_with_diacritics() {
-    // Test ANSEL with accented characters
-    // "José" in ANSEL: J, o, s, acute(0xE2), e
-    let mut bytes = b"0 HEAD\n1 CHAR ANSEL\n0 @I1@ INDI\n1 NAME Jos".to_vec();
-    bytes.extend_from_slice(&[0xE2, b'e']); // acute + e = é
-    bytes.extend_from_slice(b" /Garc");
-    bytes.extend_from_slice(&[0xE2, b'i']); // acute + i = í
-    bytes.extend_from_slice(b"a/\n0 TRLR\n");
-
-    let result = GedcomBuilder::new().build_from_bytes(&bytes);
-    assert!(result.is_ok());
-    let data = result.unwrap();
-    assert_eq!(data.individuals.len(), 1);
-    // The name should contain the accented characters (as combining sequences)
-    let name = data.individuals[0].full_name().unwrap();
-    assert!(name.contains("Jos"));
-    assert!(name.contains("Garc"));
-}
-
-#[test]
-fn test_ansel_encoding_special_characters() {
-    // Test ANSEL special characters: Ł (0xA1), ł (0xB1), Ø (0xA2), ø (0xB2)
-    let mut bytes = b"0 HEAD\n1 CHAR ANSEL\n0 @I1@ INDI\n1 NAME ".to_vec();
-    bytes.extend_from_slice(&[0xA1, 0xB1, 0xA2, 0xB2]); // ŁłØø
-    bytes.extend_from_slice(b" /Test/\n0 TRLR\n");
-
-    let result = GedcomBuilder::new().build_from_bytes(&bytes);
-    assert!(result.is_ok());
-    let data = result.unwrap();
-    let name = data.individuals[0].full_name().unwrap();
-    assert!(name.contains("ŁłØø"));
-}
-
-#[test]
-fn test_file_size_limit_with_bytes() {
-    let content = create_gedcom_with_name("Test /User/", "UTF-8");
-    let bytes = content.as_bytes();
-
-    let result = GedcomBuilder::new()
-        .max_file_size(10) // Very small limit
-        .build_from_bytes(bytes);
-
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(err.to_string().contains("File size limit exceeded"));
-}
-
-// ============================================================================
-// Real-world Encoding Scenarios
-// ============================================================================
-
-#[test]
-fn test_mixed_encoding_header() {
-    // Some GEDCOM files have the CHAR tag after other header content
-    let bytes: &[u8] = b"0 HEAD\n\
-                         1 SOUR MyApp\n\
+                         1 SOUR EXAMPLE_APP\n\
                          1 GEDC\n\
                          2 VERS 5.5.1\n\
                          1 CHAR ISO-8859-1\n\
                          0 @I1@ INDI\n\
-                         1 NAME Jos\xE9 /Mart\xEDnez/\n\
+                         1 NAME Zo\xE9 /Ex\xE1mple/\n\
                          0 TRLR\n";
-
-    let data = GedcomBuilder::new().build_from_bytes(bytes).unwrap();
-
-    assert_eq!(data.individuals.len(), 1);
-    let name = data.individuals[0].names.first().unwrap();
-    assert_eq!(name.value.as_ref().unwrap(), "José /Martínez/");
+    assert_eq!(name(&read(bytes), 0), "Zoé /Exámple/");
 }
 
 #[test]
-fn test_ansi_as_ascii() {
-    // "ANSI" is the Windows code page (Windows-1252); ASCII text reads the same
+fn unicode_char_is_utf16() {
+    let bytes = encode(
+        &file_with_name("Ann /Example/", "UNICODE"),
+        GedcomEncoding::Utf16Le,
+    )
+    .unwrap();
+    let data = read(bytes);
+    assert_eq!(data.individuals.len(), 1);
+    assert_eq!(name(&data, 0), "Ann /Example/");
+}
+
+// An explicit encoding
+
+#[test]
+fn explicit_encoding() {
+    let utf8 = file_with_name("Zoé /Exámple/", "UTF-8");
+    let data = GedcomBuilder::new()
+        .build_from_bytes_with_encoding(utf8.as_bytes(), GedcomEncoding::Utf8)
+        .unwrap();
+    assert_eq!(name(&data, 0), "Zoé /Exámple/");
+
+    // No CHAR: the bytes are read in the encoding given.
+    let latin1: &[u8] = b"0 HEAD\n\
+                          1 GEDC\n\
+                          2 VERS 5.5.1\n\
+                          0 @I1@ INDI\n\
+                          1 NAME Zo\xE9 /Ex\xE1mple/\n\
+                          0 TRLR\n";
+    let data = GedcomBuilder::new()
+        .build_from_bytes_with_encoding(latin1, GedcomEncoding::Iso8859_1)
+        .unwrap();
+    assert_eq!(name(&data, 0), "Zoé /Exámple/");
+
+    let utf16 = encode(
+        &file_with_name("Zoé /Exámple/", "UTF-16"),
+        GedcomEncoding::Utf16Le,
+    )
+    .unwrap();
+    let data = GedcomBuilder::new()
+        .build_from_bytes_with_encoding(&utf16, GedcomEncoding::Utf16Le)
+        .unwrap();
+    assert_eq!(name(&data, 0), "Zoé /Exámple/");
+}
+
+// ANSEL
+
+#[test]
+fn ansel_header_alone() {
+    let data = GedcomBuilder::new()
+        .build_from_bytes_with_encoding(b"0 HEAD\n1 CHAR ANSEL\n0 TRLR\n", GedcomEncoding::Ansel)
+        .unwrap();
+    assert!(data.header.is_some());
+}
+
+#[test]
+fn ansel_combining_marks_are_composed() {
+    // ANSEL writes a mark before its letter: acute (0xE2) + e is é.
+    let mut bytes = b"0 HEAD\n1 CHAR ANSEL\n0 @I1@ INDI\n1 NAME Zo".to_vec();
+    bytes.extend_from_slice(&[0xE2, b'e']);
+    bytes.extend_from_slice(b" /Ex");
+    bytes.extend_from_slice(&[0xE2, b'a']);
+    bytes.extend_from_slice(b"mple/\n0 TRLR\n");
+    let data = read(bytes);
+    assert_eq!(data.individuals.len(), 1);
+    assert_eq!(name(&data, 0), "Zoé /Exámple/");
+    assert_eq!(
+        data.individuals[0].full_name(&data).as_deref(),
+        Some("Zoé Exámple")
+    );
+}
+
+#[test]
+fn ansel_special_letters() {
+    // Ł (0xA1), ł (0xB1), Ø (0xA2), ø (0xB2).
+    let mut bytes = b"0 HEAD\n1 CHAR ANSEL\n0 @I1@ INDI\n1 NAME ".to_vec();
+    bytes.extend_from_slice(&[0xA1, 0xB1, 0xA2, 0xB2]);
+    bytes.extend_from_slice(b" /Example/\n0 TRLR\n");
+    let data = read(bytes);
+    assert_eq!(name(&data, 0), "ŁłØø /Example/");
+}
+
+// Limits and larger files
+
+#[test]
+fn file_size_limit_applies_to_bytes() {
+    let content = file_with_name("Ann /Example/", "UTF-8");
+    let error = GedcomBuilder::new()
+        .max_file_size(10)
+        .build_from_bytes(content.as_bytes())
+        .unwrap_err();
+    assert!(
+        matches!(error, GedcomError::FileTooLarge { size, max: 10 } if size == content.len()),
+        "{error}"
+    );
+}
+
+#[test]
+fn complete_iso8859_1_file() {
     let bytes: &[u8] = b"0 HEAD\n\
-                         1 GEDC\n\
-                         2 VERS 5.5.1\n\
-                         1 CHAR ANSI\n\
-                         0 @I1@ INDI\n\
-                         1 NAME Test /User/\n\
-                         0 TRLR\n";
-
-    let data = GedcomBuilder::new().build_from_bytes(bytes).unwrap();
-
-    assert_eq!(data.individuals.len(), 1);
-}
-
-#[test]
-fn test_unicode_as_utf16() {
-    // Some GEDCOM files use "UNICODE" which typically means UTF-16
-    let content = "0 HEAD\n\
-                   1 GEDC\n\
-                   2 VERS 5.5.1\n\
-                   1 CHAR UNICODE\n\
-                   0 @I1@ INDI\n\
-                   1 NAME Test /User/\n\
-                   0 TRLR\n";
-
-    // Create as UTF-16 LE
-    let bytes = encode_to_bytes(content, GedcomEncoding::Utf16Le).unwrap();
-
-    let data = GedcomBuilder::new().build_from_bytes(&bytes).unwrap();
-
-    assert_eq!(data.individuals.len(), 1);
-}
-
-#[test]
-fn test_parse_complete_gedcom_with_iso8859_1() {
-    // A more complete GEDCOM file with ISO-8859-1 encoding
-    let bytes: &[u8] = b"0 HEAD\n\
-                         1 SOUR TestApp\n\
-                         2 NAME Test Application\n\
+                         1 SOUR EXAMPLE_APP\n\
+                         2 NAME Example Application\n\
                          1 GEDC\n\
                          2 VERS 5.5.1\n\
                          2 FORM LINEAGE-LINKED\n\
                          1 CHAR ISO-8859-1\n\
                          0 @I1@ INDI\n\
-                         1 NAME Jos\xE9 /Garc\xEDa/\n\
-                         1 SEX M\n\
+                         1 NAME Zo\xE9 /Ex\xE1mple/\n\
+                         1 SEX F\n\
                          1 BIRT\n\
                          2 DATE 1 JAN 1950\n\
-                         2 PLAC M\xE1laga, Espa\xF1a\n\
+                         2 PLAC Sampl\xE9ton, Ex\xE1mplia\n\
                          1 FAMS @F1@\n\
                          0 @I2@ INDI\n\
-                         1 NAME Mar\xEDa /L\xF3pez/\n\
-                         1 SEX F\n\
+                         1 NAME J\xF6rg /M\xFCstermann/\n\
+                         1 SEX M\n\
                          1 FAMS @F1@\n\
                          0 @F1@ FAM\n\
-                         1 HUSB @I1@\n\
-                         1 WIFE @I2@\n\
+                         1 HUSB @I2@\n\
+                         1 WIFE @I1@\n\
                          1 MARR\n\
                          2 DATE 15 JUN 1975\n\
-                         2 PLAC Sevilla, Espa\xF1a\n\
+                         2 PLAC Ex\xE1mpleville, Ex\xE1mplia\n\
                          0 TRLR\n";
-
-    let data = GedcomBuilder::new()
-        .validate_references(true)
-        .build_from_bytes(bytes)
-        .unwrap();
-
+    let data = read(bytes);
     assert_eq!(data.individuals.len(), 2);
     assert_eq!(data.families.len(), 1);
+    assert!(data.dangling_references().is_empty());
 
-    // Check José's details
-    let jose = &data.individuals[0];
+    assert_eq!(name(&data, 0), "Zoé /Exámple/");
+    let birth = data.individuals[0].birth().unwrap();
     assert_eq!(
-        jose.names.first().unwrap().value.as_ref().unwrap(),
-        "José /García/"
+        birth.place.as_ref().unwrap().name.to_str(&data),
+        "Sampléton, Exámplia"
+    );
+    assert_eq!(name(&data, 1), "Jörg /Müstermann/");
+    let marriage = &data.families[0].events[0];
+    assert_eq!(
+        marriage.place.as_ref().unwrap().name.to_str(&data),
+        "Exámpleville, Exámplia"
     );
 
-    // Check birth place encoding
-    let birth_event = &jose.events[0];
-    assert_eq!(
-        birth_event.place.as_ref().unwrap().value.as_ref().unwrap(),
-        "Málaga, España"
-    );
-
-    // Check María's details
-    let maria = &data.individuals[1];
-    assert_eq!(
-        maria.names.first().unwrap().value.as_ref().unwrap(),
-        "María /López/"
-    );
-
-    // Check marriage place
-    let family = &data.families[0];
-    let marriage = &family.events[0];
-    assert_eq!(
-        marriage.place.as_ref().unwrap().value.as_ref().unwrap(),
-        "Sevilla, España"
+    // ISO-8859-1 is not a character set of the 5.5.1 specification: the
+    // strict mode refuses it.
+    let Err(GedcomError::NonConformant(deviations)) =
+        GedcomBuilder::new().strict(true).build_from_bytes(bytes)
+    else {
+        panic!("accepted in strict mode");
+    };
+    assert!(
+        deviations
+            .iter()
+            .any(|d| d.line == 7 && d.detail.contains("ISO-8859-1")),
+        "{deviations:?}"
     );
 }
 
-// ============================================================================
-// Fixture File Tests
-// ============================================================================
-
 #[test]
-fn test_parse_simple_fixture_with_build_from_bytes() {
-    let bytes = std::fs::read("tests/fixtures/simple.ged").unwrap();
-
-    // Verify encoding detection (ASCII since it's a simple file)
+fn fixtures_read_from_bytes() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let bytes = std::fs::read(dir.join("simple.ged")).unwrap();
     let encoding = decode(&bytes).encoding;
     assert!(
-        encoding == GedcomEncoding::Ascii || encoding == GedcomEncoding::Utf8,
-        "Expected ASCII or UTF-8, got {encoding:?}"
+        matches!(encoding, GedcomEncoding::Ascii | GedcomEncoding::Utf8),
+        "{encoding:?}"
     );
-
-    // Parse with build_from_bytes
-    let data = GedcomBuilder::new().build_from_bytes(&bytes).unwrap();
-
+    let data = read(bytes);
     assert_eq!(data.individuals.len(), 3);
     assert_eq!(data.families.len(), 1);
-}
 
-#[test]
-fn test_parse_washington_fixture_with_build_from_bytes() {
-    let bytes = std::fs::read("tests/fixtures/washington.ged").unwrap();
-
-    // Parse with build_from_bytes
-    let data = GedcomBuilder::new().build_from_bytes(&bytes).unwrap();
-
+    let data = read(std::fs::read(dir.join("washington.ged")).unwrap());
     assert_eq!(data.individuals.len(), 538);
     assert_eq!(data.families.len(), 278);
+}
+
+// The encoder
+
+#[test]
+fn encoder_refuses_what_an_encoding_cannot_hold() {
+    let error = encode("Zoë", GedcomEncoding::Ascii).unwrap_err();
+    assert_eq!(
+        (error.encoding, error.character, error.offset),
+        (GedcomEncoding::Ascii, 'ë', 2)
+    );
+    let error = encode("Ann €", GedcomEncoding::Iso8859_15).map(|b| b.len());
+    assert_eq!(error, Ok(5));
+    assert!(encode("示例", GedcomEncoding::Windows1252).is_err());
+    for encoding in [
+        GedcomEncoding::Ansel,
+        GedcomEncoding::Windows1252,
+        GedcomEncoding::Iso8859_15,
+        GedcomEncoding::Utf16Le,
+        GedcomEncoding::Utf16Be,
+        GedcomEncoding::Utf8,
+    ] {
+        let bytes = encode("Renée /Exemple/", encoding).unwrap();
+        assert_eq!(
+            ged_io::encoding::decode_as(&bytes, encoding),
+            "Renée /Exemple/",
+            "{encoding}"
+        );
+    }
 }

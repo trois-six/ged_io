@@ -1,397 +1,198 @@
-//! Benchmarks for memory usage and allocation patterns.
+//! Memory and lookups: the bytes a dataset keeps, and finding records
+//! linearly and through the index. `cargo bench --bench memory`.
+//!
+//! With `MODEL_RSS=<pipeline>` (`dataset`, `stream` or `tree`), it instead
+//! reads the file `MODEL_FILE` (a generated one of `MODEL_PEOPLE`
+//! individuals, 330 000 by default, about 80 MB, when unset) once with that
+//! pipeline and prints the input size, the time and the peak resident set
+//! (Linux `VmHWM`): run it once per pipeline, each in its own process.
+//! `MODEL_WRITE=0` leaves the writing out.
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use ged_io::{indexed::IndexedGedcomData, GedcomBuilder, GedcomWriter};
+mod common;
+
+use criterion::{criterion_group, Criterion};
+use ged_io::tree::Tree;
+use ged_io::{Dataset, GedcomBuilder, GedcomStreamParser, GedcomWriter, IndexedDataset};
+use std::alloc::{GlobalAlloc, Layout, System};
 use std::fs;
 use std::hint::black_box;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 
-/// Benchmark memory usage during parsing by measuring allocation patterns
-fn bench_parse_memory(c: &mut Criterion) {
-    let mut group = c.benchmark_group("parse_memory");
+/// The system allocator, counting the bytes allocated and not freed.
+struct Counting;
 
-    let files = [
-        ("simple", "tests/fixtures/simple.ged"),
-        ("sample", "tests/fixtures/sample.ged"),
-        ("maximal551", "tests/fixtures/conformance/maximal551.ged"),
-        ("washington", "tests/fixtures/washington.ged"),
-    ];
+static LIVE: AtomicUsize = AtomicUsize::new(0);
 
-    for (name, path) in files {
-        if let Ok(content) = fs::read_to_string(path) {
-            let size = content.len();
-            group.throughput(Throughput::Bytes(size as u64));
-
-            // Measure parsing memory overhead
-            group.bench_with_input(
-                BenchmarkId::new("parse_and_hold", name),
-                &content,
-                |b, content| {
-                    b.iter(|| {
-                        let data = GedcomBuilder::new()
-                            .build_from_str(black_box(content))
-                            .unwrap();
-                        // Keep data alive to measure holding memory
-                        black_box(&data);
-                        data
-                    });
-                },
-            );
-        }
+// SAFETY: every call is forwarded to the system allocator unchanged.
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        LIVE.fetch_add(layout.size(), Ordering::Relaxed);
+        // SAFETY: the caller's contract is the system allocator's.
+        unsafe { System.alloc(layout) }
     }
 
-    group.finish();
-}
-
-/// Benchmark clone operations (indicative of memory usage)
-fn bench_clone_memory(c: &mut Criterion) {
-    let mut group = c.benchmark_group("clone_memory");
-
-    let files = [
-        ("simple", "tests/fixtures/simple.ged"),
-        ("sample", "tests/fixtures/sample.ged"),
-        ("washington", "tests/fixtures/washington.ged"),
-    ];
-
-    for (name, path) in files {
-        if let Ok(content) = fs::read_to_string(path) {
-            let data = GedcomBuilder::new().build_from_str(&content).unwrap();
-
-            group.bench_with_input(BenchmarkId::new("clone_data", name), &data, |b, data| {
-                b.iter(|| black_box(data.clone()));
-            });
-        }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
+        // SAFETY: the caller's contract is the system allocator's.
+        unsafe { System.dealloc(ptr, layout) }
     }
 
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        LIVE.fetch_add(new_size, Ordering::Relaxed);
+        LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
+        // SAFETY: the caller's contract is the system allocator's.
+        unsafe { System.realloc(ptr, layout, new_size) }
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: Counting = Counting;
+
+/// The bytes the reading of each input keeps, against its size.
+fn bench_kept(c: &mut Criterion) {
+    let mut group = c.benchmark_group("kept");
+    for (name, text) in common::inputs() {
+        let before = LIVE.load(Ordering::Relaxed);
+        let data = Dataset::parse(text.clone());
+        let kept = LIVE.load(Ordering::Relaxed).saturating_sub(before);
+        eprintln!(
+            "{name}: {} bytes read, {kept} kept ({:.2}x)",
+            text.len(),
+            kept as f64 / text.len() as f64
+        );
+        drop(data);
+        group.bench_function(&name, |b| {
+            b.iter(|| Dataset::parse(black_box(text.clone())).record_count());
+        });
+    }
     group.finish();
 }
 
-/// Benchmark string allocation patterns
-fn bench_string_allocations(c: &mut Criterion) {
-    let mut group = c.benchmark_group("string_allocations");
-
-    // Benchmark many small strings (common in GEDCOM tags)
-    let small_strings: Vec<&str> = vec!["HEAD", "INDI", "FAM", "SOUR", "NAME", "DATE", "PLAC"];
-    group.bench_function("small_string_clone", |b| {
+/// Finding 50 individuals linearly and through the index, and indexing.
+fn bench_lookups(c: &mut Criterion) {
+    let mut group = c.benchmark_group("lookups");
+    let data = Dataset::parse(common::generated(20_000));
+    let xrefs: Vec<String> = data
+        .individuals
+        .iter()
+        .step_by(400)
+        .filter_map(|i| i.xref)
+        .map(|x| data.store().xref(x).to_string())
+        .collect();
+    group.bench_function("linear-50", |b| {
         b.iter(|| {
-            for s in &small_strings {
-                black_box(s.to_string());
+            for x in &xrefs {
+                black_box(data.find_individual(x.as_str()));
             }
         });
     });
-
-    // Benchmark medium strings (names, places)
-    let medium_strings: Vec<&str> = vec![
-        "John Jacob Jingleheimer Schmidt",
-        "New York City, New York, USA",
-        "Marriage Certificate #12345",
-    ];
-    group.bench_function("medium_string_clone", |b| {
+    let indexed = IndexedDataset::new(data.clone());
+    group.bench_function("indexed-50", |b| {
         b.iter(|| {
-            for s in &medium_strings {
-                black_box(s.to_string());
+            for x in &xrefs {
+                black_box(indexed.find_individual(x.as_str()));
             }
         });
     });
-
-    // Benchmark long strings (notes)
-    let long_string = "A".repeat(1000);
-    group.bench_function("long_string_clone", |b| {
-        b.iter(|| black_box(long_string.clone()));
+    group.bench_function("index-creation", |b| {
+        b.iter(|| IndexedDataset::new(black_box(data.clone())));
     });
-
-    // Compare String vs Box<str> allocation
-    let test_str = "This is a test string for comparison";
-    group.bench_function("string_alloc", |b| {
-        b.iter(|| black_box(String::from(test_str)));
-    });
-
-    group.bench_function("box_str_alloc", |b| {
-        b.iter(|| black_box(test_str.to_string().into_boxed_str()));
-    });
-
     group.finish();
 }
 
-/// Benchmark Vec growth patterns (common in parsing)
-fn bench_vec_growth(c: &mut Criterion) {
-    let mut group = c.benchmark_group("vec_growth");
+/// The peak resident set of this process, in bytes (Linux).
+fn peak_rss() -> Option<u64> {
+    let status = fs::read_to_string("/proc/self/status").ok()?;
+    let line = status.lines().find(|l| l.starts_with("VmHWM:"))?;
+    let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kb * 1024)
+}
 
-    // Benchmark Vec growing without pre-allocation
-    group.bench_function("vec_grow_dynamic", |b| {
-        b.iter(|| {
-            let mut v: Vec<String> = Vec::new();
-            for i in 0..1000 {
-                v.push(format!("Item {i}"));
-            }
-            black_box(v)
-        });
+/// One pipeline, one read, measured: see the module documentation.
+fn measure(pipeline: &str) {
+    let path = std::env::var("MODEL_FILE").unwrap_or_else(|_| {
+        let people = std::env::var("MODEL_PEOPLE")
+            .ok()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(330_000);
+        let path = std::env::temp_dir().join(format!("ged_io-model-{people}.ged"));
+        if !path.exists() {
+            fs::write(&path, common::generated(people)).expect("write the generated file");
+        }
+        path.to_string_lossy().into_owned()
     });
-
-    // Benchmark Vec with pre-allocation
-    group.bench_function("vec_grow_preallocated", |b| {
-        b.iter(|| {
-            let mut v: Vec<String> = Vec::with_capacity(1000);
-            for i in 0..1000 {
-                v.push(format!("Item {i}"));
-            }
-            black_box(v)
-        });
-    });
-
-    // Benchmark typical GEDCOM individual sizes
-    let sizes = [10, 100, 500, 1000];
-    for &size in &sizes {
-        group.bench_with_input(
-            BenchmarkId::new("individuals_vec", size),
-            &size,
-            |b, &size| {
-                b.iter(|| {
-                    let content = generate_individuals(size);
-                    let data = GedcomBuilder::new().build_from_str(&content).unwrap();
-                    black_box(data)
-                });
-            },
+    let size = fs::metadata(&path).expect("the file").len() as usize;
+    let before = peak_rss().unwrap_or(0);
+    let start = Instant::now();
+    let kept: Box<dyn std::any::Any> = match pipeline {
+        "tree" => Box::new(Tree::from_bytes(fs::read(&path).expect("read the file"))),
+        "dataset" => Box::new(
+            GedcomBuilder::new()
+                .build_from_bytes(fs::read(&path).expect("read the file"))
+                .unwrap(),
+        ),
+        "stream" => {
+            let file = std::io::BufReader::new(fs::File::open(&path).expect("open the file"));
+            let records = GedcomStreamParser::new(file)
+                .unwrap()
+                .map(Result::unwrap)
+                .count();
+            Box::new(records)
+        }
+        other => panic!("unknown pipeline {other}"),
+    };
+    let elapsed = start.elapsed().as_secs_f64();
+    let peak = peak_rss().unwrap_or(0);
+    let live = LIVE.load(Ordering::Relaxed);
+    black_box(&kept);
+    let mb = size as f64 / 1e6;
+    println!(
+        "{pipeline}: read {mb:.1} MB in {elapsed:.3} s ({:.0} MB/s); peak RSS {:.0} MB = {:.2}x the input (before reading: {:.0} MB); kept {:.0} MB = {:.2}x the input",
+        mb / elapsed,
+        peak as f64 / 1e6,
+        peak as f64 / size as f64,
+        before as f64 / 1e6,
+        live as f64 / 1e6,
+        live as f64 / size as f64,
+    );
+    if let Some(data) = kept.downcast_ref::<Dataset>() {
+        println!(
+            "{pipeline}: of which the store (input, pieces, identifiers) {:.0} MB",
+            data.store().heap_size() as f64 / 1e6
         );
     }
-
-    group.finish();
-}
-
-/// Benchmark round-trip memory usage (parse -> write -> parse)
-fn bench_round_trip_memory(c: &mut Criterion) {
-    let mut group = c.benchmark_group("round_trip_memory");
-
-    let files = [
-        ("simple", "tests/fixtures/simple.ged"),
-        ("sample", "tests/fixtures/sample.ged"),
-        ("maximal551", "tests/fixtures/conformance/maximal551.ged"),
-    ];
-
-    for (name, path) in files {
-        if let Ok(content) = fs::read_to_string(path) {
-            group.bench_with_input(
-                BenchmarkId::new("round_trip", name),
-                &content,
-                |b, content| {
-                    b.iter(|| {
-                        // Parse
-                        let data = GedcomBuilder::new()
-                            .build_from_str(black_box(content))
-                            .unwrap_or_else(|e| panic!("initial parse failed for {name}: {e:?}"));
-
-                        // Write
-                        let writer = GedcomWriter::new();
-                        let output = writer.write_to_string(&data).unwrap();
-
-                        // Parse again
-                        let data2 = GedcomBuilder::new().build_from_str(&output).unwrap_or_else(|e| {
-                            let head: String = output.chars().take(200).collect();
-                            let tail: String = output
-                                .chars()
-                                .rev()
-                                .take(200)
-                                .collect::<String>()
-                                .chars()
-                                .rev()
-                                .collect();
-                            panic!(
-                                "round-trip parse failed for {name}: {e:?}\n\n-- output head (200 chars) --\n{head:?}\n\n-- output tail (200 chars) --\n{tail:?}\n\n-- output len --\n{}",
-                                output.len()
-                            )
-                        });
-
-                        black_box(data2)
-                    });
-                },
-            );
-        }
+    // `MODEL_WRITE=0` measures the reading alone (for a heap profiler).
+    if std::env::var("MODEL_WRITE").is_ok_and(|w| w == "0") {
+        return;
     }
-
-    group.finish();
+    let writer = GedcomWriter::new();
+    let start = Instant::now();
+    let written = if let Some(tree) = kept.downcast_ref::<Tree>() {
+        let mut out = Vec::new();
+        writer.write_tree(&mut out, tree).unwrap();
+        out.len()
+    } else if let Some(data) = kept.downcast_ref::<Dataset>() {
+        writer.write_to_string(data).unwrap().len()
+    } else {
+        return;
+    };
+    let elapsed = start.elapsed().as_secs_f64();
+    println!(
+        "{pipeline}: wrote {:.1} MB in {elapsed:.3} s ({:.0} MB/s); peak RSS {:.0} MB",
+        written as f64 / 1e6,
+        written as f64 / 1e6 / elapsed,
+        peak_rss().unwrap_or(0) as f64 / 1e6,
+    );
 }
 
-/// Benchmark lookup/search memory patterns
-fn bench_lookup_memory(c: &mut Criterion) {
-    let mut group = c.benchmark_group("lookup_memory");
+criterion_group!(benches, bench_kept, bench_lookups);
 
-    // Load a larger file for lookup tests
-    if let Ok(content) = fs::read_to_string("tests/fixtures/washington.ged") {
-        let data = GedcomBuilder::new().build_from_str(&content).unwrap();
-
-        // Benchmark linear search (current implementation)
-        group.bench_function("find_individual_linear", |b| {
-            let xrefs: Vec<&str> = data
-                .individuals
-                .iter()
-                .filter_map(|i| i.xref.as_deref())
-                .take(10)
-                .collect();
-
-            b.iter(|| {
-                for xref in &xrefs {
-                    black_box(data.find_individual(xref));
-                }
-            });
-        });
-
-        // Benchmark name search
-        group.bench_function("search_by_name", |b| {
-            b.iter(|| {
-                black_box(data.search_individuals_by_name("Washington"));
-            });
-        });
-
-        // Benchmark family lookup
-        group.bench_function("get_families_as_spouse", |b| {
-            let xrefs: Vec<&str> = data
-                .individuals
-                .iter()
-                .filter_map(|i| i.xref.as_deref())
-                .take(10)
-                .collect();
-
-            b.iter(|| {
-                for xref in &xrefs {
-                    black_box(data.get_families_as_spouse(xref));
-                }
-            });
-        });
+fn main() {
+    if let Ok(pipeline) = std::env::var("MODEL_RSS") {
+        measure(&pipeline);
+        return;
     }
-
-    group.finish();
+    benches();
+    Criterion::default().configure_from_args().final_summary();
 }
-
-/// Generate synthetic GEDCOM with a specified number of individuals
-fn generate_individuals(count: usize) -> String {
-    let mut gedcom = String::with_capacity(count * 150);
-
-    gedcom.push_str("0 HEAD\n");
-    gedcom.push_str("1 GEDC\n");
-    gedcom.push_str("2 VERS 5.5\n");
-
-    for i in 1..=count {
-        gedcom.push_str(&format!("0 @I{i}@ INDI\n"));
-        gedcom.push_str(&format!("1 NAME Person{i} /Family{}/\n", i % 100));
-        gedcom.push_str(if i % 2 == 0 { "1 SEX F\n" } else { "1 SEX M\n" });
-        gedcom.push_str("1 BIRT\n");
-        gedcom.push_str(&format!(
-            "2 DATE {} JAN {}\n",
-            (i % 28) + 1,
-            1900 + (i % 100)
-        ));
-    }
-
-    gedcom.push_str("0 TRLR");
-    gedcom
-}
-
-/// Benchmark indexed vs linear lookups
-fn bench_indexed_vs_linear(c: &mut Criterion) {
-    let mut group = c.benchmark_group("indexed_vs_linear");
-
-    // Load a larger file for lookup tests
-    if let Ok(content) = fs::read_to_string("tests/fixtures/washington.ged") {
-        let data = GedcomBuilder::new().build_from_str(&content).unwrap();
-        let indexed = IndexedGedcomData::from(data.clone());
-
-        // Get some xrefs to look up
-        let xrefs: Vec<&str> = data
-            .individuals
-            .iter()
-            .filter_map(|i| i.xref.as_deref())
-            .take(50)
-            .collect();
-
-        // Benchmark linear lookup (original GedcomData)
-        group.bench_function("linear_lookup_50", |b| {
-            b.iter(|| {
-                for xref in &xrefs {
-                    black_box(data.find_individual(xref));
-                }
-            });
-        });
-
-        // Benchmark indexed lookup (IndexedGedcomData)
-        group.bench_function("indexed_lookup_50", |b| {
-            b.iter(|| {
-                for xref in &xrefs {
-                    black_box(indexed.find_individual(xref));
-                }
-            });
-        });
-
-        // Benchmark index creation overhead
-        group.bench_function("index_creation", |b| {
-            b.iter(|| {
-                let data_clone = data.clone();
-                black_box(IndexedGedcomData::from(data_clone))
-            });
-        });
-    }
-
-    group.finish();
-}
-
-/// Benchmark memory layout efficiency
-fn bench_struct_sizes(c: &mut Criterion) {
-    let mut group = c.benchmark_group("struct_sizes");
-
-    // This benchmark helps understand the memory overhead of our data structures
-    // by measuring the cost of creating many instances
-
-    // Measure Individual creation overhead
-    let content = generate_individuals(100);
-    let data = GedcomBuilder::new().build_from_str(&content).unwrap();
-
-    group.bench_function("access_individuals", |b| {
-        b.iter(|| {
-            let mut total = 0;
-            for ind in &data.individuals {
-                if ind.xref.is_some() {
-                    total += 1;
-                }
-                if ind.names.is_empty() {
-                    total += 1;
-                }
-                if ind.sex.is_some() {
-                    total += 1;
-                }
-            }
-            black_box(total)
-        });
-    });
-
-    // Measure field access patterns
-    group.bench_function("access_names", |b| {
-        b.iter(|| {
-            for ind in &data.individuals {
-                black_box(ind.full_name());
-            }
-        });
-    });
-
-    group.bench_function("access_events", |b| {
-        b.iter(|| {
-            for ind in &data.individuals {
-                black_box(ind.birth_date());
-                black_box(ind.death_date());
-            }
-        });
-    });
-
-    group.finish();
-}
-
-criterion_group!(
-    benches,
-    bench_parse_memory,
-    bench_clone_memory,
-    bench_string_allocations,
-    bench_vec_growth,
-    bench_round_trip_memory,
-    bench_lookup_memory,
-    bench_indexed_vs_linear,
-    bench_struct_sizes,
-);
-
-criterion_main!(benches);

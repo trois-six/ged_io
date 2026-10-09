@@ -52,10 +52,6 @@ jobs:
     - name: Run tests
       run: cargo test --all-features --verbose
 
-    - name: Run the conformance suite on the model under construction
-      run: cargo test --all-features --test conformance
-      env:
-        RATCHET_TIER: next
 
   msrv:
     name: MSRV (1.88)

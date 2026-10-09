@@ -23,7 +23,7 @@ use std::ops::Deref;
 /// ```
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 #[cfg_attr(
-    feature = "json",
+    feature = "serde",
     derive(serde::Serialize, serde::Deserialize),
     serde(transparent)
 )]

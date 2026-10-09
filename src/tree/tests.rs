@@ -52,7 +52,7 @@ fn terminators_and_blank_lines() {
 
 #[test]
 fn empty_cont_with_trailing_delimiter_in_crlf() {
-    // D1: `2 CONT ` + CRLF must not swallow the next line.
+    // `2 CONT ` + CRLF must not swallow the next line.
     let text = h5("0 @N1@ NOTE first\n1 CONT \n1 CONT third\n").replace('\n', "\r\n");
     let tree = parse_tree(&text);
     assert_eq!(find(&tree, "@N1@", &[]).text(), Some("first\n\nthird"));

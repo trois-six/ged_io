@@ -1479,7 +1479,7 @@ impl<'n> Conformer<'n> {
     /// substructure of that tag went aside before it, it has an identifier,
     /// it has substructures and the field holds a value without any, or the
     /// field holds one structure and has it; anything else goes aside
-    /// (`next::driver::read_into`, [`ModelRead`]). `s` is repaired: every
+    /// (`model::driver::read_into`, [`ModelRead`]). `s` is repaired: every
     /// payload fits its field. Substructures already in that order, as
     /// nearly all are, stay where they are.
     fn model_order(&self, s: &mut Structure, ty: StructId) {
@@ -1550,6 +1550,11 @@ impl<'n> Conformer<'n> {
     /// standard type, `Ok(None)` for an extension record, `@VOID@` (7.x) or a
     /// 5.5.1 pointer to another file; `Err` for a pointer to nothing.
     fn resolve(&mut self, s: &mut Structure, p: &str) -> Result<Option<StructId>, ()> {
+        // `@VOID@` points to nothing in 7.x, even when a record had it (and
+        // was renamed).
+        if self.family == Family::V7 && p == "@VOID@" {
+            return Ok(None);
+        }
         let p = match self.renamed.get(p) {
             Some(new) => {
                 let new = new.to_string();
@@ -2280,7 +2285,7 @@ impl<'n> Conformer<'n> {
 }
 
 /// Where a record goes in the order the typed model writes records in
-/// (`next::Dataset::records`): the header, submitters, submissions,
+/// (`model::Dataset::records`): the header, submitters, submissions,
 /// individuals, families, shared notes, sources, repositories, multimedia
 /// objects, other records, the trailer.
 fn record_rank(tag: &str) -> u8 {
