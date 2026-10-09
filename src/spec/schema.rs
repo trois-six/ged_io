@@ -143,7 +143,7 @@ pub(crate) const fn e(name: &'static str, values: &'static [&'static str], open:
 }
 
 /// A calendar with its month tags and epoch markers. The date grammars of
-/// [`crate::types::date`] carry the same facts; a test compares them.
+/// [`crate::value`] carry the same facts; a test compares them.
 #[cfg(test)]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Calendar {

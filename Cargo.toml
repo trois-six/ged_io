@@ -19,13 +19,12 @@ include = ["Cargo.toml", "src/**/*.rs", "license.md", "NOTICE"]
 
 [features]
 default = []
-json = ["serde", "serde_json"]
-gedzip = ["zip"]
-calendar = ["calendrical_calculations", "calendrier"]
+serde = ["dep:serde"]
+gedzip = ["dep:zip"]
+calendar = ["dep:calendrical_calculations", "dep:calendrier"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"], optional = true }
-serde_json = { version = "1.0", optional = true }
 zip = { version = "8.5", optional = true, default-features = false, features = ["deflate"] }
 calendrical_calculations = { version = "0.2", optional = true }
 # `default-features = false` drops calendrier's chrono bridge: its conversions apply a
@@ -33,31 +32,19 @@ calendrical_calculations = { version = "0.2", optional = true }
 calendrier = { version = "1.0", optional = true, default-features = false }
 
 [dev-dependencies]
-serde_test = "1.0.177"
+serde_json = "1.0"
 criterion = { version = "0.8", features = ["html_reports"] }
 
 [[bench]]
-name = "parsing"
+name = "read"
 harness = false
 
 [[bench]]
-name = "tokenizer"
+name = "write"
 harness = false
 
 [[bench]]
 name = "memory"
-harness = false
-
-[[bench]]
-name = "lexer"
-harness = false
-
-[[bench]]
-name = "writer"
-harness = false
-
-[[bench]]
-name = "model"
 harness = false
 
 [lib]
@@ -65,5 +52,5 @@ name = "ged_io"
 path = "src/lib.rs"
 
 [[bin]]
-name = "ged_io"
-path = "src/bin.rs"
+name = "ged-io"
+path = "src/bin/ged-io.rs"

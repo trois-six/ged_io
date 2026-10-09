@@ -378,7 +378,7 @@ fn version_detection_reads_the_header_only() {
         "0 HEAD\n1 NOTE {}\n1 GEDC\n2 VERS 7.0\n0 TRLR\n",
         "é".repeat(600)
     );
-    assert_eq!(ged_io::detect_version(&late), GedcomVersion::V7_0);
+    assert_eq!(ged_io::version::detect_version(&late), GedcomVersion::V7_0);
     // An SNOTE record or a SCHMA elsewhere does not make a 5.5.1 file 7.0.
     let tree = read(&h5("0 @N1@ SNOTE x\n"));
     assert_eq!(tree.version(), GedcomVersion::V5_5_1);

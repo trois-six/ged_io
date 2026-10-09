@@ -1,489 +1,489 @@
-//! Indexed GEDCOM data structure for O(1) lookups.
+//! A dataset with an index: records found by identifier, and families
+//! found from individuals, in constant time.
 //!
-//! This module provides `IndexedGedcomData`, which wraps `GedcomData` and maintains
-//! HashMap indexes for fast cross-reference lookups. This is particularly useful
-//! for large GEDCOM files where linear searches would be slow.
-//!
-//! # Example
+//! [`Dataset`]'s lookups are linear searches, which suits a few lookups;
+//! [`IndexedDataset`] indexes a dataset once (a few bytes per identifier
+//! and per link) for many.
 //!
 //! ```rust
-//! use ged_io::{GedcomBuilder, indexed::IndexedGedcomData};
+//! use ged_io::model::Dataset;
+//! use ged_io::IndexedDataset;
 //!
-//! let source = "0 HEAD\n1 GEDC\n2 VERS 5.5\n0 @I1@ INDI\n1 NAME John /Doe/\n0 @F1@ FAM\n1 HUSB @I1@\n0 TRLR";
-//! let data = GedcomBuilder::new().build_from_str(source).unwrap();
-//! let indexed = IndexedGedcomData::from(data);
-//!
-//! // O(1) lookup by xref
-//! assert!(indexed.find_individual("@I1@").is_some());
-//! assert!(indexed.find_family("@F1@").is_some());
+//! let data = Dataset::parse(
+//!     "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 NAME Ann /Example/\n0 @I2@ INDI\n\
+//!      0 @F1@ FAM\n1 WIFE @I1@\n1 CHIL @I2@\n0 TRLR\n",
+//! );
+//! let indexed = IndexedDataset::new(data);
+//! let ann = indexed.find_individual("@I1@").unwrap();
+//! let family = indexed.families_as_spouse(ann.xref).next().unwrap();
+//! assert_eq!(indexed.children(family).count(), 1);
+//! assert_eq!(indexed.individuals.len(), 2); // a dataset still
 //! ```
 
-use std::collections::HashMap;
+use std::ops::{Deref, DerefMut};
 
-use crate::types::{
-    family::Family, individual::Individual, multimedia::Multimedia, repository::Repository,
-    source::Source, submitter::Submitter, GedcomData,
+use crate::model::{
+    Dataset, Family, Individual, Multimedia, RecordRef, Repository, SharedNote, Source, Submitter,
+    XrefId, XrefKey,
 };
 
-/// A wrapper around `GedcomData` that provides O(1) lookups by cross-reference ID.
-///
-/// This structure builds `HashMap` indexes upon creation, trading memory for lookup speed.
-/// It's recommended for use cases that require frequent lookups by xref.
-#[derive(Debug)]
-pub struct IndexedGedcomData {
-    /// The underlying GEDCOM data
-    data: GedcomData,
-    /// Index mapping individual xrefs to their position in the individuals vector
-    individual_index: HashMap<Box<str>, usize>,
-    /// Index mapping family xrefs to their position in the families vector
-    family_index: HashMap<Box<str>, usize>,
-    /// Index mapping source xrefs to their position in the sources vector
-    source_index: HashMap<Box<str>, usize>,
-    /// Index mapping repository xrefs to their position in the repositories vector
-    repository_index: HashMap<Box<str>, usize>,
-    /// Index mapping multimedia xrefs to their position in the multimedia vector
-    multimedia_index: HashMap<Box<str>, usize>,
-    /// Index mapping submitter xrefs to their position in the submitters vector
-    submitter_index: HashMap<Box<str>, usize>,
+/// The type of the record an identifier names in the index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    None,
+    Individual,
+    Family,
+    Source,
+    Repository,
+    Multimedia,
+    Submitter,
+    Submission,
+    Note,
+    Other,
 }
 
-impl IndexedGedcomData {
-    /// Creates a new `IndexedGedcomData` from `GedcomData`.
-    ///
-    /// This builds all indexes during construction.
+/// The record an identifier names: its type and its position in its list.
+#[derive(Clone, Copy, Debug)]
+struct Slot {
+    kind: Kind,
+    at: u32,
+}
+
+const EMPTY: Slot = Slot {
+    kind: Kind::None,
+    at: 0,
+};
+
+/// Lists of positions per item, in one buffer: the families of each
+/// individual.
+#[derive(Clone, Debug, Default)]
+struct Links {
+    /// For item `i`, its positions are `items[starts[i]..starts[i + 1]]`.
+    starts: Vec<u32>,
+    items: Vec<u32>,
+}
+
+impl Links {
+    /// Builds the lists from `(item, position)` pairs over `count` items.
+    fn build(count: usize, pairs: &[(u32, u32)]) -> Self {
+        let mut starts = vec![0_u32; count + 1];
+        for &(item, _) in pairs {
+            if let Some(s) = starts.get_mut(item as usize + 1) {
+                *s += 1;
+            }
+        }
+        for i in 1..starts.len() {
+            starts[i] += starts[i - 1];
+        }
+        let mut items = vec![0_u32; pairs.len()];
+        let mut fill = starts.clone();
+        for &(item, at) in pairs {
+            if let Some(f) = fill.get_mut(item as usize) {
+                if let Some(slot) = items.get_mut(*f as usize) {
+                    *slot = at;
+                }
+                *f += 1;
+            }
+        }
+        Self { starts, items }
+    }
+
+    fn of(&self, item: usize) -> &[u32] {
+        let start = self.starts.get(item).copied().unwrap_or(0) as usize;
+        let end = self.starts.get(item + 1).copied().unwrap_or(0) as usize;
+        self.items.get(start..end).unwrap_or_default()
+    }
+}
+
+/// A [`Dataset`] and its index: see the [module documentation](self).
+///
+/// When several records have one identifier, the first one is found, as
+/// [`Dataset::find`] finds it. The index is built by [`new`](Self::new)
+/// and rebuilt after every edit through [`data_mut`](Self::data_mut); the
+/// dataset is readable through `Deref`.
+#[derive(Clone, Debug)]
+pub struct IndexedDataset {
+    data: Dataset,
+    /// The record of each identifier, by [`XrefId`].
+    records: Vec<Slot>,
+    /// The families each identifier is a partner in, by [`XrefId`].
+    as_spouse: Links,
+    /// The families each identifier is a child in, by [`XrefId`].
+    as_child: Links,
+}
+
+impl IndexedDataset {
+    /// Indexes a dataset.
     #[must_use]
-    pub fn new(data: GedcomData) -> Self {
+    pub fn new(data: Dataset) -> Self {
         let mut indexed = Self {
-            individual_index: HashMap::with_capacity(data.individuals.len()),
-            family_index: HashMap::with_capacity(data.families.len()),
-            source_index: HashMap::with_capacity(data.sources.len()),
-            repository_index: HashMap::with_capacity(data.repositories.len()),
-            multimedia_index: HashMap::with_capacity(data.multimedia.len()),
-            submitter_index: HashMap::with_capacity(data.submitters.len()),
             data,
+            records: Vec::new(),
+            as_spouse: Links::default(),
+            as_child: Links::default(),
         };
-        indexed.build_indexes();
+        indexed.reindex();
         indexed
     }
 
-    /// Builds all indexes from the underlying data.
-    fn build_indexes(&mut self) {
-        // Index individuals
-        for (i, individual) in self.data.individuals.iter().enumerate() {
-            if let Some(ref xref) = individual.xref {
-                self.individual_index.insert(xref.clone().into(), i);
+    fn reindex(&mut self) {
+        let data = &self.data;
+        let mut records = vec![EMPTY; data.store().xref_count()];
+        let mut put = |id: Option<XrefId>, kind: Kind, at: usize| {
+            let (Some(id), Ok(at)) = (id, u32::try_from(at)) else {
+                return;
+            };
+            if let Some(slot) = records.get_mut(id.index()) {
+                // The first record of an identifier is the one found.
+                if slot.kind == Kind::None {
+                    *slot = Slot { kind, at };
+                }
+            }
+        };
+        let lists: [(Kind, Vec<Option<XrefId>>); 9] = [
+            (
+                Kind::Individual,
+                data.individuals.iter().map(|r| r.xref).collect(),
+            ),
+            (Kind::Family, data.families.iter().map(|r| r.xref).collect()),
+            (Kind::Source, data.sources.iter().map(|r| r.xref).collect()),
+            (
+                Kind::Repository,
+                data.repositories.iter().map(|r| r.xref).collect(),
+            ),
+            (
+                Kind::Multimedia,
+                data.multimedia.iter().map(|r| r.xref).collect(),
+            ),
+            (
+                Kind::Submitter,
+                data.submitters.iter().map(|r| r.xref).collect(),
+            ),
+            (
+                Kind::Submission,
+                data.submissions.iter().map(|r| r.xref).collect(),
+            ),
+            (Kind::Note, data.notes.iter().map(|r| r.xref).collect()),
+            (Kind::Other, data.extra.iter().map(|r| r.xref).collect()),
+        ];
+        // In the order of `Dataset::records`, so that the first is the same.
+        for kind in [
+            Kind::Submitter,
+            Kind::Submission,
+            Kind::Individual,
+            Kind::Family,
+            Kind::Note,
+            Kind::Source,
+            Kind::Repository,
+            Kind::Multimedia,
+            Kind::Other,
+        ] {
+            if let Some((_, ids)) = lists.iter().find(|(k, _)| *k == kind) {
+                for (at, id) in ids.iter().enumerate() {
+                    put(*id, kind, at);
+                }
             }
         }
-
-        // Index families
-        for (i, family) in self.data.families.iter().enumerate() {
-            if let Some(ref xref) = family.xref {
-                self.family_index.insert(xref.clone().into(), i);
+        // The families each identifier is a partner and a child in, whether
+        // or not a record has it (as the dataset's own navigation finds them).
+        let mut spouses = Vec::new();
+        let mut children = Vec::new();
+        let index = |id: XrefId| u32::try_from(id.index()).ok();
+        for (at, family) in data.families.iter().enumerate() {
+            let Ok(at) = u32::try_from(at) else { break };
+            for partner in [family.husband_id(), family.wife_id()]
+                .into_iter()
+                .flatten()
+            {
+                if let Some(i) = index(partner) {
+                    spouses.push((i, at));
+                }
+            }
+            for child in family.children.iter().filter_map(|c| c.individual) {
+                if let Some(i) = index(child) {
+                    children.push((i, at));
+                }
             }
         }
-
-        // Index sources
-        for (i, source) in self.data.sources.iter().enumerate() {
-            if let Some(ref xref) = source.xref {
-                self.source_index.insert(xref.clone().into(), i);
-            }
-        }
-
-        // Index repositories
-        for (i, repo) in self.data.repositories.iter().enumerate() {
-            if let Some(ref xref) = repo.xref {
-                self.repository_index.insert(xref.clone().into(), i);
-            }
-        }
-
-        // Index multimedia
-        for (i, media) in self.data.multimedia.iter().enumerate() {
-            if let Some(ref xref) = media.xref {
-                self.multimedia_index.insert(xref.clone().into(), i);
-            }
-        }
-
-        // Index submitters
-        for (i, submitter) in self.data.submitters.iter().enumerate() {
-            if let Some(ref xref) = submitter.xref {
-                self.submitter_index.insert(xref.clone().into(), i);
-            }
-        }
+        // One list entry per family, even when an individual is both
+        // partners of it.
+        spouses.dedup();
+        let count = data.store().xref_count();
+        self.as_spouse = Links::build(count, &spouses);
+        self.as_child = Links::build(count, &children);
+        self.records = records;
     }
 
-    /// Returns a reference to the underlying `GedcomData`.
-    #[inline]
+    /// The dataset.
     #[must_use]
-    pub fn data(&self) -> &GedcomData {
+    pub fn data(&self) -> &Dataset {
         &self.data
     }
 
-    /// Consumes this `IndexedGedcomData` and returns the underlying `GedcomData`.
+    /// The dataset, to edit: the index is rebuilt when the returned guard
+    /// is dropped.
+    pub fn data_mut(&mut self) -> DatasetMut<'_> {
+        DatasetMut { indexed: self }
+    }
+
+    /// The dataset, without its index.
     #[must_use]
-    pub fn into_inner(self) -> GedcomData {
+    pub fn into_inner(self) -> Dataset {
         self.data
     }
 
-    /// Finds an individual by cross-reference ID in O(1) time.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use ged_io::{GedcomBuilder, indexed::IndexedGedcomData};
-    ///
-    /// let source = "0 HEAD\n1 GEDC\n2 VERS 5.5\n0 @I1@ INDI\n1 NAME John /Doe/\n0 TRLR";
-    /// let data = GedcomBuilder::new().build_from_str(source).unwrap();
-    /// let indexed = IndexedGedcomData::from(data);
-    ///
-    /// let individual = indexed.find_individual("@I1@");
-    /// assert!(individual.is_some());
-    /// ```
-    #[inline]
-    #[must_use]
-    pub fn find_individual(&self, xref: &str) -> Option<&Individual> {
-        self.individual_index
-            .get(xref)
-            .map(|&idx| &self.data.individuals[idx])
+    fn slot(&self, xref: impl XrefKey) -> Option<Slot> {
+        let id = xref.id_in(self.data.store())?;
+        self.records
+            .get(id.index())
+            .copied()
+            .filter(|s| s.kind != Kind::None)
     }
 
-    /// Finds a family by cross-reference ID in O(1) time.
-    #[inline]
-    #[must_use]
-    pub fn find_family(&self, xref: &str) -> Option<&Family> {
-        self.family_index
-            .get(xref)
-            .map(|&idx| &self.data.families[idx])
+    fn at(&self, xref: impl XrefKey, kind: Kind) -> Option<usize> {
+        self.slot(xref)
+            .filter(|s| s.kind == kind)
+            .map(|s| s.at as usize)
     }
 
-    /// Finds a source by cross-reference ID in O(1) time.
-    #[inline]
+    /// The record with this identifier.
     #[must_use]
-    pub fn find_source(&self, xref: &str) -> Option<&Source> {
-        self.source_index
-            .get(xref)
-            .map(|&idx| &self.data.sources[idx])
+    pub fn find(&self, xref: impl XrefKey) -> Option<RecordRef<'_>> {
+        let slot = self.slot(xref)?;
+        let at = slot.at as usize;
+        let data = &self.data;
+        Some(match slot.kind {
+            Kind::None => return None,
+            Kind::Individual => RecordRef::Individual(data.individuals.get(at)?),
+            Kind::Family => RecordRef::Family(data.families.get(at)?),
+            Kind::Source => RecordRef::Source(data.sources.get(at)?),
+            Kind::Repository => RecordRef::Repository(data.repositories.get(at)?),
+            Kind::Multimedia => RecordRef::Multimedia(data.multimedia.get(at)?),
+            Kind::Submitter => RecordRef::Submitter(data.submitters.get(at)?),
+            Kind::Submission => RecordRef::Submission(data.submissions.get(at)?),
+            Kind::Note => RecordRef::Note(data.notes.get(at)?),
+            Kind::Other => RecordRef::Other(data.extra.get(at)?),
+        })
     }
 
-    /// Finds a repository by cross-reference ID in O(1) time.
-    #[inline]
+    /// The individual with this identifier.
     #[must_use]
-    pub fn find_repository(&self, xref: &str) -> Option<&Repository> {
-        self.repository_index
-            .get(xref)
-            .map(|&idx| &self.data.repositories[idx])
+    pub fn find_individual(&self, xref: impl XrefKey) -> Option<&Individual> {
+        self.data.individuals.get(self.at(xref, Kind::Individual)?)
     }
 
-    /// Finds a multimedia record by cross-reference ID in O(1) time.
-    #[inline]
+    /// The family with this identifier.
     #[must_use]
-    pub fn find_multimedia(&self, xref: &str) -> Option<&Multimedia> {
-        self.multimedia_index
-            .get(xref)
-            .map(|&idx| &self.data.multimedia[idx])
+    pub fn find_family(&self, xref: impl XrefKey) -> Option<&Family> {
+        self.data.families.get(self.at(xref, Kind::Family)?)
     }
 
-    /// Finds a submitter by cross-reference ID in O(1) time.
-    #[inline]
+    /// The source with this identifier.
     #[must_use]
-    pub fn find_submitter(&self, xref: &str) -> Option<&Submitter> {
-        self.submitter_index
-            .get(xref)
-            .map(|&idx| &self.data.submitters[idx])
+    pub fn find_source(&self, xref: impl XrefKey) -> Option<&Source> {
+        self.data.sources.get(self.at(xref, Kind::Source)?)
     }
 
-    /// Gets the families where an individual is a spouse/partner.
-    ///
-    /// Note: This is still O(n) where n is the number of families, as it requires
-    /// scanning all families. For very frequent use, consider building a separate
-    /// reverse index.
+    /// The repository with this identifier.
     #[must_use]
-    pub fn get_families_as_spouse(&self, individual_xref: &str) -> Vec<&Family> {
-        self.data.get_families_as_spouse(individual_xref)
+    pub fn find_repository(&self, xref: impl XrefKey) -> Option<&Repository> {
+        self.data.repositories.get(self.at(xref, Kind::Repository)?)
     }
 
-    /// Gets the families where an individual is a child.
+    /// The multimedia object with this identifier.
     #[must_use]
-    pub fn get_families_as_child(&self, individual_xref: &str) -> Vec<&Family> {
-        self.data.get_families_as_child(individual_xref)
+    pub fn find_multimedia(&self, xref: impl XrefKey) -> Option<&Multimedia> {
+        self.data.multimedia.get(self.at(xref, Kind::Multimedia)?)
     }
 
-    /// Gets the children of a family as Individual references.
+    /// The submitter with this identifier.
     #[must_use]
-    pub fn get_children(&self, family: &Family) -> Vec<&Individual> {
+    pub fn find_submitter(&self, xref: impl XrefKey) -> Option<&Submitter> {
+        self.data.submitters.get(self.at(xref, Kind::Submitter)?)
+    }
+
+    /// The shared note with this identifier.
+    #[must_use]
+    pub fn find_note(&self, xref: impl XrefKey) -> Option<&SharedNote> {
+        self.data.notes.get(self.at(xref, Kind::Note)?)
+    }
+
+    fn families_in<'s>(
+        &'s self,
+        links: &'s Links,
+        individual: impl XrefKey,
+    ) -> impl Iterator<Item = &'s Family> {
+        let positions = individual
+            .id_in(self.data.store())
+            .map_or(&[][..], |id| links.of(id.index()));
+        positions
+            .iter()
+            .filter_map(|&at| self.data.families.get(at as usize))
+    }
+
+    /// The families in which this individual is a partner (`HUSB` or
+    /// `WIFE`), in order.
+    pub fn families_as_spouse(&self, individual: impl XrefKey) -> impl Iterator<Item = &Family> {
+        self.families_in(&self.as_spouse, individual)
+    }
+
+    /// The families in which this individual is a child (`CHIL`), in
+    /// order.
+    pub fn families_as_child(&self, individual: impl XrefKey) -> impl Iterator<Item = &Family> {
+        self.families_in(&self.as_child, individual)
+    }
+
+    /// The partners of a family (`HUSB`, then `WIFE`) that have a record.
+    pub fn parents<'s>(&'s self, family: &'s Family) -> impl Iterator<Item = &'s Individual> {
+        [family.husband_id(), family.wife_id()]
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.find_individual(id))
+    }
+
+    /// The children of a family (`CHIL`) that have a record, in order.
+    pub fn children<'s>(&'s self, family: &'s Family) -> impl Iterator<Item = &'s Individual> {
         family
             .children
             .iter()
-            .filter_map(|xref| self.find_individual(xref))
-            .collect()
+            .filter_map(|c| c.individual)
+            .filter_map(|id| self.find_individual(id))
     }
 
-    /// Gets the parents/partners of a family as Individual references.
+    /// The other partner of `individual` in `family`, when it has a record.
     #[must_use]
-    pub fn get_parents(&self, family: &Family) -> Vec<&Individual> {
-        let mut parents = Vec::with_capacity(2);
-        if let Some(ref xref) = family.individual1 {
-            if let Some(ind) = self.find_individual(xref) {
-                parents.push(ind);
-            }
-        }
-        if let Some(ref xref) = family.individual2 {
-            if let Some(ind) = self.find_individual(xref) {
-                parents.push(ind);
-            }
-        }
-        parents
-    }
-
-    /// Gets the spouse/partner of an individual in a specific family.
-    #[must_use]
-    pub fn get_spouse(&self, individual_xref: &str, family: &Family) -> Option<&Individual> {
-        if family
-            .individual1
-            .as_ref()
-            .is_some_and(|x| x == individual_xref)
-        {
-            family
-                .individual2
-                .as_ref()
-                .and_then(|x| self.find_individual(x))
-        } else if family
-            .individual2
-            .as_ref()
-            .is_some_and(|x| x == individual_xref)
-        {
-            family
-                .individual1
-                .as_ref()
-                .and_then(|x| self.find_individual(x))
+    pub fn spouse(&self, individual: impl XrefKey, family: &Family) -> Option<&Individual> {
+        let id = individual.id_in(self.data.store())?;
+        let other = if family.husband_id() == Some(id) {
+            family.wife_id()
+        } else if family.wife_id() == Some(id) {
+            family.husband_id()
         } else {
             None
-        }
-    }
-
-    /// Searches for individuals whose name contains the given string (case-insensitive).
-    ///
-    /// Note: This is O(n) as it requires scanning all individuals.
-    #[must_use]
-    pub fn search_individuals_by_name(&self, query: &str) -> Vec<&Individual> {
-        self.data.search_individuals_by_name(query)
-    }
-
-    /// Returns the total count of all records.
-    #[must_use]
-    pub fn total_records(&self) -> usize {
-        self.data.total_records()
-    }
-
-    /// Checks if the indexed data is empty.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.data.is_empty()
-    }
-
-    /// Returns the number of indexed individuals.
-    #[must_use]
-    pub fn individual_count(&self) -> usize {
-        self.data.individuals.len()
-    }
-
-    /// Returns the number of indexed families.
-    #[must_use]
-    pub fn family_count(&self) -> usize {
-        self.data.families.len()
-    }
-
-    /// Returns statistics about the indexes.
-    #[must_use]
-    pub fn index_stats(&self) -> IndexStats {
-        IndexStats {
-            individual_index_size: self.individual_index.len(),
-            family_index_size: self.family_index.len(),
-            source_index_size: self.source_index.len(),
-            repository_index_size: self.repository_index.len(),
-            multimedia_index_size: self.multimedia_index.len(),
-            submitter_index_size: self.submitter_index.len(),
-        }
+        };
+        self.find_individual(other?)
     }
 }
 
-impl From<GedcomData> for IndexedGedcomData {
-    fn from(data: GedcomData) -> Self {
+impl From<Dataset> for IndexedDataset {
+    fn from(data: Dataset) -> Self {
         Self::new(data)
     }
 }
 
-/// Statistics about the indexes in `IndexedGedcomData`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IndexStats {
-    /// Number of entries in the individual index
-    pub individual_index_size: usize,
-    /// Number of entries in the family index
-    pub family_index_size: usize,
-    /// Number of entries in the source index
-    pub source_index_size: usize,
-    /// Number of entries in the repository index
-    pub repository_index_size: usize,
-    /// Number of entries in the multimedia index
-    pub multimedia_index_size: usize,
-    /// Number of entries in the submitter index
-    pub submitter_index_size: usize,
+impl Deref for IndexedDataset {
+    type Target = Dataset;
+
+    fn deref(&self) -> &Dataset {
+        &self.data
+    }
 }
 
-impl IndexStats {
-    /// Returns the total number of indexed entries across all indexes.
-    #[must_use]
-    pub fn total(&self) -> usize {
-        self.individual_index_size
-            + self.family_index_size
-            + self.source_index_size
-            + self.repository_index_size
-            + self.multimedia_index_size
-            + self.submitter_index_size
+/// The dataset of an [`IndexedDataset`], to edit: dropping it rebuilds the
+/// index.
+#[derive(Debug)]
+pub struct DatasetMut<'a> {
+    indexed: &'a mut IndexedDataset,
+}
+
+impl Deref for DatasetMut<'_> {
+    type Target = Dataset;
+
+    fn deref(&self) -> &Dataset {
+        &self.indexed.data
+    }
+}
+
+impl DerefMut for DatasetMut<'_> {
+    fn deref_mut(&mut self) -> &mut Dataset {
+        &mut self.indexed.data
+    }
+}
+
+impl Drop for DatasetMut<'_> {
+    fn drop(&mut self) {
+        self.indexed.reindex();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::GedcomBuilder;
+    use crate::model::{IndividualRef, Name};
 
-    fn create_test_data() -> GedcomData {
-        let source = "0 HEAD\n\
-            1 GEDC\n\
-            2 VERS 5.5\n\
-            0 @I1@ INDI\n\
-            1 NAME John /Doe/\n\
-            1 SEX M\n\
-            0 @I2@ INDI\n\
-            1 NAME Jane /Doe/\n\
-            1 SEX F\n\
-            0 @I3@ INDI\n\
-            1 NAME Jimmy /Doe/\n\
-            0 @F1@ FAM\n\
-            1 HUSB @I1@\n\
-            1 WIFE @I2@\n\
-            1 CHIL @I3@\n\
-            0 @S1@ SOUR\n\
-            1 TITL Birth Records\n\
-            0 @R1@ REPO\n\
-            1 NAME Library\n\
-            0 TRLR";
-        GedcomBuilder::new().build_from_str(source).unwrap()
+    const FILE: &str = "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n\
+        0 @I1@ INDI\n1 NAME Ann /Example/\n\
+        0 @I2@ INDI\n1 NAME Bob /Example/\n\
+        0 @I3@ INDI\n1 NAME Cid /Example/\n\
+        0 @I1@ INDI\n1 NAME Duplicate /Example/\n\
+        0 @F1@ FAM\n1 HUSB @I2@\n1 WIFE @I1@\n1 CHIL @I3@\n1 CHIL @I9@\n\
+        0 @F2@ FAM\n1 WIFE @I1@\n\
+        0 @S1@ SOUR\n0 @R1@ REPO\n0 @M1@ OBJE\n0 @U1@ SUBM\n0 @N1@ NOTE Shared\n0 @X1@ _LOC\n\
+        0 TRLR\n";
+
+    #[test]
+    fn finds_every_record_type_first_wins() {
+        let indexed = IndexedDataset::new(Dataset::parse(FILE));
+        let ann = indexed.find_individual("@I1@").unwrap();
+        assert_eq!(ann.full_name(&*indexed).as_deref(), Some("Ann Example"));
+        assert!(indexed.find_family("@F1@").is_some());
+        assert!(indexed.find_source("@S1@").is_some());
+        assert!(indexed.find_repository("@R1@").is_some());
+        assert!(indexed.find_multimedia("@M1@").is_some());
+        assert!(indexed.find_submitter("@U1@").is_some());
+        assert!(indexed.find_note("@N1@").is_some());
+        assert!(matches!(indexed.find("@X1@"), Some(RecordRef::Other(_))));
+        assert!(indexed.find_family("@I1@").is_none());
+        assert!(indexed.find("@I9@").is_none());
+        assert!(indexed.find("@nothing@").is_none());
+        // Every lookup agrees with the dataset's linear search.
+        for xref in ["@I1@", "@I2@", "@F2@", "@S1@", "@N1@", "@X1@", "@I9@"] {
+            assert_eq!(indexed.find(xref), indexed.data().find(xref), "{xref}");
+        }
     }
 
     #[test]
-    fn test_indexed_creation() {
-        let data = create_test_data();
-        let indexed = IndexedGedcomData::from(data);
-
-        assert_eq!(indexed.individual_count(), 3);
-        assert_eq!(indexed.family_count(), 1);
+    fn navigates_families() {
+        let indexed = IndexedDataset::from(Dataset::parse(FILE));
+        let ann = indexed.find_individual("@I1@").unwrap();
+        let families: Vec<_> = indexed.families_as_spouse(ann.xref).collect();
+        assert_eq!(families.len(), 2);
+        assert_eq!(indexed.parents(families[0]).count(), 2);
+        assert_eq!(indexed.children(families[0]).count(), 1); // @I9@ has no record
+        assert_eq!(
+            indexed
+                .spouse("@I1@", families[0])
+                .and_then(|s| s.full_name(&*indexed)),
+            Some("Bob Example".to_string())
+        );
+        assert_eq!(indexed.families_as_child("@I3@").count(), 1);
+        assert_eq!(indexed.families_as_child("@I1@").count(), 0);
+        // The same answers as the dataset's own navigation.
+        let data = indexed.data();
+        assert_eq!(
+            data.families_as_spouse("@I1@").count(),
+            indexed.families_as_spouse("@I1@").count()
+        );
     }
 
     #[test]
-    fn test_find_individual() {
-        let data = create_test_data();
-        let indexed = IndexedGedcomData::from(data);
-
-        let john = indexed.find_individual("@I1@");
-        assert!(john.is_some());
-        assert_eq!(john.unwrap().full_name(), Some("John Doe".to_string()));
-
-        let none = indexed.find_individual("@I999@");
-        assert!(none.is_none());
-    }
-
-    #[test]
-    fn test_find_family() {
-        let data = create_test_data();
-        let indexed = IndexedGedcomData::from(data);
-
-        let family = indexed.find_family("@F1@");
-        assert!(family.is_some());
-        assert_eq!(family.unwrap().individual1, Some("@I1@".to_string()));
-    }
-
-    #[test]
-    fn test_find_source() {
-        let data = create_test_data();
-        let indexed = IndexedGedcomData::from(data);
-
-        let source = indexed.find_source("@S1@");
-        assert!(source.is_some());
-    }
-
-    #[test]
-    fn test_find_repository() {
-        let data = create_test_data();
-        let indexed = IndexedGedcomData::from(data);
-
-        let repo = indexed.find_repository("@R1@");
-        assert!(repo.is_some());
-    }
-
-    #[test]
-    fn test_get_children() {
-        let data = create_test_data();
-        let indexed = IndexedGedcomData::from(data);
-
-        let family = indexed.find_family("@F1@").unwrap();
-        let children = indexed.get_children(family);
-
-        assert_eq!(children.len(), 1);
-        assert_eq!(children[0].full_name(), Some("Jimmy Doe".to_string()));
-    }
-
-    #[test]
-    fn test_get_parents() {
-        let data = create_test_data();
-        let indexed = IndexedGedcomData::from(data);
-
-        let family = indexed.find_family("@F1@").unwrap();
-        let parents = indexed.get_parents(family);
-
-        assert_eq!(parents.len(), 2);
-    }
-
-    #[test]
-    fn test_get_spouse() {
-        let data = create_test_data();
-        let indexed = IndexedGedcomData::from(data);
-
-        let family = indexed.find_family("@F1@").unwrap();
-        let spouse = indexed.get_spouse("@I1@", family);
-
-        assert!(spouse.is_some());
-        assert_eq!(spouse.unwrap().full_name(), Some("Jane Doe".to_string()));
-    }
-
-    #[test]
-    fn test_index_stats() {
-        let data = create_test_data();
-        let indexed = IndexedGedcomData::from(data);
-
-        let stats = indexed.index_stats();
-        assert_eq!(stats.individual_index_size, 3);
-        assert_eq!(stats.family_index_size, 1);
-        assert_eq!(stats.source_index_size, 1);
-        assert_eq!(stats.repository_index_size, 1);
-        assert_eq!(stats.total(), 6);
-    }
-
-    #[test]
-    fn test_into_inner() {
-        let data = create_test_data();
-        let indexed = IndexedGedcomData::from(data);
-        let recovered = indexed.into_inner();
-
-        assert_eq!(recovered.individuals.len(), 3);
-    }
-
-    #[test]
-    fn test_data_reference() {
-        let data = create_test_data();
-        let indexed = IndexedGedcomData::from(data);
-        let data_ref = indexed.data();
-
-        assert_eq!(data_ref.individuals.len(), 3);
+    fn edits_reindex() {
+        let mut indexed = IndexedDataset::new(Dataset::parse(FILE));
+        {
+            let mut data = indexed.data_mut();
+            let id = data.store_mut().intern_xref("@I7@").unwrap();
+            let mut person = Individual {
+                xref: Some(id),
+                ..Individual::default()
+            };
+            person.names.push(Name::new("Eve /Example/"));
+            data.individuals.push(person);
+            let wife = IndividualRef::new(id);
+            data.families[1].wife = Some(wife);
+        }
+        assert!(indexed.find_individual("@I7@").is_some());
+        assert_eq!(indexed.families_as_spouse("@I7@").count(), 1);
+        assert_eq!(indexed.families_as_spouse("@I1@").count(), 1);
+        assert_eq!(indexed.into_inner().individuals.len(), 5);
     }
 }

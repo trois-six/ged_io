@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::tree::parse_tree;
-use crate::types::date::Calendar;
+use crate::value::Calendar;
 
 /// The calendars of the tables and of the date grammar agree: same
 /// calendars, same months in the same order; in 7.x, an epoch exactly for
@@ -367,6 +367,15 @@ fn repair551(body: &str) -> (Vec<RepairKind>, String) {
 }
 
 use RepairKind as R;
+
+/// A 7.x record named `@VOID@` is renamed; a pointer to `@VOID@` stays the
+/// null pointer it is in 7.x.
+#[test]
+fn void_pointers_do_not_follow_a_renamed_void_record() {
+    let (_, out) = repair70("0 @VOID@ INDI\n0 @I2@ INDI\n0 @F1@ FAM\n1 HUSB @VOID@\n1 WIFE @I2@\n");
+    assert!(out.contains("0 @VOID_@ INDI\n"), "{out}");
+    assert!(out.contains("1 HUSB @VOID@\n"), "{out}");
+}
 
 #[test]
 fn repair_a_enumeration_value() {

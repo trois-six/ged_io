@@ -141,6 +141,7 @@ pub(crate) use payload::is_simple_date;
 use payload::Family;
 pub(crate) use schema::Schema;
 use sealed::Sealed;
+pub(crate) use validate::is_external_pointer;
 
 pub use crate::writer::{Repair, RepairKind};
 pub use conform::conform;

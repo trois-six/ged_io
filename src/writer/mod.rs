@@ -1,7 +1,7 @@
 //! Writing GEDCOM files: conformant GEDCOM 5.5.1, 7.0 or 7.1 lines.
 //!
-//! [`GedcomWriter`] writes a [`GedcomData`] model, or a lossless
-//! [`Tree`](crate::tree::Tree) of structures, in a target version. Every
+//! [`GedcomWriter`] writes a [`Dataset`], or a lossless
+//! [`Tree`] of structures, in a target version. Every
 //! line goes through one emitter that applies the line rules of the
 //! version ([`VersionRules`]):
 //!
@@ -28,11 +28,11 @@
 //! # Example
 //!
 //! ```rust
-//! use ged_io::{GedcomBuilder, GedcomVersion, GedcomWriter};
+//! use ged_io::model::Dataset;
+//! use ged_io::{GedcomVersion, GedcomWriter};
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let source = "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 NAME Ann /Example/\n0 TRLR\n";
-//! let data = GedcomBuilder::new().build_from_str(source)?;
+//! let data = Dataset::parse("0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 NAME Ann /Example/\n0 TRLR\n");
 //!
 //! let output = GedcomWriter::new()
 //!     .gedcom_version(GedcomVersion::V7_0)
@@ -50,16 +50,15 @@
 
 mod emit;
 mod head;
-mod model;
 mod xref;
 
 use std::borrow::Cow;
 use std::fmt;
 use std::io;
 
+use crate::model::Dataset;
 use crate::spec::conform::{conform_records, with_node, Build, Rec, RecRef};
 use crate::tree::{Flat, FlatRef, Node, PayloadRef, Structure, Tree};
-use crate::types::GedcomData;
 use crate::version::{GedcomVersion, VersionRules};
 use emit::{emit, emit_known, emit_tagged, LineSink};
 use xref::XrefMap;
@@ -330,25 +329,14 @@ pub struct GedcomWriter {
     config: WriterConfig,
 }
 
-/// One line-level structure sink: the emitter, or a capture of structures.
-pub(crate) trait Out {
-    /// Writes one structure (its substructures follow at deeper levels).
-    fn put(
-        &mut self,
-        level: usize,
-        xref: Option<&str>,
-        tag: &str,
-        payload: PayloadRef<'_>,
-    ) -> Result<(), WriteError>;
-}
-
-/// The emitter as an [`Out`].
+/// The emitter of a write: the version's rules and the line sink.
 struct Emitter<'s, 'w> {
     rules: &'static VersionRules,
     sink: &'s mut LineSink<'w>,
 }
 
-impl Out for Emitter<'_, '_> {
+impl Emitter<'_, '_> {
+    /// Writes one structure (its substructures follow at deeper levels).
     fn put(
         &mut self,
         level: usize,
@@ -357,39 +345,6 @@ impl Out for Emitter<'_, '_> {
         payload: PayloadRef<'_>,
     ) -> Result<(), WriteError> {
         emit(self.rules, self.sink, level, xref, tag, payload)
-    }
-}
-
-/// Collects structures instead of writing them (for the header, which is
-/// completed before it is written).
-#[derive(Default)]
-struct Capture {
-    roots: Vec<Structure>,
-}
-
-impl Out for Capture {
-    fn put(
-        &mut self,
-        level: usize,
-        xref: Option<&str>,
-        tag: &str,
-        payload: PayloadRef<'_>,
-    ) -> Result<(), WriteError> {
-        let node = Structure {
-            xref: xref.map(Into::into),
-            payload: payload.to_payload(),
-            ..Structure::new(tag)
-        };
-        let mut siblings = &mut self.roots;
-        for _ in 0..level {
-            if siblings.is_empty() {
-                break;
-            }
-            let last = siblings.len() - 1;
-            siblings = &mut siblings[last].substructures;
-        }
-        siblings.push(node);
-        Ok(())
     }
 }
 
@@ -504,6 +459,12 @@ impl GedcomWriter {
     /// Writes `data` to `writer` in the configured encoding and returns the
     /// repairs made.
     ///
+    /// The dataset is written in its version unless one is configured:
+    /// values converted to the target's grammars, structures repaired to
+    /// conform to its specification ([`crate::spec::conform`]), then every
+    /// line emitted by its line rules. The report lists the structural
+    /// repairs, then the line repairs.
+    ///
     /// # Errors
     ///
     /// [`WriteError::Io`] when `writer` fails, [`WriteError::Unencodable`]
@@ -512,20 +473,10 @@ impl GedcomWriter {
     /// [`RepairPolicy::Error`].
     pub fn write<W: io::Write>(
         &self,
-        mut writer: W,
-        data: &GedcomData,
+        writer: W,
+        data: &Dataset,
     ) -> Result<WriteReport, WriteError> {
-        let rules = self.rules_for(data.gedcom_version());
-        let encoding = self.encoding(rules);
-        let mut sink = self.sink(Some(&mut writer), rules, encoding);
-        if self.wants_bom(rules, encoding, false) {
-            sink.bom();
-        }
-        model::write_data(rules, &mut sink, data)?;
-        sink.finish()?;
-        Ok(WriteReport {
-            repairs: sink.repairs,
-        })
+        self.write_built(writer, &data.built(self))
     }
 
     /// Writes `data` as text: UTF-8 (whatever the output encoding), labelled
@@ -536,14 +487,22 @@ impl GedcomWriter {
     ///
     /// [`WriteError::NonConformant`] on the first repair under
     /// [`RepairPolicy::Error`].
-    pub fn write_to_string(&self, data: &GedcomData) -> Result<String, WriteError> {
-        let rules = self.rules_for(data.gedcom_version());
-        let mut sink = self.sink(None, rules, OutputEncoding::Utf8);
-        if self.wants_bom(rules, OutputEncoding::Utf8, true) {
-            sink.bom();
-        }
-        model::write_data(rules, &mut sink, data)?;
-        Ok(sink.into_string())
+    pub fn write_to_string(&self, data: &Dataset) -> Result<String, WriteError> {
+        self.write_built_to_string(&data.built(self))
+            .map(|(text, _)| text)
+    }
+
+    /// [`write_to_string`](Self::write_to_string), with the report of the
+    /// repairs made.
+    ///
+    /// # Errors
+    ///
+    /// As [`write_to_string`](Self::write_to_string).
+    pub fn write_to_string_with_report(
+        &self,
+        data: &Dataset,
+    ) -> Result<(String, WriteReport), WriteError> {
+        self.write_built_to_string(&data.built(self))
     }
 
     /// Writes a lossless [`Tree`] to `writer` in the target version (the
@@ -598,9 +557,9 @@ impl GedcomWriter {
     }
 
     /// Writes records that write their own structures when needed (a
-    /// typed dataset: [`crate::next::write`]) like
+    /// typed dataset) like
     /// [`write_structures`](Self::write_structures).
-    pub(crate) fn write_built<'n, W: io::Write>(
+    fn write_built<'n, W: io::Write>(
         &self,
         mut writer: W,
         records: &'n [impl Build<'n>],
@@ -612,7 +571,7 @@ impl GedcomWriter {
 
     /// [`write_built`](Self::write_built) as text, as
     /// [`write_to_string`](Self::write_to_string) writes a dataset.
-    pub(crate) fn write_built_to_string<'n>(
+    fn write_built_to_string<'n>(
         &self,
         records: &'n [impl Build<'n>],
     ) -> Result<(String, WriteReport), WriteError> {
@@ -928,7 +887,7 @@ fn put_node(
 }
 
 /// Writes an owned structure and its substructures, as they are.
-fn put_structure(out: &mut dyn Out, root: &Structure) -> Result<(), WriteError> {
+fn put_structure(out: &mut Emitter<'_, '_>, root: &Structure) -> Result<(), WriteError> {
     out.put(
         0,
         root.xref.as_deref(),

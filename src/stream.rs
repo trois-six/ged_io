@@ -1,725 +1,365 @@
-//! Streaming parser for large GEDCOM files.
+//! Reading a file one record at a time, with memory bounded by the largest
+//! record.
 //!
-//! This module provides an iterator-based streaming parser that reads GEDCOM files
-//! record-by-record without loading the entire file into memory.
+//! [`GedcomStreamParser`] reads GEDCOM bytes of any encoding from any
+//! [`BufRead`], with the reading rules of the in-memory reader, and yields
+//! each record typed, as a [`StreamedRecord`]: the [`Record`] and the
+//! [`Store`] its texts point into, which holds that record's text alone.
+//! [`GedcomStreamParser::nodes`] yields lossless structures instead, as
+//! [`TreeReader`] does.
 //!
-//! # Example
+//! ```rust
+//! use ged_io::model::RecordRef;
+//! use ged_io::GedcomStreamParser;
 //!
-//! ```rust,no_run
-//! use std::fs::File;
-//! use std::io::BufReader;
-//! use ged_io::stream::{GedcomStreamParser, GedcomRecord};
-//!
-//! let file = File::open("large_family.ged").unwrap();
-//! let reader = BufReader::new(file);
-//!
-//! for record in GedcomStreamParser::new(reader).unwrap() {
-//!     match record.unwrap() {
-//!         GedcomRecord::Individual(indi) => {
-//!             if let Some(name) = indi.full_name() {
-//!                 println!("Found: {}", name);
-//!             }
-//!         }
-//!         _ => {}
+//! # fn main() -> Result<(), ged_io::GedcomError> {
+//! let file: &[u8] = b"0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 NAME Ann /Example/\n0 @F1@ FAM\n0 TRLR\n";
+//! let mut names = Vec::new();
+//! for record in GedcomStreamParser::new(file)? {
+//!     let record = record?;
+//!     if let RecordRef::Individual(indi) = record.record() {
+//!         names.extend(indi.full_name(&record));
 //!     }
 //! }
+//! assert_eq!(names, ["Ann Example"]);
+//! # Ok(())
+//! # }
 //! ```
 //!
-//! # Memory Efficiency
-//!
-//! Unlike [`GedcomBuilder`] which loads the entire file into memory,
-//! `GedcomStreamParser` only buffers one record at a time. For files with many small
-//! records, memory usage stays constant regardless of file size.
-//!
-//! # Encodings and line terminators
-//!
-//! The input may use any encoding and any line terminator the in-memory
-//! reader accepts: it is decoded on the fly by [`DecodeReader`], with the
-//! same rules (see [`crate::encoding`]).
-//!
-//! [`DecodeReader`]: crate::encoding::DecodeReader
+//! A dataset collects streamed records (`FromIterator`, `Extend`), so that
+//! a stream can be filtered into a smaller dataset without reading the
+//! whole file at once.
 
+use std::collections::VecDeque;
 use std::io::BufRead;
 
-#[cfg(feature = "json")]
-use serde::{Deserialize, Serialize};
+use crate::encoding::GedcomEncoding;
+use crate::model::read::RecordReader;
+use crate::model::relocate::{Relocate, Relocation};
+use crate::model::{Dataset, Record, RecordRef, Store};
+use crate::tree::{RecordSource, TreeReader};
+use crate::version::GedcomVersion;
+use crate::GedcomError;
 
-use crate::{
-    encoding::DecodeReader,
-    tokenizer::Tokenizer,
-    tree::{lex_line, normalize_eol, Line, RecordSplitter},
-    types::{
-        custom::UserDefinedTag, family::Family, header::Header, individual::Individual,
-        multimedia::Multimedia, repository::Repository, shared_note::SharedNote, source::Source,
-        submission::Submission, submitter::Submitter, GedcomData,
-    },
-    GedcomError,
-};
-
-/// A single top-level GEDCOM record.
-///
-/// This enum represents any record that can appear at level 0 in a GEDCOM file.
-/// It is yielded by [`GedcomStreamParser`] as records are parsed.
-///
-/// # Example
-///
-/// ```rust
-/// use ged_io::stream::GedcomRecord;
-/// use ged_io::types::individual::Individual;
-///
-/// fn process_record(record: GedcomRecord) {
-///     match record {
-///         GedcomRecord::Individual(indi) => {
-///             println!("Individual: {:?}", indi.xref);
-///         }
-///         GedcomRecord::Family(fam) => {
-///             println!("Family: {:?}", fam.xref);
-///         }
-///         _ => {}
-///     }
-/// }
-/// ```
+/// A record read by a [`GedcomStreamParser`], with the store its texts and
+/// identifiers resolve against.
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(feature = "json", derive(Serialize, Deserialize))]
-#[allow(clippy::large_enum_variant)]
-pub enum GedcomRecord {
-    /// File header containing metadata.
-    Header(Header),
-    /// An individual person record.
-    Individual(Individual),
-    /// A family unit record.
-    Family(Family),
-    /// A source record.
-    Source(Source),
-    /// A repository record.
-    Repository(Repository),
-    /// A submitter record.
-    Submitter(Submitter),
-    /// A submission record (GEDCOM 5.5.1 only).
-    Submission(Submission),
-    /// A multimedia object record.
-    Multimedia(Multimedia),
-    /// A shared note record (GEDCOM 7.0 only).
-    SharedNote(SharedNote),
-    /// A custom/user-defined record.
-    CustomData(Box<UserDefinedTag>),
+pub struct StreamedRecord {
+    record: Record,
+    store: Store,
+    version: GedcomVersion,
+    line: u32,
 }
 
-impl GedcomRecord {
-    /// Returns the record as an `Individual`, if it is one.
+impl StreamedRecord {
+    /// The record.
     #[must_use]
-    pub fn as_individual(&self) -> Option<&Individual> {
-        match self {
-            GedcomRecord::Individual(i) => Some(i),
-            _ => None,
-        }
+    pub fn record(&self) -> RecordRef<'_> {
+        self.record.record_ref()
     }
 
-    /// Converts the record into an `Individual`, if it is one.
+    /// The store the record's texts and identifiers resolve against.
     #[must_use]
-    pub fn into_individual(self) -> Option<Individual> {
-        match self {
-            GedcomRecord::Individual(i) => Some(i),
-            _ => None,
-        }
+    pub fn store(&self) -> &Store {
+        &self.store
     }
 
-    /// Returns the record as a `Family`, if it is one.
+    /// The version of the file.
     #[must_use]
-    pub fn as_family(&self) -> Option<&Family> {
-        match self {
-            GedcomRecord::Family(f) => Some(f),
-            _ => None,
-        }
+    pub fn version(&self) -> GedcomVersion {
+        self.version
     }
 
-    /// Converts the record into a `Family`, if it is one.
+    /// The line the record starts on.
     #[must_use]
-    pub fn into_family(self) -> Option<Family> {
-        match self {
-            GedcomRecord::Family(f) => Some(f),
-            _ => None,
-        }
+    pub fn line(&self) -> u32 {
+        self.line
     }
 
-    /// Returns the record as a `Header`, if it is one.
+    /// The record and its store.
     #[must_use]
-    pub fn as_header(&self) -> Option<&Header> {
-        match self {
-            GedcomRecord::Header(h) => Some(h),
-            _ => None,
-        }
-    }
-
-    /// Converts the record into a `Header`, if it is one.
-    #[must_use]
-    pub fn into_header(self) -> Option<Header> {
-        match self {
-            GedcomRecord::Header(h) => Some(h),
-            _ => None,
-        }
-    }
-
-    /// Returns the record as a `Source`, if it is one.
-    #[must_use]
-    pub fn as_source(&self) -> Option<&Source> {
-        match self {
-            GedcomRecord::Source(s) => Some(s),
-            _ => None,
-        }
-    }
-
-    /// Converts the record into a `Source`, if it is one.
-    #[must_use]
-    pub fn into_source(self) -> Option<Source> {
-        match self {
-            GedcomRecord::Source(s) => Some(s),
-            _ => None,
-        }
-    }
-
-    /// Returns the record as a `Repository`, if it is one.
-    #[must_use]
-    pub fn as_repository(&self) -> Option<&Repository> {
-        match self {
-            GedcomRecord::Repository(r) => Some(r),
-            _ => None,
-        }
-    }
-
-    /// Returns the record as a `Submitter`, if it is one.
-    #[must_use]
-    pub fn as_submitter(&self) -> Option<&Submitter> {
-        match self {
-            GedcomRecord::Submitter(s) => Some(s),
-            _ => None,
-        }
-    }
-
-    /// Returns the record as a `Multimedia`, if it is one.
-    #[must_use]
-    pub fn as_multimedia(&self) -> Option<&Multimedia> {
-        match self {
-            GedcomRecord::Multimedia(m) => Some(m),
-            _ => None,
-        }
-    }
-
-    /// Returns the record as a `SharedNote`, if it is one.
-    #[must_use]
-    pub fn as_shared_note(&self) -> Option<&SharedNote> {
-        match self {
-            GedcomRecord::SharedNote(n) => Some(n),
-            _ => None,
-        }
-    }
-
-    /// Returns true if this is an Individual record.
-    #[must_use]
-    pub fn is_individual(&self) -> bool {
-        matches!(self, GedcomRecord::Individual(_))
-    }
-
-    /// Returns true if this is a Family record.
-    #[must_use]
-    pub fn is_family(&self) -> bool {
-        matches!(self, GedcomRecord::Family(_))
-    }
-
-    /// Returns true if this is a Header record.
-    #[must_use]
-    pub fn is_header(&self) -> bool {
-        matches!(self, GedcomRecord::Header(_))
+    pub fn into_parts(self) -> (Record, Store) {
+        (self.record, self.store)
     }
 }
 
-/// An iterator-based streaming parser for GEDCOM files.
+impl AsRef<Store> for StreamedRecord {
+    fn as_ref(&self) -> &Store {
+        &self.store
+    }
+}
+
+/// Reads GEDCOM bytes one record at a time: see the [module
+/// documentation](self).
 ///
-/// `GedcomStreamParser` reads GEDCOM data from a buffered reader and yields
-/// records one at a time as they are parsed. This allows processing of very
-/// large files without loading them entirely into memory.
+/// The input may be in any encoding the in-memory reader reads, with any
+/// line terminators: it is decoded on the fly ([`DecodeReader`]), and each
+/// record is read by the same rules and types as [`Dataset::parse`] reads
+/// it. Memory is bounded by the largest record and a 64 KiB buffer.
 ///
-/// # Implementation
+/// Reading fails only when the input does: an I/O error ends the stream.
 ///
-/// The parser reads lines until it finds the next level-0 record, buffers the
-/// complete record text, then parses it using the standard in-memory parser.
-/// This approach reuses all existing parsing logic while maintaining low
-/// memory usage.
-///
-/// # Example
-///
-/// ```rust,no_run
-/// use std::fs::File;
-/// use std::io::BufReader;
-/// use ged_io::stream::{GedcomStreamParser, GedcomRecord};
-///
-/// let file = File::open("family.ged").unwrap();
-/// let reader = BufReader::new(file);
-///
-/// let mut individuals = 0;
-/// let mut families = 0;
-///
-/// for record in GedcomStreamParser::new(reader).unwrap() {
-///     match record.unwrap() {
-///         GedcomRecord::Individual(_) => individuals += 1,
-///         GedcomRecord::Family(_) => families += 1,
-///         _ => {}
-///     }
-/// }
-///
-/// println!("Found {} individuals and {} families", individuals, families);
-/// ```
-///
-/// # Collecting into `GedcomData`
-///
-/// If you need all records in a `GedcomData` structure, you can collect them:
-///
-/// ```rust,no_run
-/// use std::fs::File;
-/// use std::io::BufReader;
-/// use ged_io::stream::GedcomStreamParser;
-/// use ged_io::types::GedcomData;
-///
-/// let file = File::open("family.ged").unwrap();
-/// let reader = BufReader::new(file);
-///
-/// let data: GedcomData = GedcomStreamParser::new(reader)
-///     .unwrap()
-///     .collect::<Result<GedcomData, _>>()
-///     .unwrap();
-/// ```
-pub struct GedcomStreamParser<R: BufRead> {
-    splitter: RecordSplitter<DecodeReader<R>>,
-    /// The current record's lines.
-    record: String,
-    /// The text handed to the token-based parser: the record and a `TRLR`.
-    document: String,
-    /// The line the current record starts on, for error reporting.
-    line_number: u32,
-    /// Whether we've finished parsing
-    finished: bool,
-    /// The version the header declares, once the first record is read.
-    version: Option<crate::GedcomVersion>,
+/// [`DecodeReader`]: crate::encoding::DecodeReader
+pub struct GedcomStreamParser<R> {
+    source: RecordSource<R>,
+    reader: RecordReader,
+    /// Records read from the last text and not yet yielded, with the line
+    /// of that text.
+    pending: VecDeque<(Record, u32)>,
+    /// The store of the pending records.
+    store: Option<Store>,
+    done: bool,
 }
 
 impl<R: BufRead> GedcomStreamParser<R> {
-    /// Creates a new streaming parser from a buffered reader.
-    ///
-    /// The input may use any encoding: the first 64 KiB are read to choose
-    /// the decoding.
+    /// Starts reading; this reads the first 64 KiB to choose the decoding.
     ///
     /// # Errors
     ///
-    /// Returns a `GedcomError` if an I/O error occurs while reading.
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// use std::fs::File;
-    /// use std::io::BufReader;
-    /// use ged_io::stream::GedcomStreamParser;
-    ///
-    /// let file = File::open("family.ged").unwrap();
-    /// let reader = BufReader::new(file);
-    /// let parser = GedcomStreamParser::new(reader).unwrap();
-    /// ```
+    /// [`GedcomError::Io`] when `reader` fails.
     pub fn new(reader: R) -> Result<Self, GedcomError> {
-        let decoder = DecodeReader::new(reader).map_err(|e| GedcomError::IoError(e.to_string()))?;
         Ok(Self {
-            splitter: RecordSplitter::new(decoder),
-            record: String::with_capacity(4096),
-            document: String::with_capacity(4096),
-            line_number: 0,
-            finished: false,
-            version: None,
+            source: RecordSource::new(reader)?,
+            reader: RecordReader::new(),
+            pending: VecDeque::new(),
+            store: None,
+            done: false,
         })
     }
 
     /// The encoding the input is decoded with.
     #[must_use]
-    pub fn encoding(&self) -> crate::GedcomEncoding {
-        self.splitter.get_ref().encoding()
+    pub fn encoding(&self) -> GedcomEncoding {
+        self.source.encoding()
     }
 
-    /// Reads the next record's lines; `None` at `TRLR` or at the end of the input.
-    fn read_next_record(&mut self) -> Result<Option<()>, GedcomError> {
-        let Some(line) = self
-            .splitter
-            .next_record(&mut self.record)
-            .map_err(|e| GedcomError::IoError(e.to_string()))?
-        else {
-            return Ok(None);
+    /// The version the file declares, once the record that tells it (the
+    /// first one, normally `HEAD`) has been read.
+    #[must_use]
+    pub fn version(&self) -> GedcomVersion {
+        self.source.version()
+    }
+
+    /// The `HEAD.GEDC.VERS` payload as written, once read.
+    #[must_use]
+    pub fn declared_version(&self) -> Option<&str> {
+        self.source.declared_version()
+    }
+
+    /// The records not read yet, as lossless structures (see
+    /// [`TreeReader`]) instead of typed records.
+    #[must_use]
+    pub fn nodes(self) -> TreeReader<R> {
+        let version = self.source.version();
+        let pending = match &self.store {
+            Some(store) => self
+                .pending
+                .iter()
+                .map(|(r, _)| r.record_ref().to_structure_in(store, version))
+                .collect(),
+            None => VecDeque::new(),
         };
-        self.line_number = line;
-        let first = self.record.lines().next().unwrap_or_default();
-        if let Line::Structure {
-            level: 0,
-            tag: (s, e),
-            ..
-        } = lex_line(first)
-        {
-            if first.get(s..e) == Some("TRLR") {
+        TreeReader::from_source(self.source, pending)
+    }
+
+    fn read_next(&mut self) -> Result<Option<StreamedRecord>, GedcomError> {
+        loop {
+            if let Some((record, line)) = self.pending.pop_front() {
+                // The last record of a text takes its store; the others,
+                // seldom any, a copy.
+                let store = if self.pending.is_empty() {
+                    self.store.take().unwrap_or_default()
+                } else {
+                    self.store.clone().unwrap_or_default()
+                };
+                return Ok(Some(StreamedRecord {
+                    record,
+                    store,
+                    version: self.source.version(),
+                    line,
+                }));
+            }
+            let mut text = String::new();
+            let Some(line) = self.source.next_record(&mut text)? else {
                 return Ok(None);
-            }
-        }
-        Ok(Some(()))
-    }
-
-    /// Parses a record text into a `GedcomRecord`.
-    fn parse_record_text(&mut self) -> Result<GedcomRecord, GedcomError> {
-        use crate::tokenizer::Token;
-
-        self.document.clear();
-        self.document.push_str(&normalize_eol(&self.record));
-        self.document.push_str("0 TRLR\n");
-
-        // The first record is the header, which declares the version.
-        let version = *self
-            .version
-            .get_or_insert_with(|| crate::detect_version(&self.record));
-        let mut tokenizer = Tokenizer::new(self.document.chars()).for_version(version);
-        tokenizer.next_token()?;
-
-        let Token::Level(level) = tokenizer.current_token else {
-            if tokenizer.current_token == Token::EOF {
-                return Err(GedcomError::ParseError {
-                    line: self.line_number,
-                    message: "Empty record".to_string(),
-                });
-            }
-            return Err(GedcomError::ParseError {
-                line: self.line_number,
-                message: format!("Expected Level, found {:?}", tokenizer.current_token),
-            });
-        };
-
-        if level != 0 {
-            return Err(GedcomError::ParseError {
-                line: self.line_number,
-                message: format!("Expected level 0, found level {level}"),
-            });
-        }
-
-        tokenizer.next_token()?;
-
-        let mut pointer: Option<String> = None;
-        if let Token::Pointer(xref) = &tokenizer.current_token {
-            pointer = Some(xref.to_string());
-            tokenizer.next_token()?;
-        }
-
-        if let Token::Tag(tag) = &tokenizer.current_token {
-            let record = match tag.as_ref() {
-                "HEAD" => GedcomRecord::Header(Header::new(&mut tokenizer, 0)?),
-                "FAM" => GedcomRecord::Family(Family::new(&mut tokenizer, 0, pointer)?),
-                "INDI" => {
-                    GedcomRecord::Individual(Individual::new(&mut tokenizer, level, pointer)?)
-                }
-                "REPO" => {
-                    GedcomRecord::Repository(Repository::new(&mut tokenizer, level, pointer)?)
-                }
-                "SOUR" => GedcomRecord::Source(Source::new(&mut tokenizer, level, pointer)?),
-                "SUBN" => GedcomRecord::Submission(Submission::new(&mut tokenizer, 0, pointer)?),
-                "SUBM" => GedcomRecord::Submitter(Submitter::new(&mut tokenizer, 0, pointer)?),
-                "OBJE" => GedcomRecord::Multimedia(Multimedia::new(&mut tokenizer, 0, pointer)?),
-                // GEDCOM 5.5.1 NOTE_RECORD / GEDCOM 7.0 SNOTE record
-                "NOTE" | "SNOTE" => {
-                    GedcomRecord::SharedNote(SharedNote::new(&mut tokenizer, 0, pointer)?)
-                }
-                "TRLR" => {
-                    return Err(GedcomError::ParseError {
-                        line: self.line_number,
-                        message: "Unexpected TRLR".to_string(),
-                    });
-                }
-                _ => {
-                    return Err(GedcomError::ParseError {
-                        line: self.line_number,
-                        message: format!("Unhandled tag {tag}"),
-                    });
-                }
             };
-            Ok(record)
-        } else if let Token::CustomTag(tag) = &tokenizer.current_token {
-            let tag_clone = tag.clone();
-            let mut record = UserDefinedTag::new(&mut tokenizer, 0, &tag_clone)?;
-            record.xref = pointer;
-            Ok(GedcomRecord::CustomData(Box::new(record)))
-        } else if tokenizer.current_token == Token::EOF {
-            Err(GedcomError::ParseError {
-                line: self.line_number,
-                message: "Unexpected EOF".to_string(),
-            })
-        } else {
-            Err(GedcomError::ParseError {
-                line: self.line_number,
-                message: format!("Unhandled token {:?}", tokenizer.current_token),
-            })
+            self.reader
+                .set_version(self.source.version(), self.source.escaping());
+            let mut records = Vec::new();
+            let store = self.reader.read(text, line, &mut records);
+            self.pending.extend(records.into_iter().map(|r| (r, line)));
+            self.store = Some(store);
         }
     }
 }
 
 impl<R: BufRead> Iterator for GedcomStreamParser<R> {
-    type Item = Result<GedcomRecord, GedcomError>;
+    type Item = Result<StreamedRecord, GedcomError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.finished {
+        if self.done {
             return None;
         }
+        let next = self.read_next().transpose();
+        if !matches!(next, Some(Ok(_))) {
+            self.done = true;
+        }
+        next
+    }
+}
 
-        match self.read_next_record() {
-            Ok(Some(())) => match self.parse_record_text() {
-                Ok(record) => Some(Ok(record)),
-                Err(e) => {
-                    self.finished = true;
-                    Some(Err(e))
-                }
-            },
-            Ok(None) => {
-                self.finished = true;
-                None
+impl Extend<StreamedRecord> for Dataset {
+    /// Adds streamed records to the dataset: their texts move into its
+    /// store. The first header sets the dataset's version (an empty
+    /// dataset's) and becomes its header; another is kept in `extra`.
+    fn extend<I: IntoIterator<Item = StreamedRecord>>(&mut self, iter: I) {
+        for streamed in iter {
+            let StreamedRecord {
+                mut record,
+                store,
+                version,
+                ..
+            } = streamed;
+            {
+                let mut r = Relocation::new(&store, &mut self.store);
+                record.relocate(&mut r);
             }
-            Err(e) => {
-                self.finished = true;
-                Some(Err(e))
+            match record {
+                Record::Header(header) if self.header.is_some() => {
+                    let cx_version = self.version;
+                    let node = header_as_node(&header, &mut self.store, cx_version);
+                    self.extra.push(node);
+                }
+                Record::Header(header) => {
+                    if self.record_count() == 0 {
+                        self.version = version;
+                    }
+                    self.declared_version = header.declared_version(&self.store).map(Into::into);
+                    self.header = Some(*header);
+                }
+                other => self.push(other),
             }
         }
     }
 }
 
-/// Allows collecting stream records into a `GedcomData` structure.
-impl FromIterator<GedcomRecord> for GedcomData {
-    fn from_iter<I: IntoIterator<Item = GedcomRecord>>(iter: I) -> Self {
-        let mut data = GedcomData::default();
-        for record in iter {
-            match record {
-                GedcomRecord::Header(h) => data.header = Some(h),
-                GedcomRecord::Individual(i) => data.add_individual(i),
-                GedcomRecord::Family(f) => data.add_family(f),
-                GedcomRecord::Source(s) => data.add_source(s),
-                GedcomRecord::Repository(r) => data.add_repository(r),
-                GedcomRecord::Submitter(s) => data.add_submitter(s),
-                GedcomRecord::Submission(s) => data.add_submission(s),
-                GedcomRecord::Multimedia(m) => data.add_multimedia(m),
-                GedcomRecord::SharedNote(n) => data.add_shared_note(n),
-                GedcomRecord::CustomData(c) => data.add_custom_data(*c),
-            }
-        }
+/// A header the dataset has already one of, as an untyped record.
+fn header_as_node(
+    header: &crate::model::Header,
+    store: &mut Store,
+    version: GedcomVersion,
+) -> crate::model::Node {
+    let structure = RecordRef::Header(header).to_structure_in(store, version);
+    crate::model::Node::from_structure(&structure, store)
+}
+
+impl FromIterator<StreamedRecord> for Dataset {
+    fn from_iter<I: IntoIterator<Item = StreamedRecord>>(iter: I) -> Self {
+        let mut data = Dataset::default();
+        data.extend(iter);
         data
+    }
+}
+
+impl Relocate for Record {
+    fn relocate(&mut self, r: &mut Relocation<'_>) {
+        match self {
+            Record::Header(x) => x.relocate(r),
+            Record::Individual(x) => x.relocate(r),
+            Record::Family(x) => x.relocate(r),
+            Record::Source(x) => x.relocate(r),
+            Record::Repository(x) => x.relocate(r),
+            Record::Multimedia(x) => x.relocate(r),
+            Record::Submitter(x) => x.relocate(r),
+            Record::Submission(x) => x.relocate(r),
+            Record::Note(x) => x.relocate(r),
+            Record::Other(x) => x.relocate(r),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::BufReader;
+    use crate::model::RecordRef;
 
-    #[test]
-    fn test_stream_parser_basic() {
-        let gedcom = "0 HEAD\n1 GEDC\n2 VERS 5.5\n0 @I1@ INDI\n1 NAME John /Doe/\n0 TRLR";
-        let reader = BufReader::new(gedcom.as_bytes());
-        let parser = GedcomStreamParser::new(reader).unwrap();
-        let records: Vec<_> = parser.collect::<Result<Vec<_>, _>>().unwrap();
+    const FILE: &str = "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 NAME Ann /Example/\n1 NOTE a@@b\n2 CONC c\n1 _X y\n0 @F1@ FAM\n1 HUSB @I1@\n0 _LOC Here\n0 TRLR\n";
 
-        assert_eq!(records.len(), 2); // Header + Individual
-        assert!(records[0].is_header());
-        assert!(records[1].is_individual());
-    }
-
-    #[test]
-    fn test_stream_parser_multiple_records() {
-        let gedcom = "\
-            0 HEAD\n\
-            1 GEDC\n\
-            2 VERS 5.5\n\
-            0 @I1@ INDI\n\
-            1 NAME John /Doe/\n\
-            0 @I2@ INDI\n\
-            1 NAME Jane /Doe/\n\
-            0 @F1@ FAM\n\
-            1 HUSB @I1@\n\
-            1 WIFE @I2@\n\
-            0 TRLR";
-        let reader = BufReader::new(gedcom.as_bytes());
-        let parser = GedcomStreamParser::new(reader).unwrap();
-        let records: Vec<_> = parser.collect::<Result<Vec<_>, _>>().unwrap();
-
-        assert_eq!(records.len(), 4); // Header + 2 Individuals + 1 Family
-        assert!(records[0].is_header());
-        assert!(records[1].is_individual());
-        assert!(records[2].is_individual());
-        assert!(records[3].is_family());
-
-        // Check individual names
-        let indi1 = records[1].as_individual().unwrap();
-        assert_eq!(indi1.xref.as_deref(), Some("@I1@"));
-
-        let indi2 = records[2].as_individual().unwrap();
-        assert_eq!(indi2.xref.as_deref(), Some("@I2@"));
-    }
-
-    #[test]
-    fn test_stream_parser_collect_to_gedcom_data() {
-        let gedcom = "\
-            0 HEAD\n\
-            1 GEDC\n\
-            2 VERS 5.5\n\
-            0 @I1@ INDI\n\
-            1 NAME John /Doe/\n\
-            0 @F1@ FAM\n\
-            0 TRLR";
-        let reader = BufReader::new(gedcom.as_bytes());
-        let data: GedcomData = GedcomStreamParser::new(reader)
-            .unwrap()
-            .collect::<Result<GedcomData, _>>()
-            .unwrap();
-
-        assert!(data.header.is_some());
-        assert_eq!(data.individuals.len(), 1);
-        assert_eq!(data.families.len(), 1);
-    }
-
-    #[test]
-    fn test_stream_parser_reads_utf16() {
-        let text = "0 HEAD\r\n1 CHAR UNICODE\r\n0 @I1@ INDI\r\n1 NAME Zoë /Example/\r\n0 TRLR\r\n";
-        let mut bytes = vec![0xFF, 0xFE];
-        bytes.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
-        let parser = GedcomStreamParser::new(BufReader::new(bytes.as_slice())).unwrap();
-        assert_eq!(parser.encoding(), crate::GedcomEncoding::Utf16Le);
-        let data: GedcomData = parser.collect::<Result<_, _>>().unwrap();
-        assert_eq!(
-            data.individuals[0].names[0].value.as_deref(),
-            Some("Zoë /Example/")
-        );
-    }
-
-    #[test]
-    fn test_stream_parser_reads_cr_terminators_and_ansel() {
-        let bytes: &[u8] =
-            b"0 HEAD\r1 CHAR ANSEL\r\r0 @I1@ INDI\r1 NAME Ren\xE2ee /Example/\r0 TRLR\r";
-        let data: GedcomData = GedcomStreamParser::new(BufReader::new(bytes))
+    fn stream(bytes: &[u8]) -> Vec<StreamedRecord> {
+        GedcomStreamParser::new(bytes)
             .unwrap()
             .collect::<Result<_, _>>()
-            .unwrap();
-        assert_eq!(
-            data.individuals[0].names[0].value.as_deref(),
-            Some("Renée /Example/")
-        );
-    }
-
-    #[test]
-    fn test_stream_parser_missing_trlr() {
-        // File without TRLR should still work
-        let gedcom = "0 HEAD\n1 GEDC\n2 VERS 5.5\n0 @I1@ INDI\n1 NAME John /Doe/\n";
-        let reader = BufReader::new(gedcom.as_bytes());
-        let parser = GedcomStreamParser::new(reader).unwrap();
-        let records: Vec<_> = parser.collect::<Result<Vec<_>, _>>().unwrap();
-
-        assert_eq!(records.len(), 2);
-    }
-
-    #[test]
-    fn test_stream_parser_with_sources() {
-        let gedcom = "\
-            0 HEAD\n\
-            1 GEDC\n\
-            2 VERS 5.5\n\
-            0 @S1@ SOUR\n\
-            1 TITL Birth Certificate\n\
-            0 @R1@ REPO\n\
-            1 NAME Local Archives\n\
-            0 TRLR";
-        let reader = BufReader::new(gedcom.as_bytes());
-        let parser = GedcomStreamParser::new(reader).unwrap();
-        let records: Vec<_> = parser.collect::<Result<Vec<_>, _>>().unwrap();
-
-        assert_eq!(records.len(), 3); // Header + Source + Repository
-        assert!(records[1].as_source().is_some());
-        assert!(records[2].as_repository().is_some());
-    }
-
-    #[test]
-    fn test_gedcom_record_conversion_methods() {
-        let gedcom = "0 HEAD\n1 GEDC\n2 VERS 5.5\n0 @I1@ INDI\n0 TRLR";
-        let reader = BufReader::new(gedcom.as_bytes());
-        let records: Vec<_> = GedcomStreamParser::new(reader)
             .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-
-        // Test as_* methods
-        assert!(records[0].as_header().is_some());
-        assert!(records[0].as_individual().is_none());
-        assert!(records[1].as_individual().is_some());
-        assert!(records[1].as_header().is_none());
-
-        // Test is_* methods
-        assert!(records[0].is_header());
-        assert!(!records[0].is_individual());
-        assert!(records[1].is_individual());
-        assert!(!records[1].is_header());
     }
 
     #[test]
-    fn test_stream_parser_with_cont_conc() {
-        let gedcom = "\
-            0 HEAD\n\
-            1 GEDC\n\
-            2 VERS 5.5\n\
-            0 @I1@ INDI\n\
-            1 NAME John /Doe/\n\
-            1 NOTE This is a long note that spans\n\
-            2 CONT multiple lines using CONT\n\
-            2 CONC and CONC tags.\n\
-            0 TRLR";
-        let reader = BufReader::new(gedcom.as_bytes());
-        let parser = GedcomStreamParser::new(reader).unwrap();
-        let records: Vec<_> = parser.collect::<Result<Vec<_>, _>>().unwrap();
-
-        assert_eq!(records.len(), 2);
-        let indi = records[1].as_individual().unwrap();
-        assert!(!indi.notes.is_empty());
+    fn records_typed_one_at_a_time() {
+        let records = stream(FILE.as_bytes());
+        assert_eq!(records.len(), 4);
+        assert!(matches!(records[0].record(), RecordRef::Header(_)));
+        let RecordRef::Individual(indi) = records[1].record() else {
+            panic!()
+        };
+        assert_eq!(records[1].line(), 4);
+        assert_eq!(indi.full_name(&records[1]).as_deref(), Some("Ann Example"));
+        assert_eq!(records[1].store().tag(indi.extra[0].tag), "_X");
+        assert!(matches!(records[3].record(), RecordRef::Other(_)));
     }
 
     #[test]
-    fn test_stream_parser_empty_file() {
-        let gedcom = "";
-        let reader = BufReader::new(gedcom.as_bytes());
-        let parser = GedcomStreamParser::new(reader).unwrap();
-        let records: Vec<_> = parser.collect::<Result<Vec<_>, _>>().unwrap();
-
-        assert_eq!(records.len(), 0);
+    fn collected_equals_read_in_memory() {
+        let whole = Dataset::parse(FILE);
+        let collected: Dataset = stream(FILE.as_bytes()).into_iter().collect();
+        assert_eq!(collected.to_structures(), whole.to_structures());
+        assert_eq!(collected.version(), whole.version());
+        assert_eq!(collected.declared_version(), Some("5.5.1"));
+        let indi = collected.find_individual("@I1@").unwrap();
+        assert_eq!(collected.families_as_spouse(indi.xref).count(), 1);
     }
 
     #[test]
-    fn test_stream_parser_only_trlr() {
-        let gedcom = "0 TRLR\n";
-        let reader = BufReader::new(gedcom.as_bytes());
-        let parser = GedcomStreamParser::new(reader).unwrap();
-        let records: Vec<_> = parser.collect::<Result<Vec<_>, _>>().unwrap();
-
-        assert_eq!(records.len(), 0);
+    fn any_encoding_and_terminator() {
+        let utf16: Vec<u8> = [0xFF, 0xFE]
+            .into_iter()
+            .chain(
+                FILE.replace('\n', "\r")
+                    .encode_utf16()
+                    .flat_map(u16::to_le_bytes),
+            )
+            .collect();
+        let records = stream(&utf16);
+        assert_eq!(records.len(), 4);
+        let RecordRef::Individual(indi) = records[1].record() else {
+            panic!()
+        };
+        assert_eq!(indi.notes.len(), 1);
     }
 
     #[test]
-    fn test_stream_parser_custom_tag() {
-        let gedcom = "\
-            0 HEAD\n\
-            1 GEDC\n\
-            2 VERS 5.5\n\
-            0 _CUSTOM MyValue\n\
-            1 _SUB SubValue\n\
-            0 TRLR";
-        let reader = BufReader::new(gedcom.as_bytes());
-        let parser = GedcomStreamParser::new(reader).unwrap();
-        let records: Vec<_> = parser.collect::<Result<Vec<_>, _>>().unwrap();
+    fn nodes_after_typed_records() {
+        let mut parser = GedcomStreamParser::new(FILE.as_bytes()).unwrap();
+        assert!(parser.next().is_some());
+        let rest: Vec<_> = parser.nodes().collect::<Result<_, _>>().unwrap();
+        let tags: Vec<_> = rest.iter().map(|s| s.tag.as_str().to_string()).collect();
+        assert_eq!(tags, ["INDI", "FAM", "_LOC", "TRLR"]);
+        assert_eq!(rest[0].first("NOTE").unwrap().text(), Some("a@bc"));
+    }
 
-        assert_eq!(records.len(), 2); // Header + Custom
-        if let GedcomRecord::CustomData(c) = &records[1] {
-            assert_eq!(c.tag, "_CUSTOM");
-            assert_eq!(c.value.as_deref(), Some("MyValue"));
-        } else {
-            panic!("Expected CustomData");
+    #[test]
+    fn empty_and_trailer_only() {
+        assert!(stream(b"").is_empty());
+        assert!(stream(b"0 TRLR\n").is_empty());
+    }
+
+    #[test]
+    fn io_errors_end_the_stream() {
+        struct Failing;
+        impl std::io::Read for Failing {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("broken"))
+            }
         }
+        let parser = GedcomStreamParser::new(std::io::BufReader::new(Failing));
+        assert!(matches!(parser, Err(GedcomError::Io(_))));
     }
 }

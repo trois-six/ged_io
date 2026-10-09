@@ -1,43 +1,45 @@
-//! No input may make any entry point panic or hang: every reader (bytes,
-//! text, the deprecated `Gedcom`, streaming, GEDZIP), version detection,
-//! reference validation, the writer in both versions followed by a re-read,
-//! JSON, `Debug`/`Display`, the indexed view, and the date, age and time
+//! No input may make any entry point panic or hang: every reader (text,
+//! bytes, strict mode, a reader, streaming, GEDZIP), version detection,
+//! reference queries, the writer in every version followed by a re-read,
+//! `Debug`, the indexed view, navigation, and the date, age and time
 //! grammars with their conversions between versions and calendars.
 #![no_main]
 
-use ged_io::types::age::{Age, AgeValue};
-use ged_io::types::date::{Calendar, Date, DateExact, DatePeriod, DateValue, Time};
-use ged_io::{GedcomBuilder, GedcomVersion, GedcomWriter};
+use ged_io::model::{Age, Dataset, Date};
+use ged_io::value::{AgeValue, Calendar, DateExact, DatePeriod, DateValue, Time};
+use ged_io::{GedcomBuilder, GedcomVersion, GedcomWriter, IndexedDataset};
 use libfuzzer_sys::fuzz_target;
+
+const VERSIONS: [GedcomVersion; 3] = [
+    GedcomVersion::V5_5_1,
+    GedcomVersion::V7_0,
+    GedcomVersion::V7_1,
+];
 
 /// Every grammar, strict and lenient, every conversion, on one payload.
 fn values(text: &str) {
-    let date = Date {
-        value: Some(text.to_string()),
-        time: Some(text.to_string()),
-        phrase: None,
-    };
-    let age = Age {
-        value: Some(text.to_string()),
-        phrase: None,
-    };
+    let store = Dataset::default();
+    let mut date = Date::new(text);
+    date.detail_mut().time = Some(text.into());
+    let age = Age::new(text);
     let value = DateValue::parse(text);
-    for version in [GedcomVersion::V5_5_1, GedcomVersion::V7_0] {
-        let _ = DateValue::parse_strict(text, version.clone());
-        let _ = DatePeriod::parse_strict(text, version.clone());
-        let _ = DateExact::parse_strict(text, version.clone());
-        let _ = Time::parse_strict(text, version.clone());
-        let _ = AgeValue::parse_strict(text, version.clone());
-        let _ = value.to_gedcom(version.clone());
-        let _ = date.to_version(version.clone()).normalize(version.clone());
-        let _ = age.to_version(version.clone());
+    for version in VERSIONS {
+        let _ = DateValue::parse_strict(text, version);
+        let _ = DatePeriod::parse_strict(text, version);
+        let _ = DateExact::parse_strict(text, version);
+        let _ = Time::parse_strict(text, version);
+        let _ = AgeValue::parse_strict(text, version);
+        let _ = value.to_gedcom(version);
+        let _ = date.to_version(&store, version).normalize(&store, version);
+        let _ = date.datetime(&store);
+        let _ = age.to_version(&store, version);
         for calendar in [
             Calendar::Gregorian,
             Calendar::Julian,
             Calendar::Hebrew,
             Calendar::FrenchRepublican,
         ] {
-            let _ = date.convert_to(&calendar, version.clone());
+            let _ = date.convert_to(&store, &calendar, version);
         }
     }
     for date in value.dates() {
@@ -49,41 +51,59 @@ fn values(text: &str) {
     let _ = AgeValue::parse(text);
 }
 
-fuzz_target!(|data: &[u8]| {
-    if let Ok(d) = GedcomBuilder::new().build_from_bytes(data) {
-        for version in ["5.5.1", "7.0"] {
-            if let Ok(out) = GedcomWriter::new()
-                .gedcom_version(ged_io::GedcomVersion::from_version_str(version))
-                .write_to_string(&d)
-            {
-                let _ = GedcomBuilder::new().build_from_str(&out);
-            }
-        }
-        let _ = format!("{d:?}");
-        let _ = format!("{d}");
-        let _ = serde_json::to_string(&d);
-        let indexed = ged_io::indexed::IndexedGedcomData::from(d);
-        let _ = indexed.find_individual("@I1@");
+/// The dataset-level queries, plain and indexed.
+fn queries(data: Dataset) {
+    let _ = format!("{data:?}");
+    let _ = serde_json::to_string(&data.to_structures());
+    let _ = data.dangling_references();
+    let _ = data.search_individuals("a").count();
+    for indi in data.individuals.iter().take(16) {
+        let _ = indi.full_name(&data);
+        let _ = data.families_as_spouse(indi.xref).count();
+        let _ = data.families_as_child(indi.xref).count();
     }
+    for family in data.families.iter().take(16) {
+        let _ = data.parents(family).count();
+        let _ = data.children(family).count();
+    }
+    let indexed = IndexedDataset::new(data);
+    let _ = indexed.find("@I1@");
+    for indi in indexed.individuals.iter().take(16) {
+        let _ = indexed.families_as_spouse(indi.xref).count();
+        let _ = indexed.families_as_child(indi.xref).count();
+    }
+}
+
+fuzz_target!(|data: &[u8]| {
+    let d = Dataset::from_bytes(data);
+    for version in VERSIONS {
+        if let Ok(out) = GedcomWriter::new()
+            .gedcom_version(version)
+            .write_to_string(&d)
+        {
+            let _ = GedcomBuilder::new().strict(true).build_from_str(out);
+        }
+    }
+    queries(d);
+    let _ = GedcomBuilder::new().strict(true).build_from_bytes(data);
     let _ = GedcomBuilder::new()
-        .validate_references(true)
-        .build_from_bytes(data);
+        .max_file_size(64)
+        .build_from_reader(data);
     if let Ok(text) = std::str::from_utf8(data) {
         let _ = GedcomBuilder::new().build_from_str(text);
-        let _ = ged_io::detect_version(text);
+        let _ = ged_io::version::detect_version(text);
         // Each line's payload, after its level and tag, and the whole text.
         for line in text.lines().take(64) {
             values(line.splitn(3, ' ').nth(2).unwrap_or(line));
         }
         values(text);
-        if let Ok(mut g) = ged_io::Gedcom::new(text.chars()) {
-            let _ = g.parse_data();
-        }
     }
-    if let Ok(parser) = ged_io::GedcomStreamParser::new(std::io::Cursor::new(data)) {
-        for record in parser.take(10_000) {
-            let _ = record;
-        }
+    if let Ok(parser) = ged_io::GedcomStreamParser::new(data) {
+        let streamed: Dataset = parser.take(10_000).filter_map(Result::ok).collect();
+        let _ = streamed.dangling_references();
+    }
+    if let Ok(parser) = ged_io::GedcomStreamParser::new(data) {
+        let _ = parser.nodes().take(10_000).count();
     }
     let _ = ged_io::gedzip::read_gedzip(data);
 });

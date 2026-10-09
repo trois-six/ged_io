@@ -1,638 +1,214 @@
-//! Builder pattern implementation for configuring GEDCOM parsing.
-//!
-//! The `GedcomBuilder` provides a fluent API for configuring how GEDCOM files
-//! are parsed, offering fine-grained control over parsing behavior, validation,
-//! and error handling.
-//!
-//! # Example
+//! Reading a dataset with options: a size limit, strict mode, a given
+//! encoding, a reader or a GEDZIP archive.
 //!
 //! ```rust
 //! use ged_io::GedcomBuilder;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let source = "0 HEAD\n1 GEDC\n2 VERS 5.5\n0 TRLR";
-//! let gedcom_data = GedcomBuilder::new()
-//!     .strict_mode(false)
-//!     .validate_references(true)
-//!     .build_from_str(source)?;
-//!
-//! println!("Parsed {} individuals", gedcom_data.individuals.len());
+//! let text = "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 NAME Ann /Example/\n0 TRLR\n";
+//! let data = GedcomBuilder::new().max_file_size(50_000_000).build_from_str(text)?;
+//! assert_eq!(data.individuals[0].full_name(&data).as_deref(), Some("Ann Example"));
 //! # Ok(())
 //! # }
 //! ```
 
-use crate::{
-    encoding::{decode, decode_as, GedcomEncoding},
-    tokenizer::Tokenizer,
-    types::GedcomData,
-    GedcomError,
-};
+use std::io::Read;
 
-/// Configuration options for GEDCOM parsing.
+use crate::encoding::{decode_as, decode_owned, GedcomEncoding};
+use crate::model::Dataset;
+use crate::spec::{validate_bytes, validate_text, Deviation};
+use crate::GedcomError;
+
+/// Reads datasets, with options.
 ///
-/// This struct holds all configuration settings that affect how the parser
-/// processes GEDCOM data. It is used internally by `GedcomBuilder`.
-#[allow(clippy::struct_excessive_bools)]
-#[derive(Debug, Clone)]
-pub struct ParserConfig {
-    /// When true, the parser will fail on any non-standard or unknown tags.
-    /// When false, unknown tags are skipped or stored as custom data.
-    pub strict_mode: bool,
-
-    /// When true, the parser validates that all cross-references (xrefs)
-    /// point to existing records.
-    pub validate_references: bool,
-
-    /// When true, unknown/unrecognized tags are silently ignored.
-    /// When false, they may be stored as custom data or cause errors (depending on `strict_mode`).
-    pub ignore_unknown_tags: bool,
-
-    /// When true, the parser attempts to auto-detect the character encoding.
-    /// When false, UTF-8 is assumed.
-    pub encoding_detection: bool,
-
-    /// When true, dates are validated for proper GEDCOM format.
-    /// When false, dates are stored as-is without validation.
-    pub date_validation: bool,
-
-    /// Optional maximum file size in bytes. If set, files exceeding this size
-    /// will cause an error before parsing begins.
-    pub max_file_size: Option<usize>,
-
-    /// When true, original spacing and formatting in text values is preserved.
-    /// When false, text may be normalized.
-    pub preserve_formatting: bool,
-}
-
-impl Default for ParserConfig {
-    fn default() -> Self {
-        Self {
-            strict_mode: false,
-            validate_references: false,
-            ignore_unknown_tags: false,
-            encoding_detection: false,
-            date_validation: false,
-            max_file_size: None,
-            preserve_formatting: true,
-        }
-    }
-}
-
-/// A builder for creating and configuring a GEDCOM parser.
+/// By default reading is lenient and has no limit: any input is read, its
+/// data kept, and only I/O can fail. Options:
 ///
-/// `GedcomBuilder` provides a fluent interface for setting parsing options
-/// before processing GEDCOM data. This allows users to customize parsing
-/// behavior without breaking backward compatibility with the existing API.
+/// - [`max_file_size`](Self::max_file_size) refuses an input larger than a
+///   limit before reading it;
+/// - [`strict`](Self::strict) refuses an input that does not follow the
+///   specification of the version it declares, with every deviation
+///   ([`crate::spec::validate_bytes`]); what strict mode accepts reads
+///   exactly as leniently.
 ///
-/// # Example
-///
-/// ```rust
-/// use ged_io::GedcomBuilder;
-///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let source = "0 HEAD\n1 GEDC\n2 VERS 5.5\n0 TRLR";
-///
-/// // Basic usage with defaults
-/// let data = GedcomBuilder::new()
-///     .build_from_str(source)?;
-///
-/// // With custom configuration
-/// let data = GedcomBuilder::new()
-///     .strict_mode(true)
-///     .validate_references(true)
-///     .build_from_str(source)?;
-/// # Ok(())
-/// # }
-/// ```
-#[derive(Debug, Clone, Default)]
+/// A builder is cheap to clone and reusable.
+#[derive(Clone, Debug, Default)]
 pub struct GedcomBuilder {
-    config: ParserConfig,
+    strict: bool,
+    max_file_size: Option<usize>,
 }
 
 impl GedcomBuilder {
-    /// Creates a new `GedcomBuilder` with default configuration.
-    ///
-    /// Default settings:
-    /// - `strict_mode`: false
-    /// - `validate_references`: false
-    /// - `ignore_unknown_tags`: false
-    /// - `encoding_detection`: false
-    /// - `date_validation`: false
-    /// - `max_file_size`: None (unlimited)
-    /// - `preserve_formatting`: true
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use ged_io::GedcomBuilder;
-    ///
-    /// let builder = GedcomBuilder::new();
-    /// ```
+    /// A builder that reads leniently, without limit.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            config: ParserConfig::default(),
+        Self::default()
+    }
+
+    /// Whether to refuse an input that does not follow its specification
+    /// (default: no).
+    ///
+    /// In strict mode, reading runs the validator of [`crate::spec`] on the
+    /// input — its encoding, its lines, its structures, its pointers — and
+    /// fails with [`GedcomError::NonConformant`] and every deviation found.
+    ///
+    /// ```rust
+    /// use ged_io::{GedcomBuilder, GedcomError};
+    ///
+    /// let text = "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 SEX male\n0 TRLR\n";
+    /// assert!(GedcomBuilder::new().build_from_str(text).is_ok());
+    /// let Err(GedcomError::NonConformant(deviations)) =
+    ///     GedcomBuilder::new().strict(true).build_from_str(text)
+    /// else {
+    ///     panic!()
+    /// };
+    /// assert_eq!(deviations[0].to_string(), "line 5: SEX \"male\": not a value of enumset-SEX");
+    /// ```
+    #[must_use]
+    pub fn strict(mut self, enabled: bool) -> Self {
+        self.strict = enabled;
+        self
+    }
+
+    /// Refuses an input larger than `bytes` with
+    /// [`GedcomError::FileTooLarge`], before reading it (default: no
+    /// limit). For a GEDZIP archive, the limit applies to its `gedcom.ged`.
+    #[must_use]
+    pub fn max_file_size(mut self, bytes: usize) -> Self {
+        self.max_file_size = Some(bytes);
+        self
+    }
+
+    /// Whether strict mode is on.
+    #[must_use]
+    pub fn is_strict(&self) -> bool {
+        self.strict
+    }
+
+    /// The size limit, if any.
+    #[must_use]
+    pub fn file_size_limit(&self) -> Option<usize> {
+        self.max_file_size
+    }
+
+    fn check_size(&self, size: usize) -> Result<(), GedcomError> {
+        match self.max_file_size {
+            Some(max) if size > max => Err(GedcomError::FileTooLarge { size, max }),
+            _ => Ok(()),
         }
     }
 
-    /// Enables or disables strict parsing mode.
-    ///
-    /// When strict mode is enabled, the parser will fail on any non-standard
-    /// tags or structural issues. When disabled (default), the parser is more
-    /// lenient and will attempt to continue parsing despite minor issues.
-    ///
-    /// # Arguments
-    ///
-    /// * `enabled` - Whether to enable strict mode
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use ged_io::GedcomBuilder;
-    ///
-    /// let builder = GedcomBuilder::new()
-    ///     .strict_mode(true);
-    /// ```
-    #[must_use]
-    pub fn strict_mode(mut self, enabled: bool) -> Self {
-        self.config.strict_mode = enabled;
-        self
+    fn check(&self, deviations: impl FnOnce() -> Vec<Deviation>) -> Result<(), GedcomError> {
+        if !self.strict {
+            return Ok(());
+        }
+        let deviations = deviations();
+        if deviations.is_empty() {
+            Ok(())
+        } else {
+            Err(GedcomError::NonConformant(deviations.into()))
+        }
     }
 
-    /// Enables or disables cross-reference validation.
-    ///
-    /// When enabled, the parser will validate that all cross-references (xrefs)
-    /// in the GEDCOM file point to existing records. This is useful for
-    /// detecting broken references but may slow down parsing.
-    ///
-    /// # Arguments
-    ///
-    /// * `enabled` - Whether to validate references
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use ged_io::GedcomBuilder;
-    ///
-    /// let builder = GedcomBuilder::new()
-    ///     .validate_references(true);
-    /// ```
-    #[must_use]
-    pub fn validate_references(mut self, enabled: bool) -> Self {
-        self.config.validate_references = enabled;
-        self
-    }
-
-    /// Enables or disables ignoring unknown tags.
-    ///
-    /// When enabled, unknown or unrecognized GEDCOM tags will be silently
-    /// ignored during parsing. When disabled, unknown tags may be stored
-    /// as custom data or cause errors (depending on `strict_mode` setting).
-    ///
-    /// # Arguments
-    ///
-    /// * `enabled` - Whether to ignore unknown tags
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use ged_io::GedcomBuilder;
-    ///
-    /// let builder = GedcomBuilder::new()
-    ///     .ignore_unknown_tags(true);
-    /// ```
-    #[must_use]
-    pub fn ignore_unknown_tags(mut self, enabled: bool) -> Self {
-        self.config.ignore_unknown_tags = enabled;
-        self
-    }
-
-    /// Enables or disables automatic encoding detection.
-    ///
-    /// When enabled, the parser will attempt to auto-detect the character
-    /// encoding of the GEDCOM file from the header or BOM. When disabled,
-    /// UTF-8 encoding is assumed.
-    ///
-    /// # Arguments
-    ///
-    /// * `enabled` - Whether to auto-detect encoding
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use ged_io::GedcomBuilder;
-    ///
-    /// let builder = GedcomBuilder::new()
-    ///     .encoding_detection(true);
-    /// ```
-    #[must_use]
-    pub fn encoding_detection(mut self, enabled: bool) -> Self {
-        self.config.encoding_detection = enabled;
-        self
-    }
-
-    /// Enables or disables date format validation.
-    ///
-    /// When enabled, the parser will validate that date values conform to
-    /// the GEDCOM date format specification. Invalid dates will cause errors.
-    /// When disabled (default), dates are stored as-is without validation.
-    ///
-    /// # Arguments
-    ///
-    /// * `enabled` - Whether to validate dates
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use ged_io::GedcomBuilder;
-    ///
-    /// let builder = GedcomBuilder::new()
-    ///     .date_validation(true);
-    /// ```
-    #[must_use]
-    pub fn date_validation(mut self, enabled: bool) -> Self {
-        self.config.date_validation = enabled;
-        self
-    }
-
-    /// Sets a maximum file size limit for parsing.
-    ///
-    /// When set, the parser will return an error if the input exceeds
-    /// the specified size in bytes. This can be used as a safety measure
-    /// to prevent parsing extremely large files.
-    ///
-    /// # Arguments
-    ///
-    /// * `size` - Maximum file size in bytes
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use ged_io::GedcomBuilder;
-    ///
-    /// // Limit to 10 MB
-    /// let builder = GedcomBuilder::new()
-    ///     .max_file_size(10 * 1024 * 1024);
-    /// ```
-    #[must_use]
-    pub fn max_file_size(mut self, size: usize) -> Self {
-        self.config.max_file_size = Some(size);
-        self
-    }
-
-    /// Enables or disables preservation of original formatting.
-    ///
-    /// When enabled (default), original spacing and formatting in text
-    /// values is preserved. When disabled, text may be normalized
-    /// (e.g., collapsing multiple spaces).
-    ///
-    /// # Arguments
-    ///
-    /// * `enabled` - Whether to preserve formatting
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use ged_io::GedcomBuilder;
-    ///
-    /// let builder = GedcomBuilder::new()
-    ///     .preserve_formatting(false);
-    /// ```
-    #[must_use]
-    pub fn preserve_formatting(mut self, enabled: bool) -> Self {
-        self.config.preserve_formatting = enabled;
-        self
-    }
-
-    /// Returns a reference to the current parser configuration.
-    ///
-    /// This can be used to inspect the configuration before building.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use ged_io::GedcomBuilder;
-    ///
-    /// let builder = GedcomBuilder::new().strict_mode(true);
-    /// assert!(builder.config().strict_mode);
-    /// ```
-    #[must_use]
-    pub fn config(&self) -> &ParserConfig {
-        &self.config
-    }
-
-    /// Parses decoded GEDCOM text, with any line terminators. Unlike
-    /// [`build_from_str`](Self::build_from_str), it does not check
-    /// `max_file_size`.
-    ///
-    /// This method consumes the builder and returns the parsed `GedcomData`
-    /// or an error if parsing fails.
+    /// Reads decoded text. A `String` is kept as the dataset's store,
+    /// without a copy.
     ///
     /// # Errors
     ///
-    /// Returns a `GedcomError` if:
-    /// - The GEDCOM data is malformed
-    /// - Validation fails (when strict mode or validation options are enabled)
+    /// [`GedcomError::FileTooLarge`] over the limit; in strict mode,
+    /// [`GedcomError::NonConformant`].
+    pub fn build_from_str(&self, text: impl Into<String>) -> Result<Dataset, GedcomError> {
+        let text = text.into();
+        self.check_size(text.len())?;
+        self.check(|| validate_text(&text))?;
+        Ok(Dataset::parse(text))
+    }
+
+    /// Reads bytes, decoded by the evidence they hold and their `HEAD.CHAR`
+    /// (see [`crate::encoding`]); never fails to decode. A `Vec<u8>` of
+    /// UTF-8 becomes the dataset's store without a copy.
     ///
-    /// # Example
+    /// # Errors
+    ///
+    /// [`GedcomError::FileTooLarge`] over the limit; in strict mode,
+    /// [`GedcomError::NonConformant`] (an encoding that contradicts the
+    /// declared one included).
     ///
     /// ```rust
     /// use ged_io::GedcomBuilder;
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// let source = "0 HEAD\n1 GEDC\n2 VERS 5.5\n0 TRLR";
     /// let data = GedcomBuilder::new()
-    ///     .strict_mode(false)
-    ///     .build(source)?;
+    ///     .build_from_bytes(b"0 HEAD\r1 CHAR ANSI\r0 @I1@ INDI\r1 NAME Ren\xE9e /Example/\r0 TRLR\r")?;
+    /// assert_eq!(data.individuals[0].full_name(&data).as_deref(), Some("Renée Example"));
     /// # Ok(())
     /// # }
     /// ```
-    pub fn build(self, text: &str) -> Result<GedcomData, GedcomError> {
-        // Every line terminator becomes LF and blank lines go, so that the
-        // token-based parser reads CR-only, mixed and spaced-out files.
-        let text = crate::tree::normalize_eol(text);
-        let mut tokenizer = Tokenizer::new(text.chars()).for_version(crate::detect_version(&text));
-        tokenizer.next_token()?;
-
-        let data = GedcomData::new(&mut tokenizer, 0)?;
-
-        // Post-parse validation if enabled
-        if self.config.validate_references {
-            self.validate_references_internal(&data)?;
-        }
-
-        Ok(data)
+    pub fn build_from_bytes(&self, bytes: impl Into<Vec<u8>>) -> Result<Dataset, GedcomError> {
+        let bytes = bytes.into();
+        self.check_size(bytes.len())?;
+        self.check(|| validate_bytes(&bytes))?;
+        Ok(Dataset::parse(decode_owned(bytes).text))
     }
 
-    /// Builds the parser and parses the GEDCOM data from raw bytes.
-    ///
-    /// The bytes may use any encoding a GEDCOM file is found in: UTF-8 or
-    /// UTF-16 (with or without a byte order mark), ANSEL, ASCII, Windows-1252
-    /// (`CHAR ANSI`), ISO-8859-1, ISO-8859-15, IBM PC or Macintosh. Decoding
-    /// never fails; see [`crate::encoding`] for how the encoding is chosen.
-    ///
-    /// # Arguments
-    ///
-    /// * `bytes` - The raw bytes of the GEDCOM file
+    /// Reads bytes in a given encoding, whatever they declare (see
+    /// [`crate::encoding::decode_as`]).
     ///
     /// # Errors
     ///
-    /// Returns a `GedcomError` if:
-    /// - The input exceeds `max_file_size`
-    /// - The GEDCOM data is malformed
-    /// - Validation fails (when strict mode or validation options are enabled)
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use ged_io::GedcomBuilder;
-    ///
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// // Read file as bytes to handle any encoding
-    /// let bytes = b"0 HEAD\n1 GEDC\n2 VERS 5.5\n1 CHAR UTF-8\n0 TRLR";
-    /// let data = GedcomBuilder::new()
-    ///     .build_from_bytes(bytes)?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn build_from_bytes(self, bytes: &[u8]) -> Result<GedcomData, GedcomError> {
-        // Check file size limit if configured
-        if let Some(max_size) = self.config.max_file_size {
-            let size = bytes.len();
-            if size > max_size {
-                return Err(GedcomError::FileSizeLimitExceeded { size, max_size });
-            }
-        }
-
-        let content = decode(bytes).text;
-        self.build(&content)
-    }
-
-    /// Builds the parser and parses the GEDCOM data from raw bytes with a specific encoding.
-    ///
-    /// Use this method when you know the encoding of the file and want to skip
-    /// auto-detection. Decoding never fails (see [`crate::encoding::decode_as`]).
-    ///
-    /// # Arguments
-    ///
-    /// * `bytes` - The raw bytes of the GEDCOM file
-    /// * `encoding` - The encoding to use for decoding
-    ///
-    /// # Errors
-    ///
-    /// Returns a `GedcomError` if:
-    /// - The input exceeds `max_file_size`
-    /// - The GEDCOM data is malformed
-    /// - Validation fails (when strict mode or validation options are enabled)
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use ged_io::{GedcomBuilder, GedcomEncoding};
-    ///
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// let bytes = b"0 HEAD\n1 GEDC\n2 VERS 5.5\n0 TRLR";
-    /// let data = GedcomBuilder::new()
-    ///     .build_from_bytes_with_encoding(bytes, GedcomEncoding::Utf8)?;
-    /// # Ok(())
-    /// # }
-    /// ```
+    /// As [`build_from_str`](Self::build_from_str).
     pub fn build_from_bytes_with_encoding(
-        self,
+        &self,
         bytes: &[u8],
         encoding: GedcomEncoding,
-    ) -> Result<GedcomData, GedcomError> {
-        // Check file size limit if configured
-        if let Some(max_size) = self.config.max_file_size {
-            let size = bytes.len();
-            if size > max_size {
-                return Err(GedcomError::FileSizeLimitExceeded { size, max_size });
-            }
-        }
-
-        let content = decode_as(bytes, encoding);
-        self.build(&content)
+    ) -> Result<Dataset, GedcomError> {
+        self.check_size(bytes.len())?;
+        let text = decode_as(bytes, encoding);
+        self.check(|| validate_text(&text))?;
+        Ok(Dataset::parse(text))
     }
 
-    /// Builds the parser and parses the GEDCOM data from a string.
-    ///
-    /// This is a convenience method that accepts a string slice directly.
-    ///
-    /// # Arguments
-    ///
-    /// * `content` - The GEDCOM content as a string slice
+    /// Reads everything `reader` gives, as
+    /// [`build_from_bytes`](Self::build_from_bytes) reads bytes. With a
+    /// size limit, no more than the limit is read.
     ///
     /// # Errors
     ///
-    /// Returns a `GedcomError` if:
-    /// - The GEDCOM data is malformed
-    /// - Validation fails (when strict mode or validation options are enabled)
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use ged_io::GedcomBuilder;
-    ///
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// let source = "0 HEAD\n1 GEDC\n2 VERS 5.5\n0 TRLR";
-    /// let data = GedcomBuilder::new()
-    ///     .build_from_str(source)?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn build_from_str(self, content: &str) -> Result<GedcomData, GedcomError> {
-        // Check file size limit if configured
-        if let Some(max_size) = self.config.max_file_size {
-            let size = content.len();
-            if size > max_size {
-                return Err(GedcomError::FileSizeLimitExceeded { size, max_size });
-            }
-        }
-
-        self.build(content)
+    /// [`GedcomError::Io`] when `reader` fails, otherwise as
+    /// [`build_from_bytes`](Self::build_from_bytes).
+    pub fn build_from_reader(&self, reader: impl Read) -> Result<Dataset, GedcomError> {
+        let mut bytes = Vec::new();
+        // Past the limit by one byte at most: enough to refuse the input.
+        let limit = self.max_file_size.map_or(u64::MAX, |max| {
+            u64::try_from(max).unwrap_or(u64::MAX).saturating_add(1)
+        });
+        reader.take(limit).read_to_end(&mut bytes)?;
+        self.build_from_bytes(bytes)
     }
 
-    /// Builds the parser and parses the GEDCOM data from a GEDZIP archive.
-    ///
-    /// This method reads a GEDZIP file (ZIP archive containing `gedcom.ged`)
-    /// and parses the GEDCOM data from it. GEDZIP is the standard format for
-    /// bundling GEDCOM 7.0 datasets with associated media files.
-    ///
-    /// Requires the `gedzip` feature to be enabled.
-    ///
-    /// # Arguments
-    ///
-    /// * `bytes` - The raw bytes of the GEDZIP file
-    ///
-    /// # Errors
-    ///
-    /// Returns a `GedcomError` if:
-    /// - The bytes are not a valid ZIP archive
-    /// - The archive does not contain a `gedcom.ged` file
-    /// - The GEDCOM data is malformed
-    /// - Validation fails (when strict mode or validation options are enabled)
-    ///
-    /// # Example
+    /// Reads the dataset of a GEDZIP archive (its `gedcom.ged`), as
+    /// [`build_from_bytes`](Self::build_from_bytes) reads bytes.
     ///
     /// ```rust,no_run
-    /// # #[cfg(feature = "gedzip")]
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// use ged_io::GedcomBuilder;
     ///
-    /// let bytes = std::fs::read("family.gdz")?;
-    /// let data = GedcomBuilder::new()
-    ///     .build_from_gedzip(&bytes)?;
-    /// println!("Found {} individuals", data.individuals.len());
+    /// let data = GedcomBuilder::new().build_from_gedzip(std::fs::File::open("family.gdz")?)?;
+    /// println!("{} individuals", data.individuals.len());
     /// # Ok(())
     /// # }
-    /// # #[cfg(not(feature = "gedzip"))]
-    /// # fn main() {}
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`GedcomError::Gedzip`] when the archive cannot be read or has no
+    /// `gedcom.ged`; otherwise as [`build_from_bytes`](Self::build_from_bytes).
     #[cfg(feature = "gedzip")]
-    pub fn build_from_gedzip(self, bytes: &[u8]) -> Result<GedcomData, GedcomError> {
-        use crate::gedzip::GedzipReader;
-
-        let cursor = std::io::Cursor::new(bytes);
-        let mut reader = GedzipReader::new(cursor)
-            .map_err(|e| GedcomError::InvalidFormat(format!("Invalid GEDZIP archive: {e}")))?;
-
-        let gedcom_bytes = reader
-            .read_gedcom_bytes()
-            .map_err(|e| GedcomError::InvalidFormat(format!("Failed to read gedcom.ged: {e}")))?;
-
-        // Check file size limit if configured
-        if let Some(max_size) = self.config.max_file_size {
-            let size = gedcom_bytes.len();
-            if size > max_size {
-                return Err(GedcomError::FileSizeLimitExceeded { size, max_size });
-            }
-        }
-
-        self.build_from_bytes(&gedcom_bytes)
-    }
-
-    /// Validates that all cross-references point to existing records.
-    #[allow(clippy::unused_self)]
-    fn validate_references_internal(&self, data: &GedcomData) -> Result<(), GedcomError> {
-        use std::collections::HashSet;
-
-        // Collect all xrefs
-        let mut xrefs: HashSet<&str> = HashSet::new();
-
-        for individual in &data.individuals {
-            if let Some(ref xref) = individual.xref {
-                xrefs.insert(xref.as_str());
-            }
-        }
-
-        for family in &data.families {
-            if let Some(ref xref) = family.xref {
-                xrefs.insert(xref.as_str());
-            }
-        }
-
-        for source in &data.sources {
-            if let Some(ref xref) = source.xref {
-                xrefs.insert(xref.as_str());
-            }
-        }
-
-        for repo in &data.repositories {
-            if let Some(ref xref) = repo.xref {
-                xrefs.insert(xref.as_str());
-            }
-        }
-
-        for submitter in &data.submitters {
-            if let Some(ref xref) = submitter.xref {
-                xrefs.insert(xref.as_str());
-            }
-        }
-
-        for multimedia in &data.multimedia {
-            if let Some(ref xref) = multimedia.xref {
-                xrefs.insert(xref.as_str());
-            }
-        }
-
-        // Validate family references
-        for family in &data.families {
-            if let Some(ref husb) = family.individual1 {
-                if !xrefs.contains(husb.as_str()) {
-                    return Err(GedcomError::InvalidFormat(format!(
-                        "Family references non-existent individual: {husb}"
-                    )));
-                }
-            }
-            if let Some(ref wife) = family.individual2 {
-                if !xrefs.contains(wife.as_str()) {
-                    return Err(GedcomError::InvalidFormat(format!(
-                        "Family references non-existent individual: {wife}"
-                    )));
-                }
-            }
-            for child in &family.children {
-                if !xrefs.contains(child.as_str()) {
-                    return Err(GedcomError::InvalidFormat(format!(
-                        "Family references non-existent child: {child}"
-                    )));
-                }
-            }
-        }
-
-        // Validate individual family links
-        for individual in &data.individuals {
-            for family_link in &individual.families {
-                if !xrefs.contains(family_link.xref.as_str()) {
-                    return Err(GedcomError::InvalidFormat(format!(
-                        "Individual references non-existent family: {}",
-                        family_link.xref
-                    )));
-                }
-            }
-        }
-
-        Ok(())
+    pub fn build_from_gedzip<R: Read + std::io::Seek>(
+        &self,
+        archive: R,
+    ) -> Result<Dataset, GedcomError> {
+        crate::gedzip::GedzipReader::new(archive)?.read_dataset(self)
     }
 }
 
@@ -640,138 +216,65 @@ impl GedcomBuilder {
 mod tests {
     use super::*;
 
+    const TEXT: &str = "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 NAME Ann /Example/\n0 TRLR\n";
+
     #[test]
-    fn test_builder_default() {
+    fn defaults() {
         let builder = GedcomBuilder::new();
-        assert!(!builder.config().strict_mode);
-        assert!(!builder.config().validate_references);
-        assert!(!builder.config().ignore_unknown_tags);
-        assert!(!builder.config().encoding_detection);
-        assert!(!builder.config().date_validation);
-        assert!(builder.config().max_file_size.is_none());
-        assert!(builder.config().preserve_formatting);
-    }
-
-    #[test]
-    fn test_builder_fluent_api() {
-        let builder = GedcomBuilder::new()
-            .strict_mode(true)
-            .validate_references(true)
-            .ignore_unknown_tags(true)
-            .encoding_detection(true)
-            .date_validation(true)
-            .max_file_size(1_000_000)
-            .preserve_formatting(false);
-
-        assert!(builder.config().strict_mode);
-        assert!(builder.config().validate_references);
-        assert!(builder.config().ignore_unknown_tags);
-        assert!(builder.config().encoding_detection);
-        assert!(builder.config().date_validation);
-        assert_eq!(builder.config().max_file_size, Some(1_000_000));
-        assert!(!builder.config().preserve_formatting);
-    }
-
-    #[test]
-    fn test_builder_build_minimal() {
-        let sample = "0 HEAD\n1 GEDC\n2 VERS 5.5\n0 TRLR";
-        let result = GedcomBuilder::new().build_from_str(sample);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_builder_with_individuals() {
-        let sample = "\
-            0 HEAD\n\
-            1 GEDC\n\
-            2 VERS 5.5\n\
-            0 @I1@ INDI\n\
-            1 NAME John /Doe/\n\
-            0 TRLR";
-
-        let data = GedcomBuilder::new().build_from_str(sample).unwrap();
-
+        assert!(!builder.is_strict());
+        assert_eq!(builder.file_size_limit(), None);
+        let data = builder.build_from_str(TEXT).unwrap();
         assert_eq!(data.individuals.len(), 1);
+        assert_eq!(builder.build_from_bytes(TEXT.as_bytes()).unwrap(), data);
+        assert_eq!(builder.build_from_reader(TEXT.as_bytes()).unwrap(), data);
+        assert_eq!(
+            builder
+                .build_from_bytes_with_encoding(TEXT.as_bytes(), GedcomEncoding::Utf8)
+                .unwrap(),
+            data
+        );
     }
 
     #[test]
-    fn test_builder_validate_references_error() {
-        let sample = "\
-            0 HEAD\n\
-            1 GEDC\n\
-            2 VERS 5.5\n\
-            0 @F1@ FAM\n\
-            1 HUSB @I_NONEXISTENT@\n\
-            0 TRLR";
-
-        let result = GedcomBuilder::new()
-            .validate_references(true)
-            .build_from_str(sample);
-
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_builder_validate_references_success() {
-        let sample = "\
-            0 HEAD\n\
-            1 GEDC\n\
-            2 VERS 5.5\n\
-            0 @I1@ INDI\n\
-            1 NAME John /Doe/\n\
-            0 @F1@ FAM\n\
-            1 HUSB @I1@\n\
-            0 TRLR";
-
-        let result = GedcomBuilder::new()
-            .validate_references(true)
-            .build_from_str(sample);
-
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_parser_config_clone() {
-        let config = ParserConfig {
-            strict_mode: true,
-            validate_references: true,
-            ignore_unknown_tags: true,
-            encoding_detection: true,
-            date_validation: true,
-            max_file_size: Some(1000),
-            preserve_formatting: false,
-        };
-        let cloned = config.clone();
-        assert_eq!(config.strict_mode, cloned.strict_mode);
-        assert_eq!(config.validate_references, cloned.validate_references);
-        assert_eq!(config.date_validation, cloned.date_validation);
-        assert_eq!(config.max_file_size, cloned.max_file_size);
-        assert_eq!(config.preserve_formatting, cloned.preserve_formatting);
-    }
-
-    #[test]
-    fn test_builder_max_file_size_exceeded() {
-        let large_content = "0 HEAD\n1 GEDC\n2 VERS 5.5\n".to_string()
-            + &"0 @I1@ INDI\n1 NAME Test /Person/\n".repeat(100)
-            + "0 TRLR";
-
-        let result = GedcomBuilder::new()
-            .max_file_size(100) // 100 bytes limit
-            .build_from_str(&large_content);
-
-        match result {
-            Err(GedcomError::FileSizeLimitExceeded { size, max_size }) => {
-                assert!(size > 100);
-                assert_eq!(max_size, 100);
-            }
-            _ => panic!("Expected FileSizeLimitExceeded error"),
+    fn size_limit() {
+        let builder = GedcomBuilder::new().max_file_size(10);
+        for result in [
+            builder.build_from_str(TEXT),
+            builder.build_from_bytes(TEXT.as_bytes()),
+            builder.build_from_reader(TEXT.as_bytes()),
+            builder.build_from_bytes_with_encoding(TEXT.as_bytes(), GedcomEncoding::Utf8),
+        ] {
+            assert!(matches!(
+                result,
+                Err(GedcomError::FileTooLarge { max: 10, .. })
+            ));
         }
+        // The reader stops past the limit.
+        assert!(matches!(
+            builder.build_from_reader(std::io::repeat(b'0')),
+            Err(GedcomError::FileTooLarge { size: 11, max: 10 })
+        ));
+        assert!(GedcomBuilder::new()
+            .max_file_size(TEXT.len())
+            .build_from_str(TEXT)
+            .is_ok());
     }
 
     #[test]
-    fn test_builder_clone() {
-        let builder = GedcomBuilder::new().strict_mode(true);
-        let cloned = builder.clone();
-        assert!(cloned.config().strict_mode);
+    fn strict_mode_lists_every_deviation() {
+        let text = "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 SEX male\n1 FAMC @F9@\n0 TRLR\n";
+        let strict = GedcomBuilder::new().strict(true);
+        let Err(GedcomError::NonConformant(deviations)) = strict.build_from_str(text) else {
+            panic!()
+        };
+        assert_eq!(deviations.len(), 2, "{deviations:?}");
+        assert!(strict.build_from_str(TEXT.replace("5.5.1", "7.0")).is_ok());
+        // The encoding counts too: a 7.x file is UTF-8.
+        let latin1 = b"0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 NAME Ren\xE9e\n0 TRLR\n";
+        assert!(GedcomBuilder::new().build_from_bytes(latin1).is_ok());
+        assert!(matches!(
+            strict.build_from_bytes(latin1),
+            Err(GedcomError::NonConformant(_))
+        ));
     }
 }

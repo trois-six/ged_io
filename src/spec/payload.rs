@@ -1,13 +1,13 @@
 //! The grammars of the payload data types that are not dates, ages or
-//! times (those come from [`crate::types`]), and the characters a payload
+//! times (those come from [`crate::value`]), and the characters a payload
 //! may hold.
 //!
 //! Each check returns `None` when the payload is valid, else why it is not.
 
 use std::borrow::Cow;
 
-use crate::types::age::AgeValue;
-use crate::types::date::{DateExact, DatePeriod, DateValue, Time};
+use crate::value::AgeValue;
+use crate::value::{DateExact, DatePeriod, DateValue, Time};
 use crate::version::VersionRules;
 use crate::writer::{special_bytes, CONTROL, MAYBE_BANNED, TAB};
 use crate::GedcomVersion;
@@ -522,12 +522,12 @@ mod tests {
                             );
                             // Written as it is in 5.5.1, its month in upper
                             // case in 7.x.
-                            let date = crate::types::date::Date {
+                            let date = crate::value::DateTexts {
                                 value: Some(text.clone()),
                                 time: None,
                                 phrase: None,
                             };
-                            let upper = crate::types::date::Date {
+                            let upper = crate::value::DateTexts {
                                 value: Some(text.to_ascii_uppercase()),
                                 ..date.clone()
                             };
@@ -545,7 +545,7 @@ mod tests {
                         }
                         // Written alike in every version (the conversion
                         // of the typed model skips them).
-                        let date = crate::types::date::Date {
+                        let date = crate::value::DateTexts {
                             value: Some(text.clone()),
                             time: None,
                             phrase: None,

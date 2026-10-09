@@ -74,12 +74,12 @@ pub use xref::{Xref, XrefForm};
 
 pub(crate) use flat::{Flat, FlatPayload, FlatRef};
 pub(crate) use lexer::{
-    find_eol, head_version, lex_line, normalize_eol, pointer, terminator_len, unescape_into,
-    unescape_spans, Builder, Escaping, Kind as RawKind, Line, Lines, RawNode, Span as RawSpan,
-    TagHasher, TagInterner, TextPiece,
+    find_eol, head_version, lex_line, pointer, terminator_len, unescape_into, unescape_spans,
+    Builder, Escaping, Kind as RawKind, Line, Lines, RawNode, Span as RawSpan, TagHasher,
+    TagInterner, TextPiece,
 };
 pub(crate) use node::Node;
-pub(crate) use reader::RecordSplitter;
+pub(crate) use reader::RecordSource;
 pub(crate) use tag::{standard_index, standard_index_const, STANDARD_TAGS};
 
 use std::fmt;
@@ -528,7 +528,7 @@ impl<'t> Iterator for Substructures<'t> {
 
 /// A payload: none, a pointer or text.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "json", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Payload {
     /// No payload.
     #[default]
@@ -567,7 +567,7 @@ impl Payload {
 /// Equality ignores [`line`](Self::line), which only records where the
 /// structure was read.
 #[derive(Clone, Debug, Default)]
-#[cfg_attr(feature = "json", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Structure {
     /// The tag.
     pub tag: Tag,

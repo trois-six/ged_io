@@ -1,4 +1,4 @@
-//! Memory layout of the typed model (`ged_io::next`), checked at compile
+//! Memory layout of the typed model (`ged_io::model`), checked at compile
 //! time.
 //!
 //! The model reads into one shared text store (§1.13 of the redesign
@@ -20,7 +20,7 @@
 
 use std::mem::size_of;
 
-use ged_io::next::{
+use ged_io::model::{
     Address, Age, Association, CallNumber, ChangeDate, ChildLink, Citation, CitationData,
     CitedEvent, Crop, Date, Event, EventDetail, EventFamily, EventSpouse, ExactDate, Exid, Extra,
     Family, File, FileForm, Header, Individual, IndividualDetail, IndividualRef, LdsStatus, Map,

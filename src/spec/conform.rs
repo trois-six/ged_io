@@ -1321,6 +1321,11 @@ impl<'n> Conformer<'n> {
     /// standard type, `Ok(None)` for an extension record, `@VOID@` (7.x) or a
     /// 5.5.1 pointer to another file; `Err` for a pointer to nothing.
     fn resolve(&mut self, s: &mut Structure, p: &str) -> Result<Option<StructId>, ()> {
+        // `@VOID@` points to nothing in 7.x, even when a record had it (and
+        // was renamed).
+        if self.family == Family::V7 && p == "@VOID@" {
+            return Ok(None);
+        }
         let p = match self.renamed.get(p) {
             Some(new) => {
                 let new = new.to_string();

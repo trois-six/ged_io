@@ -115,7 +115,7 @@ fn readme_features() {
         gedzip_feature(&id("gedzip"), &model, &mut failures, &mut n);
     }
     let mut skipped = Vec::new();
-    if cfg!(not(feature = "json")) {
+    if cfg!(not(feature = "serde")) {
         skipped.push("feature/json/");
     }
     if cfg!(not(feature = "gedzip")) {
@@ -124,7 +124,7 @@ fn readme_features() {
     ratchet::verify_skipping("feature", n, failures, &skipped);
 }
 
-#[cfg(feature = "json")]
+#[cfg(feature = "serde")]
 fn json_feature(id: &str, model: &adapter::Model, failures: &mut Vec<Failure>, n: &mut usize) {
     *n += 1;
     match adapter::json_round_trip(model) {
@@ -139,7 +139,7 @@ fn json_feature(id: &str, model: &adapter::Model, failures: &mut Vec<Failure>, n
     }
 }
 
-#[cfg(not(feature = "json"))]
+#[cfg(not(feature = "serde"))]
 fn json_feature(_: &str, _: &adapter::Model, _: &mut Vec<Failure>, _: &mut usize) {}
 
 #[cfg(feature = "gedzip")]

@@ -10,7 +10,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-ged_io = { path = "..", features = ["json", "gedzip", "calendar"] }
+ged_io = { path = "..", features = ["serde", "gedzip", "calendar"] }
 serde_json = "1.0"
 
 # A stand-alone workspace, so the crate's own builds never see this package.

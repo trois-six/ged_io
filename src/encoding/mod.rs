@@ -57,7 +57,6 @@ pub(crate) use charset::encode_ansel;
 pub(crate) use decoder::Decoder;
 pub(crate) use detect::{mode_for, sniff, Mode};
 
-use crate::GedcomError;
 use charset::SingleByte;
 
 /// A character encoding of a GEDCOM file.
@@ -233,20 +232,61 @@ fn decode_body(body: &[u8], mode: Mode) -> String {
     out
 }
 
-/// Encodes text to bytes in `encoding`. UTF-16 output starts with a byte
-/// order mark; ANSEL output writes precomposed letters as a mark and a base.
+/// A character an encoding cannot represent: why [`encode`] failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EncodeError {
+    /// The encoding.
+    pub encoding: GedcomEncoding,
+    /// The first character it cannot represent.
+    pub character: char,
+    /// Its byte offset in the text.
+    pub offset: usize,
+}
+
+impl std::fmt::Display for EncodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} cannot represent {:?} (U+{:04X}) at byte {}",
+            self.encoding,
+            self.character,
+            u32::from(self.character),
+            self.offset
+        )
+    }
+}
+
+impl std::error::Error for EncodeError {}
+
+/// Encodes text to bytes in `encoding`: the inverse of [`decode_as`].
+/// UTF-16 output starts with a byte order mark; ANSEL output writes
+/// precomposed letters as a mark and a base.
+///
+/// ```rust
+/// use ged_io::encoding::{decode_as, encode, GedcomEncoding};
+///
+/// let bytes = encode("Renée", GedcomEncoding::Ansel).unwrap();
+/// assert_eq!(decode_as(&bytes, GedcomEncoding::Ansel), "Renée");
+/// let error = encode("Zoë", GedcomEncoding::Ascii).unwrap_err();
+/// assert_eq!((error.character, error.offset), ('ë', 2));
+/// ```
 ///
 /// # Errors
 ///
-/// Returns `GedcomError::EncodingError` when the text holds a character the
-/// encoding cannot represent (for ANSEL, ASCII and the single-byte sets).
-pub fn encode_to_bytes(content: &str, encoding: GedcomEncoding) -> Result<Vec<u8>, GedcomError> {
+/// [`EncodeError`] when the text holds a character the encoding cannot
+/// represent (ASCII, ANSEL and the single-byte sets).
+pub fn encode(text: &str, encoding: GedcomEncoding) -> Result<Vec<u8>, EncodeError> {
+    let unencodable = |offset: usize, character: char| EncodeError {
+        encoding,
+        character,
+        offset,
+    };
     let single = match encoding {
-        GedcomEncoding::Utf8 => return Ok(content.as_bytes().to_vec()),
+        GedcomEncoding::Utf8 => return Ok(text.as_bytes().to_vec()),
         GedcomEncoding::Utf16Le | GedcomEncoding::Utf16Be => {
             let big_endian = encoding == GedcomEncoding::Utf16Be;
-            let mut bytes = Vec::with_capacity(2 + content.len() * 2);
-            for unit in std::iter::once(0xFEFF).chain(content.encode_utf16()) {
+            let mut bytes = Vec::with_capacity(2 + text.len() * 2);
+            for unit in std::iter::once(0xFEFF).chain(text.encode_utf16()) {
                 bytes.extend_from_slice(&if big_endian {
                     unit.to_be_bytes()
                 } else {
@@ -256,36 +296,36 @@ pub fn encode_to_bytes(content: &str, encoding: GedcomEncoding) -> Result<Vec<u8
             return Ok(bytes);
         }
         GedcomEncoding::Ascii => {
-            return if content.is_ascii() {
-                Ok(content.as_bytes().to_vec())
-            } else {
-                Err(unencodable(encoding))
+            return match text.char_indices().find(|(_, c)| !c.is_ascii()) {
+                None => Ok(text.as_bytes().to_vec()),
+                Some((offset, c)) => Err(unencodable(offset, c)),
             };
         }
         GedcomEncoding::Ansel => {
             let mut lost = 0;
-            let bytes = charset::encode_ansel(content, &mut lost);
-            return if lost == 0 {
-                Ok(bytes)
-            } else {
-                Err(unencodable(encoding))
-            };
+            let bytes = charset::encode_ansel(text, &mut lost);
+            if lost == 0 {
+                return Ok(bytes);
+            }
+            // The first character ANSEL cannot hold, decomposed or not.
+            let (offset, c) = text
+                .char_indices()
+                .find(|(_, c)| {
+                    let mut lost = 0;
+                    charset::encode_ansel(c.encode_utf8(&mut [0; 4]), &mut lost);
+                    lost > 0
+                })
+                .unwrap_or((0, char::REPLACEMENT_CHARACTER));
+            return Err(unencodable(offset, c));
         }
         GedcomEncoding::Iso8859_1 | GedcomEncoding::Windows1252 => SingleByte::Cp1252,
         GedcomEncoding::Iso8859_15 => SingleByte::Iso8859_15,
         GedcomEncoding::Cp437 => SingleByte::Cp437,
         GedcomEncoding::MacRoman => SingleByte::MacRoman,
     };
-    content
-        .chars()
-        .map(|c| single.encode(c).ok_or_else(|| unencodable(encoding)))
+    text.char_indices()
+        .map(|(offset, c)| single.encode(c).ok_or_else(|| unencodable(offset, c)))
         .collect()
-}
-
-fn unencodable(encoding: GedcomEncoding) -> GedcomError {
-    GedcomError::EncodingError(format!(
-        "Cannot encode to {encoding}: contains unsupported characters"
-    ))
 }
 
 #[cfg(test)]
@@ -455,11 +495,11 @@ mod tests {
             GedcomEncoding::MacRoman,
             GedcomEncoding::Ansel,
         ] {
-            let bytes = encode_to_bytes(text, encoding).unwrap();
+            let bytes = encode(text, encoding).unwrap();
             assert_eq!(decode_as(&bytes, encoding), text, "{encoding}");
         }
-        assert!(encode_to_bytes("Zoë", GedcomEncoding::Ascii).is_err());
-        assert!(encode_to_bytes("中", GedcomEncoding::Ansel).is_err());
+        assert!(encode("Zoë", GedcomEncoding::Ascii).is_err());
+        assert!(encode("中", GedcomEncoding::Ansel).is_err());
     }
 
     #[test]

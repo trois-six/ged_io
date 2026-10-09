@@ -7,15 +7,12 @@
 //! matches nothing any more (the gap was fixed: delete the row in the same
 //! change). Gaps therefore cannot hide and fixes cannot go unnoticed.
 //!
-//! Columns: `id`, `check`, `cause`, `current`, `next`, `note`.
+//! Columns: `id`, `check`, `cause`, `class`, `note`.
 //! * `id` is `<family>/<case>`; a `*` matches any run of characters.
 //! * `check` is the failing check (`parse`, `keep`, `roundtrip`, `reparse`,
 //!   `output:<rule>`, …); `*` matches any check.
-//! * `current` is the failure class on the public pipeline (`FATAL`, `PANIC`,
-//!   `LOST`, `CARD`, `MOVED`, `CHANGED`, `DIFF`, `NONCONFORMANT`, …), or `-`
-//!   when the check passes there.
-//! * `next` is the same for the pipeline under construction (`-` while there
-//!   is none); `RATCHET_TIER=next` selects that column.
+//! * `class` is the failure class (`FATAL`, `PANIC`, `LOST`, `CARD`, `MOVED`,
+//!   `CHANGED`, `DIFF`, `NONCONFORMANT`, …).
 //!
 //! `RATCHET_PRINT=1` prints a ready-to-paste row for every unlisted failure.
 
@@ -58,16 +55,9 @@ pub struct Gap {
     pub line: usize,
 }
 
-/// The pipeline under test: `current` (default) or `next`.
-pub fn tier() -> &'static str {
-    static T: OnceLock<String> = OnceLock::new();
-    T.get_or_init(|| std::env::var("RATCHET_TIER").unwrap_or_else(|_| "current".into()))
-}
-
 pub fn gaps() -> &'static [Gap] {
     static G: OnceLock<Vec<Gap>> = OnceLock::new();
     G.get_or_init(|| {
-        let col = if tier() == "next" { 4 } else { 3 };
         let mut out = Vec::new();
         for (i, line) in GAPS.lines().enumerate() {
             if i == 0 || line.is_empty() || line.starts_with('#') {
@@ -75,8 +65,8 @@ pub fn gaps() -> &'static [Gap] {
             }
             let f: Vec<&str> = line.split('\t').collect();
             assert!(
-                f.len() >= 5,
-                "known_gaps.tsv line {}: expected at least 5 columns",
+                f.len() >= 4,
+                "known_gaps.tsv line {}: expected at least 4 columns",
                 i + 1
             );
             assert!(
@@ -84,14 +74,11 @@ pub fn gaps() -> &'static [Gap] {
                 "known_gaps.tsv line {}: cause must be a TS id",
                 i + 1
             );
-            if f[col] == "-" {
-                continue;
-            }
             out.push(Gap {
                 id: f[0].to_string(),
                 check: f[1].to_string(),
                 cause: f[2].to_string(),
-                class: f[col].to_string(),
+                class: f[3].to_string(),
                 line: i + 1,
             });
         }
@@ -179,7 +166,7 @@ pub fn verify_skipping(family: &str, ran: usize, failures: Vec<Failure>, skipped
     if std::env::var_os("RATCHET_PRINT").is_some() {
         for f in &unexpected {
             println!(
-                "RATCHET\t{}\t{}\tTS?\t{}\t-\t{}",
+                "RATCHET\t{}\t{}\tTS?\t{}\t{}",
                 f.id,
                 f.check,
                 f.class,
@@ -195,10 +182,7 @@ pub fn verify_skipping(family: &str, ran: usize, failures: Vec<Failure>, skipped
         );
         return;
     }
-    let mut report = format!(
-        "{family}: {ran} cases checked against known_gaps.tsv ({} tier)\n",
-        tier()
-    );
+    let mut report = format!("{family}: {ran} cases checked against known_gaps.tsv\n");
     if !unexpected.is_empty() {
         report += &format!(
             "{} unlisted failures (fix them, or add a row with its root cause):\n",

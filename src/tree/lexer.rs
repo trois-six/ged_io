@@ -5,7 +5,6 @@
 //! it). The recovery rules are fixed and silent; they are listed on
 //! [`Tree`](super::Tree).
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
 
@@ -579,38 +578,6 @@ pub(crate) fn first_records_end(text: &str) -> usize {
         }
     }
     text.len()
-}
-
-/// Turns every line terminator into LF and drops blank lines.
-///
-/// This feeds the token-based parser until it is replaced by the tree: the
-/// lexer handles every terminator itself. Borrows the input when it already
-/// is in that form.
-pub(crate) fn normalize_eol(text: &str) -> Cow<'_, str> {
-    let bytes = text.as_bytes();
-    let has_cr = bytes.contains(&b'\r');
-    let maybe_blank = text.starts_with(['\n', ' ', '\t'])
-        || text.contains("\n\n")
-        || text.contains("\n ")
-        || text.contains("\n\t");
-    if !has_cr && !maybe_blank {
-        return Cow::Borrowed(text);
-    }
-    let mut out = String::with_capacity(text.len());
-    let mut changed = false;
-    for (start, end) in Lines::new(text) {
-        let line = text.get(start..end).unwrap_or_default();
-        if lex_line(line) == Line::Blank {
-            changed = true;
-            continue;
-        }
-        out.push_str(line);
-        out.push('\n');
-    }
-    if !changed && !has_cr {
-        return Cow::Borrowed(text);
-    }
-    Cow::Owned(out)
 }
 
 /// A structure line, with offsets into the text being read.
@@ -1399,18 +1366,5 @@ mod tests {
         );
         assert_eq!(first_records_end("x\n1 A\n0 HEAD\n0 B\n"), 13);
         assert_eq!(first_records_end("0 HEAD\n1 A\n0 B\n"), 11);
-    }
-
-    #[test]
-    fn normalization() {
-        assert!(matches!(
-            normalize_eol("0 HEAD\n0 TRLR\n"),
-            Cow::Borrowed(_)
-        ));
-        assert_eq!(
-            normalize_eol("0 HEAD\r\n\r\n  \n0 TRLR\r"),
-            "0 HEAD\n0 TRLR\n"
-        );
-        assert_eq!(normalize_eol("1 NOTE a\n2 CONT \n"), "1 NOTE a\n2 CONT \n");
     }
 }

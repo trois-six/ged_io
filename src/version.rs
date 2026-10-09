@@ -23,7 +23,7 @@
 //! - URIs for all structure types
 
 use crate::spec::{tables, Schema};
-#[cfg(feature = "json")]
+#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -38,7 +38,7 @@ use std::fmt;
 /// [`GedcomVersion::rules`].
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "json", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum GedcomVersion {
     /// GEDCOM 5.5.1 (1999, re-released as a standard in 2019).
     #[default]
@@ -403,32 +403,6 @@ pub fn detect_version(content: &str) -> GedcomVersion {
     })
 }
 
-/// Checks if content appears to be a GEDCOM 7.0 file based on heuristics.
-///
-/// This performs quick checks without full parsing:
-/// - Looks for BOM (common in GEDCOM 7.0)
-/// - Checks for `SCHMA` tag (only in 7.0)
-/// - Checks for `SNOTE` records (only in 7.0)
-///
-/// Note: This is a heuristic check and may not be 100% accurate.
-/// For authoritative version detection, use `detect_version()`.
-#[must_use]
-pub fn appears_to_be_v7(content: &str) -> bool {
-    // Check for UTF-8 BOM (recommended but not required in 7.0)
-    let has_bom = content.starts_with('\u{FEFF}');
-
-    // Check for SCHMA tag (only in 7.0)
-    let has_schema = content.contains("1 SCHMA") || content.contains("\n1 SCHMA");
-
-    // Check for SNOTE record (only in 7.0)
-    let has_snote = content.contains("0 @") && content.contains("@ SNOTE");
-
-    // Check version string
-    let version = detect_version(content);
-
-    version.is_v7() || has_schema || has_snote || (has_bom && !version.is_v5())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -554,15 +528,6 @@ mod tests {
         // No version found, defaults to 5.5.1
         let content = "0 HEAD\n0 TRLR";
         assert_eq!(detect_version(content), GedcomVersion::V5_5_1);
-    }
-
-    #[test]
-    fn test_appears_to_be_v7() {
-        let v7_content = "0 HEAD\n1 GEDC\n2 VERS 7.0\n1 SCHMA\n0 TRLR";
-        assert!(appears_to_be_v7(v7_content));
-
-        let v5_content = "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 TRLR";
-        assert!(!appears_to_be_v7(v5_content));
     }
 
     #[test]

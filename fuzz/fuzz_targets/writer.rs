@@ -5,7 +5,7 @@
 #![no_main]
 
 use ged_io::tree::{parse_tree, Tree};
-use ged_io::{GedcomBuilder, GedcomVersion, GedcomWriter, OutputEncoding};
+use ged_io::{Dataset, GedcomVersion, GedcomWriter, OutputEncoding};
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashSet;
 
@@ -78,23 +78,36 @@ fn records(out: &str) -> usize {
 
 fuzz_target!(|data: &[u8]| {
     // The typed model.
-    if let Ok(model) = GedcomBuilder::new().build_from_bytes(data) {
+    {
+        let model = Dataset::from_bytes(data);
         for version in VERSIONS {
             let writer = GedcomWriter::new().gedcom_version(version);
             let out = writer
                 .write_to_string(&model)
                 .expect("repairs, never fails");
             check_lines(&out, version);
-            let back = GedcomBuilder::new()
-                .build_from_str(&out)
-                .unwrap_or_else(|e| panic!("{e}\n{out}"));
-            assert_eq!(back.individuals.len(), model.individuals.len());
-            assert_eq!(back.families.len(), model.families.len());
-            assert_eq!(back.sources.len(), model.sources.len());
-            assert_eq!(back.repositories.len(), model.repositories.len());
-            assert_eq!(back.multimedia.len(), model.multimedia.len());
-            assert_eq!(back.shared_notes.len(), model.shared_notes.len());
-            assert_eq!(back.custom_data.len(), model.custom_data.len());
+            let back = Dataset::parse(out.as_str());
+            // Every record is written (a header is synthesised when there is
+            // none), but a trailer that holds nothing but an identifier,
+            // which is left out (it ends the file); 5.5.1 adds a submitter
+            // record when there is none, and the conformance repair moves
+            // notes out of records over 32K.
+            let bare_trailers = model
+                .extra
+                .iter()
+                .filter(|n| {
+                    model.store().tag(n.tag) == "TRLR"
+                        && n.children.is_empty()
+                        && matches!(n.payload, ged_io::model::Value::None)
+                })
+                .count();
+            let (written, read) = (back.record_count(), model.record_count() - bare_trailers);
+            let header = usize::from(model.header.is_none());
+            assert!(
+                written == read + header
+                    || (version.rules().max_line_length().is_some() && written > read),
+                "{version}: {written} records read back for {read}\n{out}"
+            );
             for encoding in [
                 OutputEncoding::Ansel,
                 OutputEncoding::Ascii,

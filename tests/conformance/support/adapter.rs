@@ -4,30 +4,15 @@
 //! behaviour: what the model keeps (searched as text), what the writer emits
 //! and what reads back. When the crate's types or entry points change, this
 //! file is the one to update; the cases, tables and checks stay as they are.
-//!
-//! Two pipelines are under test, selected by `RATCHET_TIER` (see
-//! `ratchet.rs`): `current`, the public model (`GedcomBuilder`,
-//! `GedcomWriter::write_to_string`), and `next`, the model under
-//! construction (`ged_io::next`), whose results the `next` column of the
-//! known-gaps file records.
 
+use ged_io::model::{Dataset, RecordRef};
 use ged_io::{GedcomBuilder, GedcomVersion, GedcomWriter, LineEnding};
 use std::cell::Cell;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Once;
 
 /// A parsed dataset, opaque to the tests.
-pub enum Model {
-    /// The public model.
-    Current(Box<ged_io::types::GedcomData>),
-    /// The model under construction.
-    Next(Box<ged_io::next::Dataset>),
-}
-
-/// Whether the suite runs the `next` pipeline.
-fn next_tier() -> bool {
-    super::ratchet::tier() == "next"
-}
+pub type Model = Dataset;
 
 thread_local! {
     static QUIET: Cell<bool> = const { Cell::new(false) };
@@ -64,12 +49,8 @@ pub fn guard<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
 /// Reads bytes with the default (lenient) configuration.
 pub fn read(bytes: &[u8]) -> Result<Model, String> {
     guard(|| {
-        if next_tier() {
-            return Ok(Model::Next(Box::new(ged_io::next::read_bytes(bytes))));
-        }
         GedcomBuilder::new()
             .build_from_bytes(bytes)
-            .map(|d| Model::Current(Box::new(d)))
             .map_err(|e| e.to_string())
     })
 }
@@ -78,48 +59,20 @@ pub fn read(bytes: &[u8]) -> Result<Model, String> {
 /// check the README documents for application backends).
 pub fn read_checking_references(bytes: &[u8]) -> Result<Model, String> {
     guard(|| {
-        if next_tier() {
-            let data = ged_io::next::read_bytes(bytes);
-            return match dangling(&data) {
-                Some(p) => Err(format!("dangling pointer {p}")),
-                None => Ok(Model::Next(Box::new(data))),
-            };
-        }
-        GedcomBuilder::new()
-            .validate_references(true)
+        let data = GedcomBuilder::new()
             .build_from_bytes(bytes)
-            .map(|d| Model::Current(Box::new(d)))
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        match data.dangling_references().first() {
+            Some(d) => Err(format!("dangling pointer {}", data.store().xref(d.pointer))),
+            None => Ok(data),
+        }
     })
 }
 
-/// The first pointer of a `next` dataset to no record (7.x `@VOID@`
-/// aside).
-fn dangling(data: &ged_io::next::Dataset) -> Option<String> {
-    let records = data.to_structures();
-    let defined: std::collections::HashSet<&str> =
-        records.iter().filter_map(|r| r.xref.as_deref()).collect();
-    let mut stack: Vec<&ged_io::tree::Structure> = records.iter().collect();
-    while let Some(s) = stack.pop() {
-        if let Some(p) = s.pointer() {
-            let void = data.version().is_v7() && p.is_void();
-            if !void && !defined.contains(p.as_str()) {
-                return Some(p.to_string());
-            }
-        }
-        stack.extend(&s.substructures);
-    }
-    None
-}
-
-/// The structures the `next` model types but read untyped (it found them
-/// not to fit their type): none for a conformant input. Empty for the
-/// current model.
+/// The structures the model types but read untyped (it found them not to
+/// fit their type): none for a conformant input.
 pub fn untyped(m: &Model) -> Vec<String> {
-    match m {
-        Model::Current(_) => Vec::new(),
-        Model::Next(data) => ged_io::next::ledger::untyped(data),
-    }
+    ged_io::model::ledger::untyped(m)
 }
 
 /// Target of a write.
@@ -158,12 +111,9 @@ fn writer(target: Target, eol: Option<&str>) -> GedcomWriter {
 /// Writes with an explicit line terminator.
 pub fn write_with(m: &Model, target: Target, eol: Option<&str>) -> Result<String, String> {
     guard(|| {
-        let w = writer(target, eol);
-        match m {
-            Model::Current(data) => w.write_to_string(data),
-            Model::Next(data) => ged_io::next::write_string(data, &w),
-        }
-        .map_err(|e| e.to_string())
+        writer(target, eol)
+            .write_to_string(m)
+            .map_err(|e| e.to_string())
     })
 }
 
@@ -171,66 +121,26 @@ pub fn write_with(m: &Model, target: Target, eol: Option<&str>) -> Result<String
 pub fn write_ansel(m: &Model) -> Result<Vec<u8>, String> {
     guard(|| {
         let mut bytes = Vec::new();
-        let w = GedcomWriter::new()
+        GedcomWriter::new()
             .gedcom_version(GedcomVersion::V5_5_1)
-            .output_encoding(ged_io::OutputEncoding::Ansel);
-        match m {
-            Model::Current(data) => w.write(&mut bytes, data),
-            Model::Next(data) => ged_io::next::write(data, &w, &mut bytes),
-        }
-        .map_err(|e| e.to_string())?;
+            .output_encoding(ged_io::OutputEncoding::Ansel)
+            .write(&mut bytes, m)
+            .map_err(|e| e.to_string())?;
         Ok(bytes)
     })
 }
 
-/// The whole model as text, for "the model keeps this value" checks.
+/// The whole model as text, for "the model keeps this value" checks: the
+/// structures it writes hold everything it keeps.
 pub fn dump(m: &Model) -> String {
-    use std::fmt::Write;
-    let data = match m {
-        Model::Current(data) => data,
-        // The structures the model writes hold everything it keeps.
-        Model::Next(data) => return format!("{:?}", data.to_structures()),
-    };
-    let mut d = format!("{data:?}");
-    // The `Debug` of an event shows little of it: add the dates and ages,
-    // which the model keeps as written.
-    let mut add = |date: &Option<ged_io::types::date::Date>,
-                   age: &Option<ged_io::types::age::Age>| {
-        let _ = write!(d, "\n{date:?} {age:?}");
-    };
-    for i in &data.individuals {
-        for e in &i.events {
-            add(&e.date, &e.age);
-        }
-        for a in &i.attributes {
-            add(&a.date, &a.age);
-        }
-    }
-    for f in &data.families {
-        for e in &f.events {
-            add(&e.date, &e.age);
-            for detail in &e.family_event_details {
-                add(&None, &detail.age);
-            }
-        }
-    }
-    d
+    format!("{:?}", m.to_structures())
 }
 
 /// The records of the model as text, header excluded.
 pub fn dump_records(m: &Model) -> String {
-    match m {
-        Model::Current(data) => {
-            let mut data = (**data).clone();
-            data.header = None;
-            format!("{data:?}")
-        }
-        Model::Next(data) => {
-            let mut records = data.to_structures();
-            records.retain(|r| r.tag != "HEAD");
-            format!("{records:?}")
-        }
-    }
+    let mut records = m.to_structures();
+    records.retain(|r| r.tag != "HEAD");
+    format!("{records:?}")
 }
 
 /// True when `needle` appears in the model. A needle is matched against the
@@ -243,19 +153,13 @@ pub fn model_contains(m: &Model, needle: &str) -> bool {
 
 /// Number of records of every kind, header excluded.
 pub fn record_count(m: &Model) -> usize {
-    match m {
-        Model::Current(data) => data.total_records(),
-        Model::Next(data) => data
-            .records()
-            .filter(|r| match r {
-                ged_io::next::RecordRef::Header(_) => false,
-                ged_io::next::RecordRef::Other(n) => {
-                    !["HEAD", "TRLR"].contains(&data.store.tag(n.tag))
-                }
-                _ => true,
-            })
-            .count(),
-    }
+    m.records()
+        .filter(|r| match r {
+            RecordRef::Header(_) => false,
+            RecordRef::Other(n) => !["HEAD", "TRLR"].contains(&m.store().tag(n.tag)),
+            _ => true,
+        })
+        .count()
 }
 
 /// Reads with the streaming parser, one record at a time. Returns the text
@@ -265,7 +169,13 @@ pub fn read_streaming(bytes: &[u8]) -> Result<Vec<String>, String> {
         let parser = ged_io::GedcomStreamParser::new(std::io::Cursor::new(bytes))
             .map_err(|e| e.to_string())?;
         parser
-            .map(|r| r.map(|rec| format!("{rec:?}")).map_err(|e| e.to_string()))
+            .map(|r| {
+                r.map(|rec| {
+                    let s = rec.record().to_structure_in(&rec, rec.version());
+                    format!("{s:?}")
+                })
+                .map_err(|e| e.to_string())
+            })
             .collect()
     })
 }
@@ -273,49 +183,23 @@ pub fn read_streaming(bytes: &[u8]) -> Result<Vec<String>, String> {
 /// Looks an xref up through the indexed (O(1)) view; returns the record's
 /// text form.
 pub fn indexed_find(m: Model, xrefs: &[&str]) -> Vec<Option<String>> {
-    let data = match m {
-        Model::Current(data) => data,
-        Model::Next(data) => {
-            return xrefs
-                .iter()
-                .map(|x| data.find(x).map(|r| format!("{r:?}")))
-                .collect();
-        }
-    };
-    let idx = ged_io::indexed::IndexedGedcomData::from(*data);
+    let idx = ged_io::IndexedDataset::new(m);
     xrefs
         .iter()
-        .map(|x| {
-            idx.find_individual(x)
-                .map(|r| format!("{r:?}"))
-                .or_else(|| idx.find_family(x).map(|r| format!("{r:?}")))
-                .or_else(|| idx.find_source(x).map(|r| format!("{r:?}")))
-                .or_else(|| idx.find_repository(x).map(|r| format!("{r:?}")))
-                .or_else(|| idx.find_multimedia(x).map(|r| format!("{r:?}")))
-                .or_else(|| idx.find_submitter(x).map(|r| format!("{r:?}")))
-        })
+        .map(|x| idx.find(*x).map(|r| format!("{r:?}")))
         .collect()
 }
 
 /// Serialises the model to JSON and back; returns the JSON text and whether
-/// the value read back equals the original.
-#[cfg(feature = "json")]
+/// the value read back holds the same structures.
+#[cfg(feature = "serde")]
 pub fn json_round_trip(m: &Model) -> Result<(String, bool), String> {
-    guard(|| match m {
-        Model::Current(data) => {
-            let json = serde_json::to_string(data).map_err(|e| e.to_string())?;
-            let back: ged_io::types::GedcomData =
-                serde_json::from_str(&json).map_err(|e| e.to_string())?;
-            Ok((json, back == **data))
-        }
-        // The model under construction exports the structures it writes.
-        Model::Next(data) => {
-            let records = data.to_structures();
-            let json = serde_json::to_string(&records).map_err(|e| e.to_string())?;
-            let back: Vec<ged_io::tree::Structure> =
-                serde_json::from_str(&json).map_err(|e| e.to_string())?;
-            Ok((json, back == records))
-        }
+    guard(|| {
+        let records = m.to_structures();
+        let json = serde_json::to_string(&records).map_err(|e| e.to_string())?;
+        let back: Vec<ged_io::tree::Structure> =
+            serde_json::from_str(&json).map_err(|e| e.to_string())?;
+        Ok((json, back == records))
     })
 }
 
@@ -327,27 +211,12 @@ pub fn gedzip_round_trip(
     media: &[(&str, &[u8])],
 ) -> Result<(Model, Vec<String>), String> {
     guard(|| {
-        let bytes = match m {
-            Model::Current(data) => {
-                let files: std::collections::HashMap<String, Vec<u8>> = media
-                    .iter()
-                    .map(|(n, b)| ((*n).to_string(), b.to_vec()))
-                    .collect();
-                ged_io::gedzip::write_gedzip_with_media(data, &files).map_err(|e| e.to_string())?
-            }
-            Model::Next(data) => {
-                let mut gedcom = Vec::new();
-                ged_io::next::write(data, &GedcomWriter::new(), &mut gedcom)
-                    .map_err(|e| e.to_string())?;
-                let mut w = ged_io::gedzip::GedzipWriter::new(std::io::Cursor::new(Vec::new()))
-                    .map_err(|e| e.to_string())?;
-                w.write_gedcom_bytes(&gedcom).map_err(|e| e.to_string())?;
-                for (name, b) in media {
-                    w.add_media_file(name, b).map_err(|e| e.to_string())?;
-                }
-                w.finish().map_err(|e| e.to_string())?.into_inner()
-            }
-        };
+        let files: std::collections::HashMap<String, Vec<u8>> = media
+            .iter()
+            .map(|(n, b)| ((*n).to_string(), b.to_vec()))
+            .collect();
+        let bytes =
+            ged_io::gedzip::write_gedzip_with_media(m, &files).map_err(|e| e.to_string())?;
         let mut reader = ged_io::gedzip::GedzipReader::new(std::io::Cursor::new(bytes.as_slice()))
             .map_err(|e| e.to_string())?;
         let names = reader
@@ -355,12 +224,9 @@ pub fn gedzip_round_trip(
             .iter()
             .map(|s| (*s).to_string())
             .collect();
-        let back = if next_tier() {
-            let gedcom = reader.read_gedcom_bytes().map_err(|e| e.to_string())?;
-            Model::Next(Box::new(ged_io::next::read_bytes(gedcom)))
-        } else {
-            Model::Current(Box::new(reader.parse_gedcom().map_err(|e| e.to_string())?))
-        };
+        let back = reader
+            .read_dataset(&GedcomBuilder::new())
+            .map_err(|e| e.to_string())?;
         Ok((back, names))
     })
 }
@@ -368,17 +234,7 @@ pub fn gedzip_round_trip(
 /// Reads a GEDZIP archive.
 #[cfg(feature = "gedzip")]
 pub fn read_gedzip(bytes: &[u8]) -> Result<Model, String> {
-    guard(|| {
-        if next_tier() {
-            let mut reader = ged_io::gedzip::GedzipReader::new(std::io::Cursor::new(bytes))
-                .map_err(|e| e.to_string())?;
-            let gedcom = reader.read_gedcom_bytes().map_err(|e| e.to_string())?;
-            return Ok(Model::Next(Box::new(ged_io::next::read_bytes(gedcom))));
-        }
-        ged_io::gedzip::read_gedzip(bytes)
-            .map(|d| Model::Current(Box::new(d)))
-            .map_err(|e| e.to_string())
-    })
+    guard(|| ged_io::gedzip::read_gedzip(bytes).map_err(|e| e.to_string()))
 }
 
 /// The crate's validator on a written or input stream: each deviation as
