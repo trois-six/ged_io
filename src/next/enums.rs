@@ -731,20 +731,27 @@ impl<E: Enumeration> PayloadField for EnumList<E> {
 
     fn write(&self, cx: &WriteCx<'_>) -> Payload {
         // An item as it reads back: without the characters the target
-        // bans (which the writer leaves out) and the spaces around it.
+        // bans (which the writer leaves out), then read as reading does
+        // (`read`): a known value once they are gone (`CHR` and a
+        // control character) in the target's spelling, else the text
+        // without the spaces around it.
         let rules = cx.version.rules();
         let items: Vec<String> = self
             .0
             .iter()
             .map(|e| match (e.spelling(cx.version), e.unknown()) {
                 (Some(s), _) => s.to_string(),
-                (None, Some(t)) => t
-                    .to_str(cx.store)
-                    .chars()
-                    .filter(|&c| !rules.is_banned(c))
-                    .collect::<String>()
-                    .trim_matches(' ')
-                    .to_string(),
+                (None, Some(t)) => {
+                    let kept: String = t
+                        .to_str(cx.store)
+                        .chars()
+                        .filter(|&c| !rules.is_banned(c))
+                        .collect();
+                    match E::known(&kept, Some(cx.version)).and_then(|e| e.spelling(cx.version)) {
+                        Some(s) => s.to_string(),
+                        None => kept.trim_matches(' ').to_string(),
+                    }
+                }
                 (None, None) => String::new(),
             })
             .collect();

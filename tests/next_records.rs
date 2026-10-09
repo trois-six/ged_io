@@ -594,3 +594,16 @@ fn a_conformant_dataset_writes_without_repairs() {
     assert_eq!(records.last().map(|s| s.tag.as_str()), Some("TRLR"));
     assert_eq!(records.iter().filter(|s| s.tag == "TRLR").count(), 1);
 }
+
+/// An event list item that the target's banned characters hide is written
+/// as reading it back gives it: `CHR`, followed by a control character and
+/// a no-break space, is the known `CHR` once the control character is left
+/// out, not `CHR` and the no-break space, which the next read would turn
+/// into `CHR` (fuzz `model`).
+#[test]
+fn list_items_are_written_as_they_read_back() {
+    let data = read_str(&v551("0 @S1@ SOUR\n1 DATA\n2 EVEN BIRT, CHR\u{8}\u{a0}\n"));
+    let out = write_as(&data, GedcomVersion::V5_5_1);
+    assert_has(&out, "2 EVEN BIRT, CHR\n");
+    assert_eq!(write_as(&read_str(&out), GedcomVersion::V5_5_1), out);
+}
