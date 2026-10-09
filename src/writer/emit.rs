@@ -164,8 +164,25 @@ impl<'w> LineSink<'w> {
         } else {
             self.text.push_str(self.eol);
         }
+        if self.encoding != OutputEncoding::Utf8 {
+            return self.encode_line();
+        }
+        self.line_start = self.text.len();
+        self.line_no += 1;
+        // Text kept in memory, without a writer, is never handed over.
+        if self.writer.is_some() && self.text.len() >= FLUSH_AT {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    /// [`LineSink::end_line`] in an encoding other than UTF-8: encodes the
+    /// line, terminator included, into the output bytes.
+    #[inline(never)]
+    fn encode_line(&mut self) -> Result<(), WriteError> {
         let line = &self.text[self.line_start..];
         match self.encoding {
+            // Never asked: UTF-8 is the text itself.
             OutputEncoding::Utf8 => {}
             OutputEncoding::Utf16Le => {
                 for unit in line.encode_utf16() {
@@ -195,12 +212,10 @@ impl<'w> LineSink<'w> {
                 self.buf.extend_from_slice(&bytes);
             }
         }
-        if self.encoding != OutputEncoding::Utf8 {
-            self.text.clear();
-        }
-        self.line_start = self.text.len();
+        self.text.clear();
+        self.line_start = 0;
         self.line_no += 1;
-        if self.text.len().max(self.buf.len()) >= FLUSH_AT {
+        if self.buf.len() >= FLUSH_AT {
             self.flush()?;
         }
         Ok(())
