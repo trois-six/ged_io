@@ -910,6 +910,39 @@ fn armidale_schema_cases() {
     );
 }
 
+/// Whether `expect` wants no deviation.
+fn wants_valid(expect: &Expect) -> bool {
+    match expect {
+        Valid => true,
+        Invalid(..) => false,
+        Expect::Departure(e, _) => wants_valid(e),
+    }
+}
+
+/// Strict mode is the lenient read after the validator: every case reads
+/// leniently, with its records; a valid case reads in strict mode too, an
+/// invalid one is refused with its deviations.
+#[test]
+fn armidale_cases_in_strict_mode() {
+    let lenient = ged_io::GedcomBuilder::new();
+    let strict = ged_io::GedcomBuilder::new().strict(true);
+    let mut wrong = Vec::new();
+    for (name, text, expect) in &all_cases().0 {
+        let read = lenient.build_from_str(text.as_str());
+        if read.is_err() {
+            wrong.push(format!("{name}: refused leniently: {read:?}"));
+        }
+        match (strict.build_from_str(text.as_str()), wants_valid(expect)) {
+            (Ok(_), true) => {}
+            (Err(ged_io::GedcomError::NonConformant(found)), false) if meets(&found, expect) => {}
+            (result, _) => wrong.push(format!(
+                "{name}: expected {expect:?}, strict mode gave {result:?}"
+            )),
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
 /// `ValidateTestFile*`: the gedcom7code test-files the suite vendors, as
 /// SchemaTests551 and SchemaTests70 name them (the ones Armidale ignores as
 /// known issues included).
