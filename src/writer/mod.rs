@@ -634,10 +634,13 @@ impl GedcomWriter {
 
     /// [`write_built`](Self::write_built) as text, as
     /// [`write_to_string`](Self::write_to_string) writes a dataset.
+    /// `size` is about the size of the output (the size of the input the
+    /// records were read from), the room the text starts with.
     pub(crate) fn write_built_to_string<'n>(
         &self,
         records: &'n [impl Build<'n>],
         order: fn(GedcomVersion) -> &'static FieldOrder,
+        size: usize,
     ) -> Result<(String, WriteReport), WriteError> {
         let mut records: Vec<Rec<'n, &'n Structure>> =
             records.iter().map(|r| Rec::built(r)).collect();
@@ -652,6 +655,8 @@ impl GedcomWriter {
             repairs = Vec::new();
         }
         let mut sink = self.sink(None, rules, OutputEncoding::Utf8);
+        // A little more than the input: the header is completed, `@` doubled.
+        sink.reserve(size.saturating_add(size / 16).saturating_add(256));
         if self.wants_bom(rules, OutputEncoding::Utf8, true) {
             sink.bom();
         }

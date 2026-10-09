@@ -83,12 +83,13 @@ pub fn conform(records: &mut Vec<Structure>, version: GedcomVersion) -> Vec<Repa
 #[derive(Debug, Default)]
 pub(crate) struct FieldOrder {
     /// For each structure type, the fields of the typed structure that
-    /// stands for it ([`Field`]), by tag.
+    /// stands for it ([`Field`]), by the standard tags they take.
     fields: Box<[FieldsByTag]>,
 }
 
-/// The fields of a typed structure, by the tags they take.
-type FieldsByTag = Box<[(&'static str, Field)]>;
+/// The fields of a typed structure, by the indices of the standard tags
+/// they take (`crate::tree::STANDARD_TAGS`).
+type FieldsByTag = Box<[(u16, Field)]>;
 
 /// A field of a typed structure, as [`FieldOrder`] needs it.
 #[derive(Clone, Copy, Debug)]
@@ -104,19 +105,58 @@ pub(crate) struct Field {
 
 impl FieldOrder {
     /// The order of `fields`: for each structure type (by [`StructId`]),
-    /// each tag its fields take, with the field.
-    pub(crate) fn new(fields: Vec<Vec<(&'static str, Field)>>) -> Self {
+    /// the index of each standard tag its fields take, with the field.
+    pub(crate) fn new(fields: Vec<Vec<(u16, Field)>>) -> Self {
         Self {
             fields: fields.into_iter().map(Vec::into_boxed_slice).collect(),
         }
     }
 
-    /// The field of a `ty` structure that takes `tag` substructures.
-    fn field(&self, ty: StructId, tag: &str) -> Option<Field> {
+    /// The field of a `ty` structure that takes substructures with the
+    /// standard tag `standard`.
+    fn field(&self, ty: StructId, standard: u16) -> Option<Field> {
         self.fields
             .get(usize::from(ty))
-            .and_then(|f| f.iter().find(|(t, _)| *t == tag))
+            .and_then(|f| f.iter().find(|&&(t, _)| t == standard))
             .map(|&(_, field)| field)
+    }
+}
+
+/// Where the typed model reads each substructure of a structure, one after
+/// the other ([`Conformer::model_order`]): the fields that hold one
+/// structure and have it, and the standard tags of substructures kept
+/// aside, as bit sets.
+#[derive(Default)]
+struct ModelRead {
+    full: [u64; 4],
+    aside: [u64; 8],
+}
+
+impl ModelRead {
+    /// The rank of the field `c`, a substructure of a `ty` structure, goes
+    /// to; `None` when it is kept aside.
+    fn read(&mut self, order: &FieldOrder, ty: StructId, c: &Structure) -> Option<u16> {
+        fn bit(set: &mut [u64], i: u16) -> Option<(&mut u64, u64)> {
+            let word = set.get_mut(usize::from(i / 64))?;
+            Some((word, 1 << (i % 64)))
+        }
+        let standard = c.tag.standard_index()?;
+        let field = order.field(ty, standard);
+        let fits = field.filter(|f| {
+            let blocked = bit(&mut self.aside, standard).is_none_or(|(w, b)| *w & b != 0);
+            let full = !f.many && bit(&mut self.full, f.rank).is_none_or(|(w, b)| *w & b != 0);
+            c.xref.is_none() && (!f.leaf || c.substructures.is_empty()) && !blocked && !full
+        });
+        if let Some(f) = fits {
+            if let (false, Some((w, b))) = (f.many, bit(&mut self.full, f.rank)) {
+                *w |= b;
+            }
+            return Some(f.rank);
+        }
+        if let (Some(_), Some((w, b))) = (field, bit(&mut self.aside, standard)) {
+            *w |= b;
+        }
+        None
     }
 }
 
@@ -426,7 +466,7 @@ struct Conformer<'n> {
     /// Extension tags of relocated standard structures, with their URIs.
     schma: Vec<(String, String)>,
     /// The tags from the record to the structure being repaired.
-    path: Vec<String>,
+    path: Vec<Tag>,
     /// The submitter a synthesised 5.5.1 `HEAD.SUBM` points to.
     submitter: Option<Box<str>>,
     /// Records to add before the trailer.
@@ -733,8 +773,9 @@ impl<'n> Conformer<'n> {
 
     /// The path of the structure being repaired, ending with `tag`.
     fn here(&self, tag: &str) -> String {
-        let mut p = self.path.join(".");
-        if !p.is_empty() {
+        let mut p = String::new();
+        for t in &self.path {
+            p.push_str(t.as_str());
             p.push('.');
         }
         p.push_str(tag);
@@ -1080,8 +1121,10 @@ impl<'n> Conformer<'n> {
             x
         });
         complete_head(head, self.rules, "UTF-8", submitter);
+        // Completing changes the header's substructures and those of its
+        // `GEDC` only; a repair puts the rest in order.
         if let Some(head_ty) = self.record_of("HEAD") {
-            self.model_order(head, head_ty);
+            self.model_order_to(head, head_ty, 2);
         }
     }
 
@@ -1405,46 +1448,58 @@ impl<'n> Conformer<'n> {
     /// substructure of that tag went aside before it, it has an identifier,
     /// it has substructures and the field holds a value without any, or the
     /// field holds one structure and has it; anything else goes aside
-    /// (`next::driver::read_into`). `s` is repaired: every payload fits its
-    /// field.
+    /// (`next::driver::read_into`, [`ModelRead`]). `s` is repaired: every
+    /// payload fits its field. Substructures already in that order, as
+    /// nearly all are, stay where they are.
     fn model_order(&self, s: &mut Structure, ty: StructId) {
+        self.model_order_to(s, ty, usize::MAX);
+    }
+
+    /// [`Conformer::model_order`] of `s` and its substructures down to
+    /// `levels` levels (1: `s`'s own substructures).
+    fn model_order_to(&self, s: &mut Structure, ty: StructId, levels: usize) {
         let Some(order) = self.order else {
             return;
         };
-        let children = std::mem::take(&mut s.substructures);
-        let mut fields: Vec<(u16, Structure)> = Vec::with_capacity(children.len());
-        let mut aside: Vec<Structure> = Vec::new();
-        let mut full: Vec<u16> = Vec::new();
-        for c in children {
-            let field = (!c.tag.as_str().starts_with('_'))
-                .then(|| order.field(ty, c.tag.as_str()))
-                .flatten()
-                .filter(|f| {
-                    let fits = c.xref.is_none() && (!f.leaf || c.substructures.is_empty());
-                    let room = f.many || !full.contains(&f.rank);
-                    fits && room && !aside.iter().any(|a| a.tag == c.tag)
-                });
-            match field {
-                Some(f) => {
-                    if !f.many {
-                        full.push(f.rank);
-                    }
-                    fields.push((f.rank, c));
+        let mut read = ModelRead::default();
+        let (mut last, mut aside) = (0, false);
+        let in_order = s.substructures.iter().all(|c| {
+            let Some(rank) = read.read(order, ty, c) else {
+                aside = true;
+                return true;
+            };
+            let ok = !aside && rank >= last;
+            last = rank;
+            ok
+        });
+        if !in_order {
+            let mut read = ModelRead::default();
+            let mut fields: Vec<(u16, Structure)> = Vec::with_capacity(s.substructures.len());
+            let mut kept: Vec<Structure> = Vec::new();
+            for c in std::mem::take(&mut s.substructures) {
+                match read.read(order, ty, &c) {
+                    Some(rank) => fields.push((rank, c)),
+                    None => kept.push(c),
                 }
-                None => aside.push(c),
             }
+            // Stable: the substructures of a field keep their order.
+            fields.sort_by_key(|&(rank, _)| rank);
+            s.substructures.extend(fields.into_iter().map(|(_, c)| c));
+            s.substructures.append(&mut kept);
         }
-        // Stable: the substructures of a field keep their order.
-        fields.sort_by_key(|&(rank, _)| rank);
-        s.substructures.reserve_exact(fields.len() + aside.len());
-        for (_, mut c) in fields {
+        if levels <= 1 {
+            return;
+        }
+        let mut read = ModelRead::default();
+        for c in &mut s.substructures {
+            if read.read(order, ty, c).is_none() || c.substructures.is_empty() {
+                continue;
+            }
             let is_ptr = matches!(c.payload, Payload::Pointer(_));
-            if let Pick::Type(cty) = self.picker.pick(ty, &c, is_ptr) {
-                self.model_order(&mut c, cty);
+            if let Pick::Type(cty) = self.picker.pick(ty, &*c, is_ptr) {
+                self.model_order_to(c, cty, levels - 1);
             }
-            s.substructures.push(c);
         }
-        s.substructures.append(&mut aside);
     }
 
     fn drop_xref(&mut self, s: &mut Structure) {
@@ -1535,7 +1590,8 @@ impl<'n> Conformer<'n> {
         let children = std::mem::take(&mut s.substructures);
         let mut kept = Vec::with_capacity(children.len());
         let mut counts: Vec<(u8, u32)> = Vec::new();
-        self.path.push(s.tag.as_str().to_string());
+        // A standard tag is an index: no copy of its text.
+        self.path.push(s.tag.clone());
         for mut c in children {
             if self.child(&mut c, ty, &mut counts) {
                 kept.push(c);

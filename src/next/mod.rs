@@ -238,7 +238,11 @@ pub fn write_structures<W: io::Write>(
 /// [`RepairPolicy::Error`](crate::writer::RepairPolicy::Error).
 pub fn write_string(data: &Dataset, writer: &GedcomWriter) -> Result<String, WriteError> {
     writer
-        .write_built_to_string(&data.built(writer), ledger_impl::field_order)
+        .write_built_to_string(
+            &data.built(writer),
+            ledger_impl::field_order,
+            data.store.input_len(),
+        )
         .map(|(text, _)| text)
 }
 

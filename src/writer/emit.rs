@@ -101,6 +101,14 @@ impl<'w> LineSink<'w> {
         Self::new(None, "\n", rules.max_line_len, OutputEncoding::Utf8, policy)
     }
 
+    /// Room for `n` more bytes of UTF-8 text kept in memory (no writer):
+    /// the output of a dataset is about the size of its input.
+    pub(crate) fn reserve(&mut self, n: usize) {
+        if self.writer.is_none() && self.encoding == OutputEncoding::Utf8 {
+            self.text.reserve(n);
+        }
+    }
+
     /// The `HEAD.CHAR` payload naming the output encoding.
     pub(crate) fn charset(&self) -> &'static str {
         self.encoding.char_label()

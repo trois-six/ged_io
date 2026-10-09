@@ -226,7 +226,13 @@ pub(crate) fn field_order(version: GedcomVersion) -> &'static FieldOrder {
                         leaf: field.leaf,
                         many: field.many,
                     };
-                    slot.extend(field.tags.iter().map(|&tag| (tag, field_shape)));
+                    slot.extend(
+                        field
+                            .tags
+                            .iter()
+                            .filter_map(|&tag| crate::tree::node::standard_index(tag))
+                            .map(|standard| (standard, field_shape)),
+                    );
                 }
             }
         }

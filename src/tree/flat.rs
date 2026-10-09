@@ -215,7 +215,7 @@ impl<'s> Flat<'s> {
         let repeat = std::mem::take(&mut self.repeat);
         let index = self.nodes.len();
         let mut ty = UNTYPED;
-        if let (Some(typing), false) = (self.typing, self.untyped) {
+        if let (false, Some(typing)) = (self.untyped, self.typing.as_ref()) {
             let parent = self.open.last().map(|&p| p as usize);
             let sup = match parent {
                 Some(p) => self.nodes.get(p).map_or(UNTYPED, |n| n.ty),
@@ -281,7 +281,7 @@ impl<'s> Flat<'s> {
         payload: FlatPayload<'s>,
     ) -> usize {
         self.repeat = false;
-        if let (Some(_), false) = (self.typing, self.untyped) {
+        if !self.untyped && self.typing.is_some() {
             // An extension structure under a typed one (or as the record)
             // is left to the check; anything else untyped is not.
             if self.extension.is_none() {
@@ -346,7 +346,10 @@ impl<'s> Flat<'s> {
             node.end = end;
         }
         self.depth = self.depth.saturating_sub(1);
-        if let (Some(typing), false) = (self.typing, self.untyped) {
+        if self.untyped {
+            return;
+        }
+        if let Some(typing) = self.typing.as_ref() {
             if let Some(depth) = self.extension {
                 if depth == self.depth {
                     self.extension = None;
@@ -354,7 +357,7 @@ impl<'s> Flat<'s> {
                 return;
             }
             self.open.pop();
-            if !self.has_required(&typing, at) {
+            if !self.has_required(typing, at) {
                 self.untyped = true;
             }
         }

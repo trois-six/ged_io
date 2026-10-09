@@ -453,6 +453,11 @@ impl Store {
         &self.input
     }
 
+    /// The size of the decoded input, in bytes.
+    pub(crate) fn input_len(&self) -> usize {
+        self.input.len()
+    }
+
     /// The tables being filled while reading: the input, the pieces and
     /// the identifiers.
     pub(crate) fn parts_mut(&mut self) -> (&str, &mut Vec<TextPiece>, &mut XrefTable) {
