@@ -296,6 +296,24 @@ impl Picker {
         }
     }
 
+    /// [`Picker::pick`] of a standard tag, by its index among the tree's
+    /// standard tags: the type and the tag's index in the tables, or `None`
+    /// when the tag is no structure of `sup` in the version.
+    #[inline]
+    pub(crate) fn place(
+        self,
+        sup: StructId,
+        standard: u16,
+        is_pointer: bool,
+    ) -> Option<(StructId, u8)> {
+        let index = self.spec_tag(standard)?;
+        let ty = match self.table {
+            Some(table) => table.get(sup, index, is_pointer),
+            None => choose(self.rules.spec, sup, index, is_pointer),
+        }?;
+        Some((ty, index))
+    }
+
     /// The index in the tables' tags of a tag of the tree's standard table.
     pub(crate) fn spec_tag(self, standard: u16) -> Option<u8> {
         self.spec_tags

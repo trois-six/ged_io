@@ -18,6 +18,7 @@
 //! Languages are not an enumeration here: 7.x tags them in BCP 47, an open
 //! grammar, and 5.5.1's `LANGUAGE_ID` names are kept as text too.
 
+use crate::spec::schema::Kind;
 use crate::tree::{Flat, FlatPayload, Payload, Structure};
 use crate::version::GedcomVersion;
 
@@ -84,6 +85,12 @@ pub(crate) fn write_enum<E: Enumeration>(value: &E, cx: &WriteCx<'_>) -> Payload
         (None, Some(t)) => cx.text(t),
         (None, None) => Payload::None,
     }
+}
+
+/// A known value spelled in the target version is one of its set's
+/// values: trusted ([`PayloadField::claim`]).
+pub(crate) fn claim_enum<E: Enumeration>(value: &E, cx: &WriteCx<'_>) -> Option<Kind> {
+    value.spelling(cx.version).map(|_| Kind::Enum)
 }
 
 /// [`write_enum`], borrowed.
@@ -203,6 +210,10 @@ macro_rules! gedcom_enum {
 
             fn payload<'s>(&'s self, cx: &WriteCx<'s>) -> FlatPayload<'s> {
                 write_enum_flat(self, cx)
+            }
+
+            fn claim(&self, cx: &WriteCx<'_>) -> Option<Kind> {
+                claim_enum(self, cx)
             }
         }
 
@@ -740,6 +751,14 @@ impl<E: Enumeration> PayloadField for EnumList<E> {
         WriteCx::str(&items.join(", "))
     }
 
+    fn claim(&self, cx: &WriteCx<'_>) -> Option<Kind> {
+        // Known values, spelled in the target version and joined by `, `.
+        self.0
+            .iter()
+            .all(|e| e.spelling(cx.version).is_some())
+            .then_some(Kind::ListEnum)
+    }
+
     fn payload<'s>(&'s self, cx: &WriteCx<'s>) -> FlatPayload<'s> {
         // One known value is its static spelling; a list is joined.
         match self.0.as_slice() {
@@ -763,7 +782,7 @@ impl<E: Enumeration> super::driver::ToNodes for EnumList<E> {
         super::driver::write_leaf(self, tag, cx)
     }
 
-    fn to_flat<'s>(&'s self, tag: &'static str, cx: &WriteCx<'s>, out: &mut Flat<'s>) {
+    fn to_flat<'s>(&'s self, tag: super::driver::StdTag, cx: &WriteCx<'s>, out: &mut Flat<'s>) {
         super::driver::write_leaf_flat(self, tag, cx, out);
     }
 }
@@ -871,8 +890,17 @@ impl<E: Enumeration> super::driver::Fields for Phrased<E> {
         write_enum_flat(&self.value, cx)
     }
 
+    fn payload_claim(&self, cx: &WriteCx<'_>) -> Option<Kind> {
+        claim_enum(&self.value, cx)
+    }
+
     fn write_fields_flat<'s>(&'s self, cx: &WriteCx<'s>, out: &mut Flat<'s>) {
-        super::driver::Slot::to_flat(&self.phrase, "PHRASE", cx, out);
+        super::driver::Slot::to_flat(
+            &self.phrase,
+            const { super::driver::StdTag::new("PHRASE") },
+            cx,
+            out,
+        );
     }
 }
 
@@ -887,8 +915,8 @@ impl<E: Enumeration> super::driver::ToNodes for Phrased<E> {
         super::driver::write(self, tag, cx)
     }
 
-    fn to_flat<'s>(&'s self, tag: &'static str, cx: &WriteCx<'s>, out: &mut Flat<'s>) {
-        super::driver::write_flat(self, tag, cx, out);
+    fn to_flat<'s>(&'s self, tag: super::driver::StdTag, cx: &WriteCx<'s>, out: &mut Flat<'s>) {
+        super::driver::write_flat(self, tag, cx, out, None);
     }
 
     fn visit(

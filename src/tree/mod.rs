@@ -72,7 +72,7 @@ pub use reader::TreeReader;
 pub use tag::Tag;
 pub use xref::{Xref, XrefForm};
 
-pub(crate) use flat::{Flat, FlatPayload};
+pub(crate) use flat::{Flat, FlatPayload, FlatRef};
 pub(crate) use lexer::{
     find_eol, head_version, lex_line, normalize_eol, pointer, terminator_len, unescape_into,
     unescape_spans, Builder, Escaping, Kind as RawKind, Line, Lines, RawNode, Span as RawSpan,
