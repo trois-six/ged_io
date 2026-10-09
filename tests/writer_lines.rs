@@ -463,8 +463,8 @@ fn test_tabs_are_spaces_in_551_and_kept_in_7() {
     assert!(write(&data, GedcomVersion::V7_0).contains("1 NOTE a\tb\n"));
 }
 
-/// Whether a line's payload starts with white space, which the token reader
-/// still trims (D16) until the builder reads through the tree.
+/// Whether a line's payload starts with white space (or U+FEFF), which the
+/// token reader still trims (D16) until the builder reads through the tree.
 fn starts_with_white_space(line: &str) -> bool {
     let rest = line.split_once(' ').map_or("", |(_, r)| r);
     let rest = match rest.strip_prefix('@') {
@@ -472,7 +472,7 @@ fn starts_with_white_space(line: &str) -> bool {
         None => rest,
     };
     rest.split_once(' ')
-        .is_some_and(|(_, p)| p.starts_with(char::is_whitespace))
+        .is_some_and(|(_, p)| p.starts_with(|c: char| c.is_whitespace() || c == '\u{feff}'))
 }
 
 /// Writing is idempotent: write(read(write(x))) == write(x), on every
