@@ -220,7 +220,7 @@ impl Age {
             return unchanged();
         };
         let grammar = Grammar::from(version);
-        let valid = AgeValue::strict(raw, grammar).is_ok();
+        let valid = AgeValue::is_strict(raw, grammar);
         if valid && (grammar == Grammar::V7 || self.phrase.is_none()) {
             return unchanged();
         }
@@ -276,7 +276,7 @@ impl Age {
             }
         };
         match converted.value.as_deref() {
-            Some(value) if AgeValue::strict(value, grammar).is_ok() => converted,
+            Some(value) if AgeValue::is_strict(value, grammar) => converted,
             _ => unchanged(),
         }
     }
@@ -316,6 +316,14 @@ impl AgeValue {
         let mut ck = Checker::strict(grammar);
         let value = parse_age(text, &mut ck);
         ck.finish("Age", text, value)
+    }
+
+    /// Whether [`strict`](Self::strict) accepts `text`, found without the
+    /// value or the reason.
+    pub(crate) fn is_strict(text: &str, grammar: Grammar) -> bool {
+        let mut ck = Checker::verdict(grammar);
+        let _ = parse_age(text, &mut ck);
+        ck.passed()
     }
 
     /// The age in the grammar of `version`.
@@ -398,7 +406,7 @@ fn parse_age(text: &str, ck: &mut Checker) -> AgeValue {
         AgeValue::Duration { bound, duration }
     } else {
         ck.fail(|| "not an age".to_string());
-        AgeValue::Text(trimmed.to_string())
+        AgeValue::Text(ck.kept(trimmed))
     }
 }
 
@@ -424,7 +432,9 @@ fn parse_duration(text: &str, ck: &mut Checker) -> Option<(Option<AgeBound>, Age
     let body = rest.trim_start();
 
     let mut duration = AgeDuration::default();
-    let mut order = Vec::with_capacity(4);
+    // Each unit is read once: at most four, in the order read.
+    let mut order = [b'y'; 4];
+    let mut units = 0;
     let mut rest = body;
     while !rest.is_empty() {
         let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
@@ -445,7 +455,7 @@ fn parse_duration(text: &str, ck: &mut Checker) -> Option<(Option<AgeBound>, Age
                 (c.to_ascii_lowercase(), &unit_at[1..])
             }
             // A number without unit, first: years.
-            _ if order.is_empty() => {
+            _ if units == 0 => {
                 ck.fail(|| "a number needs its unit".to_string());
                 ('y', unit_at)
             }
@@ -463,7 +473,11 @@ fn parse_duration(text: &str, ck: &mut Checker) -> Option<(Option<AgeBound>, Age
         if slot.replace(count).is_some() {
             return None;
         }
-        order.push(unit);
+        // Four distinct units at most: a fifth would repeat one.
+        if let Some(at) = order.get_mut(units) {
+            *at = unit as u8;
+        }
+        units += 1;
         let next = tail.trim_start();
         if !next.is_empty() {
             ck.require(
@@ -476,9 +490,10 @@ fn parse_duration(text: &str, ck: &mut Checker) -> Option<(Option<AgeBound>, Age
     if duration.is_empty() {
         return None;
     }
-    let rank = |unit: &char| "ymwd".find(*unit);
+    let rank = |unit: u8| b"ymwd".iter().position(|&u| u == unit);
+    let order = order.get(..units).unwrap_or_default();
     ck.require(
-        order.windows(2).all(|pair| rank(&pair[0]) < rank(&pair[1])),
+        order.windows(2).all(|pair| rank(pair[0]) < rank(pair[1])),
         || "components are written years, months, weeks, days".to_string(),
     );
     Some((bound, duration))
