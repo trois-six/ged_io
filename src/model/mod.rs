@@ -101,6 +101,8 @@ mod place;
 pub(crate) mod read;
 mod record;
 pub(crate) mod relocate;
+#[cfg(feature = "serde")]
+pub(crate) mod serde;
 mod text;
 pub(crate) mod write;
 

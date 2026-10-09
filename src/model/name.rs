@@ -72,6 +72,52 @@ impl super::relocate::Relocate for NamePiece {
     }
 }
 
+#[cfg(feature = "serde")]
+impl super::serde::SerializeIn for NamePiece {
+    fn serialize_in<S: ::serde::Serializer>(&self, store: &Store, s: S) -> Result<S::Ok, S::Error> {
+        use super::serde::In;
+        use ::serde::ser::SerializeMap as _;
+        let mut map = s.serialize_map(Some(2))?;
+        map.serialize_entry("kind", &In(store, &self.kind))?;
+        map.serialize_entry("value", &In(store, &self.value))?;
+        map.end()
+    }
+}
+
+#[cfg(feature = "serde")]
+impl super::serde::DeserializeIn for NamePiece {
+    fn deserialize_in<'de, D: ::serde::Deserializer<'de>>(
+        store: &mut Store,
+        d: D,
+    ) -> Result<Self, D::Error> {
+        /// The visitor of the fields.
+        struct V<'s>(&'s mut Store);
+        impl<'de> ::serde::de::Visitor<'de> for V<'_> {
+            type Value = NamePiece;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a name piece")
+            }
+            fn visit_map<A: ::serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<NamePiece, A::Error> {
+                use super::serde::Seed;
+                let store = self.0;
+                let mut out = NamePiece::default();
+                while let Some(key) = map.next_key::<super::serde::Str<'de>>()? {
+                    match &*key.0 {
+                        "kind" => out.kind = map.next_value_seed(Seed::new(&mut *store))?,
+                        "value" => out.value = map.next_value_seed(Seed::new(&mut *store))?,
+                        _ => super::serde::skip(&mut map)?,
+                    }
+                }
+                Ok(out)
+            }
+        }
+        d.deserialize_map(V(store))
+    }
+}
+
 /// The pieces of `kind` among `pieces`.
 fn pieces_of(pieces: &[NamePiece], kind: NamePieceKind) -> impl Iterator<Item = &Text> {
     pieces

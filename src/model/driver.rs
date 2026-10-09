@@ -597,6 +597,36 @@ macro_rules! tag_enum {
 
         $crate::model::relocate::relocate_nothing!($name);
 
+        #[cfg(feature = "serde")]
+        impl $crate::model::serde::SerializeIn for $name {
+            fn serialize_in<S: ::serde::Serializer>(
+                &self,
+                _store: &$crate::model::Store,
+                s: S,
+            ) -> Result<S::Ok, S::Error> {
+                match self {
+                    Self::$first => s.serialize_str(stringify!($first)),
+                    $(Self::$variant => s.serialize_str(stringify!($variant)),)*
+                }
+            }
+        }
+
+        #[cfg(feature = "serde")]
+        impl $crate::model::serde::DeserializeIn for $name {
+            fn deserialize_in<'de, D: ::serde::Deserializer<'de>>(
+                _store: &mut $crate::model::Store,
+                d: D,
+            ) -> Result<Self, D::Error> {
+                const NAMES: &[&str] = &[stringify!($first), $(stringify!($variant)),*];
+                let name = <$crate::model::serde::Str<'de> as ::serde::Deserialize>::deserialize(d)?;
+                match &*name.0 {
+                    stringify!($first) => Ok(Self::$first),
+                    $(stringify!($variant) => Ok(Self::$variant),)*
+                    other => Err(::serde::de::Error::unknown_variant(other, NAMES)),
+                }
+            }
+        }
+
         impl $crate::model::driver::TagField for $name {
             fn from_tag(tag: &'static str) -> Option<Self> {
                 match tag {
@@ -1266,10 +1296,15 @@ pub(crate) fn write(s: &dyn Fields, tag: &'static str, cx: &WriteCx<'_>) -> Stru
 /// structure holds it as `detail: Option<Box<…>>`, allocated when one of
 /// its fields is read or set, and has `detail()` (the detail, or an empty
 /// one) and `detail_mut()` (allocating it).
+///
+/// A `[chain = field: Type]` last says that the detail's `field`, a `Vec`
+/// of `Type`, holds structures that hold this type in turn (notes and
+/// citations): a list of either is serialized flat
+/// ([`serialize_chain`](crate::model::serde::serialize_chain)).
 macro_rules! gedcom_struct {
     (
         $(#[$meta:meta])*
-        pub struct $name:ident $([tag = $tagfn:path])? $([convert = $convfn:path, $untypedfn:path])? {
+        pub struct $name:ident $([tag = $tagfn:path])? $([convert = $convfn:path, $untypedfn:path])? $([chain = $link:ident : $other:ty])? {
             $(@xref $(#[$xmeta:meta])* $xfield:ident;)?
             $(@tag $(#[$tmeta:meta])* $tfield:ident : $tty:ty;)?
             $(@payload $(#[$pmeta:meta])* $pfield:ident : $pty:ty;)?
@@ -1637,6 +1672,162 @@ macro_rules! gedcom_struct {
                 )?
                 $crate::model::relocate::Relocate::relocate(&mut self.extra, r);
             }
+        }
+
+        #[cfg(feature = "serde")]
+        impl $crate::model::serde::SerializeIn for $name {
+            fn serialize_in<S: ::serde::Serializer>(
+                &self,
+                store: &$crate::model::Store,
+                s: S,
+            ) -> Result<S::Ok, S::Error> {
+                self.serialize_but(store, s, "")
+            }
+
+            fn serialize_but<S: ::serde::Serializer>(
+                &self,
+                store: &$crate::model::Store,
+                s: S,
+                skip: &str,
+            ) -> Result<S::Ok, S::Error> {
+                use ::serde::ser::SerializeMap as _;
+                use $crate::model::serde::In;
+                let mut count = usize::from(!self.extra.is_empty_in());
+                $(count += usize::from(!self.$xfield.is_empty_in());)?
+                $(count += usize::from(!self.$tfield.is_empty_in());)?
+                $(count += usize::from(!self.$pfield.is_empty_in());)?
+                $(count += usize::from(stringify!($field) != skip && !self.$field.is_empty_in());)*
+                $(
+                    {
+                        let d: &$dname = self.detail();
+                        $(count += usize::from(stringify!($gfield) != skip && !d.$gfield.is_empty_in());)*
+                    }
+                )?
+                let mut map = s.serialize_map(Some(count))?;
+                $(
+                    if !self.$xfield.is_empty_in() {
+                        map.serialize_entry(stringify!($xfield), &In(store, &self.$xfield))?;
+                    }
+                )?
+                $(
+                    if !self.$tfield.is_empty_in() {
+                        map.serialize_entry(stringify!($tfield), &In(store, &self.$tfield))?;
+                    }
+                )?
+                $(
+                    if !self.$pfield.is_empty_in() {
+                        map.serialize_entry(stringify!($pfield), &In(store, &self.$pfield))?;
+                    }
+                )?
+                $(
+                    if stringify!($field) != skip && !self.$field.is_empty_in() {
+                        map.serialize_entry(stringify!($field), &In(store, &self.$field))?;
+                    }
+                )*
+                $(
+                    {
+                        let d: &$dname = self.detail();
+                        $(
+                            if stringify!($gfield) != skip && !d.$gfield.is_empty_in() {
+                                map.serialize_entry(stringify!($gfield), &In(store, &d.$gfield))?;
+                            }
+                        )*
+                    }
+                )?
+                if !self.extra.is_empty_in() {
+                    map.serialize_entry("extra", &In(store, &self.extra))?;
+                }
+                map.end()
+            }
+
+            $(
+                fn serialize_list<S: ::serde::Serializer>(
+                    items: &[Self],
+                    store: &$crate::model::Store,
+                    s: S,
+                ) -> Result<S::Ok, S::Error> {
+                    let _: ::std::marker::PhantomData<$other> = ::std::marker::PhantomData;
+                    $crate::model::serde::serialize_chain(items, store, s)
+                }
+            )?
+        }
+
+        $(
+            #[cfg(feature = "serde")]
+            impl $crate::model::serde::Chain for $name {
+                type Other = $other;
+                const LINK: &'static str = stringify!($link);
+
+                fn links(&self) -> &[$other] {
+                    &self.detail().$link
+                }
+
+                fn links_mut(&mut self) -> &mut Vec<$other> {
+                    &mut self.detail_mut().$link
+                }
+            }
+        )?
+
+        #[cfg(feature = "serde")]
+        impl $crate::model::serde::DeserializeIn for $name {
+            fn deserialize_in<'de, D: ::serde::Deserializer<'de>>(
+                store: &mut $crate::model::Store,
+                d: D,
+            ) -> Result<Self, D::Error> {
+                /// The visitor of the fields.
+                struct V<'s>(&'s mut $crate::model::Store);
+                impl<'de> ::serde::de::Visitor<'de> for V<'_> {
+                    type Value = $name;
+                    fn expecting(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                        f.write_str(concat!("the fields of ", stringify!($name)))
+                    }
+                    fn visit_map<A: ::serde::de::MapAccess<'de>>(
+                        self,
+                        mut map: A,
+                    ) -> Result<$name, A::Error> {
+                        use $crate::model::serde::Seed;
+                        let store = self.0;
+                        let mut out = <$name as ::std::default::Default>::default();
+                        while let Some(key) = map.next_key::<$crate::model::serde::Str<'de>>()? {
+                            match &*key.0 {
+                                $(stringify!($xfield) => {
+                                    out.$xfield = map.next_value_seed(Seed::new(&mut *store))?;
+                                })?
+                                $(stringify!($tfield) => {
+                                    out.$tfield = map.next_value_seed(Seed::new(&mut *store))?;
+                                })?
+                                $(stringify!($pfield) => {
+                                    out.$pfield = map.next_value_seed(Seed::new(&mut *store))?;
+                                })?
+                                $(stringify!($field) => {
+                                    out.$field = map.next_value_seed(Seed::new(&mut *store))?;
+                                })*
+                                $($(stringify!($gfield) => {
+                                    out.detail_mut().$gfield =
+                                        map.next_value_seed(Seed::new(&mut *store))?;
+                                })*)?
+                                "extra" => {
+                                    out.extra = map.next_value_seed(Seed::new(&mut *store))?;
+                                }
+                                _ => $crate::model::serde::skip(&mut map)?,
+                            }
+                        }
+                        Ok(out)
+                    }
+                }
+                d.deserialize_map(V(store))
+            }
+
+            $(
+                fn deserialize_list<'de, D: ::serde::Deserializer<'de>>(
+                    store: &mut $crate::model::Store,
+                    d: D,
+                    push: &mut dyn FnMut(Self),
+                ) -> Result<(), D::Error> {
+                    let _: ::std::marker::PhantomData<$other> = ::std::marker::PhantomData;
+                    $crate::model::serde::deserialize_chain(store, d, push)
+                }
+            )?
         }
     };
     (@read_xref $self:ident $node:ident $cx:ident) => {{
