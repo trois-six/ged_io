@@ -8,6 +8,7 @@ use std::borrow::Cow;
 
 use crate::types::age::AgeValue;
 use crate::types::date::{DateExact, DatePeriod, DateValue, Time};
+use crate::types::value::Grammar;
 use crate::version::VersionRules;
 use crate::writer::{special_bytes, CONTROL, MAYBE_BANNED, TAB};
 use crate::GedcomVersion;
@@ -76,7 +77,22 @@ pub(crate) fn is_valid(kind: Kind, set: Option<&EnumSet>, text: &str, family: Fa
         debug_assert_eq!(check(kind, set, text, family), None, "{text:?}");
         return true;
     }
-    check(kind, set, text, family).is_none()
+    // The grammars of values tell whether without saying why.
+    let grammar = Grammar::from(family.version());
+    let valid = match kind {
+        Kind::Date => DateValue::is_strict(text, grammar),
+        Kind::DateExact => DateExact::is_strict(text, grammar),
+        Kind::DatePeriod => DatePeriod::is_strict(text, grammar),
+        Kind::Time => Time::is_strict(text, grammar),
+        Kind::Age
+            if !(family == Family::V551 && matches!(text.as_bytes(), [b'<' | b'>', b' ', ..])) =>
+        {
+            AgeValue::is_strict(text, grammar)
+        }
+        _ => return check(kind, set, text, family).is_none(),
+    };
+    debug_assert_eq!(valid, check(kind, set, text, family).is_none(), "{text:?}");
+    valid
 }
 
 /// Whether `text` is a Gregorian date of the commonest shapes, valid in
