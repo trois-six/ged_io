@@ -54,8 +54,13 @@ pub(crate) fn is_banned(c: char, rules: &VersionRules) -> bool {
 /// of it, is tested eight bytes at a time ([`special_bytes`]).
 #[inline]
 pub(crate) fn has_banned(text: &str, rules: &VersionRules) -> bool {
-    special_bytes(text) & (TAB | CONTROL | MAYBE_BANNED) != 0
-        && text.chars().any(|c| is_banned(c, rules))
+    has_banned_known(text, special_bytes(text), rules)
+}
+
+/// [`has_banned`] of a text whose [`special_bytes`] are `special`.
+#[inline]
+pub(crate) fn has_banned_known(text: &str, special: u8, rules: &VersionRules) -> bool {
+    special & (TAB | CONTROL | MAYBE_BANNED) != 0 && text.chars().any(|c| is_banned(c, rules))
 }
 
 /// Whether `text` is a valid payload of `kind` ([`check`] finds nothing).

@@ -11,7 +11,7 @@ use crate::types::date as values;
 use crate::types::date::time::Time;
 use crate::types::date::value::{DateExact, DatePeriod, DateValue};
 
-use super::driver::{gedcom_struct, WriteCx};
+use super::driver::{gedcom_struct, Converted, WriteCx};
 use super::list::ThinVec;
 use super::node::{Extra, Node, Value};
 use super::note::Note;
@@ -38,15 +38,44 @@ fn owned(text: Option<&Text>, cx: &WriteCx<'_>) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// What [`date_to_version`] makes of a date.
+enum DateConversion {
+    /// It is valid in the target's grammar, as the conformance check finds
+    /// it ([`crate::spec::payload::is_valid`]): written as it is.
+    Valid,
+    /// Written as it is: in the target's grammar already, or not one the
+    /// grammar can read.
+    AsIs,
+    /// Written so.
+    Into(values::Date),
+}
+
 /// A date, its time and its phrase in the target version's grammar
-/// ([`values::Date::to_version`]): `None` when they are in it already, or
-/// when the grammar cannot read them (they are written as they are).
+/// ([`values::Date::to_version`]), the date of `kind` (a date value, an
+/// exact date or a period).
+///
+/// A date valid in the target's grammar (most are: dates of the commonest
+/// shapes without a parse) is written as it is, and said valid, so that
+/// the conformance check need not read it again.
 fn date_to_version(
     value: &Text,
     time: Option<&Text>,
     phrase: Option<&Text>,
+    kind: Kind,
     cx: &WriteCx<'_>,
-) -> Option<values::Date> {
+) -> DateConversion {
+    let family = Family::of(cx.version.rules());
+    let valid = |kind, text: &str| crate::spec::payload::is_valid(kind, None, text, family);
+    if phrase.is_none() {
+        let text = value.to_str(cx.store);
+        if valid(kind, &text) && time.is_none_or(|t| valid(Kind::Time, &t.to_str(cx.store))) {
+            debug_assert!(
+                convert(value, time, None, cx).is_none(),
+                "{value:?} {time:?}"
+            );
+            return DateConversion::Valid;
+        }
+    }
     // A date of the commonest shapes is written alike in every version
     // (5.5.1 reads its month in any case, 7.x in upper case).
     if time.is_none() && phrase.is_none() {
@@ -55,7 +84,7 @@ fn date_to_version(
         let v7 = cx.version.is_v7();
         if crate::spec::is_simple_date(text, false, !v7) {
             debug_assert!(convert(value, None, None, cx).is_none(), "{value:?}");
-            return None;
+            return DateConversion::AsIs;
         }
         if crate::spec::is_simple_date(text, false, true) {
             let upper = values::Date {
@@ -68,10 +97,13 @@ fn date_to_version(
                 Some(upper.clone()),
                 "{value:?}"
             );
-            return Some(upper);
+            return DateConversion::Into(upper);
         }
     }
-    convert(value, time, phrase, cx)
+    match convert(value, time, phrase, cx) {
+        Some(c) => DateConversion::Into(c),
+        None => DateConversion::AsIs,
+    }
 }
 
 /// [`date_to_version`], by the grammars.
@@ -166,44 +198,69 @@ fn text(s: Option<String>) -> Option<Text> {
     s.map(Text::new)
 }
 
-fn convert_date(date: &Date, cx: &WriteCx<'_>) -> Option<Date> {
+fn convert_date(date: &Date, cx: &WriteCx<'_>) -> Converted<Date> {
     let detail = date.detail();
-    let c = date_to_version(
+    let c = match date_to_version(
         &date.value,
         detail.time.as_ref(),
         detail.phrase.as_ref(),
+        Kind::Date,
         cx,
-    )?;
+    ) {
+        DateConversion::Valid => return Converted::AsIs(Some(Kind::Date)),
+        DateConversion::AsIs => return Converted::AsIs(None),
+        DateConversion::Into(c) => c,
+    };
     let (time, phrase) = (text(c.time), text(c.phrase));
-    Some(Date {
+    Converted::Into(Date {
         value: Text::new(c.value.unwrap_or_default()),
         detail: (time.is_some() || phrase.is_some()).then(|| Box::new(DateDetail { time, phrase })),
         extra: date.extra.clone(),
     })
 }
 
-fn convert_exact(date: &ExactDate, cx: &WriteCx<'_>) -> Option<ExactDate> {
-    let c = date_to_version(&date.value, date.time.as_ref(), None, cx)?;
+fn convert_exact(date: &ExactDate, cx: &WriteCx<'_>) -> Converted<ExactDate> {
+    let c = match date_to_version(&date.value, date.time.as_ref(), None, Kind::DateExact, cx) {
+        DateConversion::Valid => return Converted::AsIs(Some(Kind::DateExact)),
+        DateConversion::AsIs => return Converted::AsIs(None),
+        DateConversion::Into(c) => c,
+    };
     // An exact date has no phrase to carry what the payload cannot say.
-    c.phrase.is_none().then(|| ExactDate {
-        value: Text::new(c.value.unwrap_or_default()),
-        time: text(c.time),
-        extra: date.extra.clone(),
-    })
+    match c.phrase {
+        None => Converted::Into(ExactDate {
+            value: Text::new(c.value.unwrap_or_default()),
+            time: text(c.time),
+            extra: date.extra.clone(),
+        }),
+        Some(_) => Converted::AsIs(None),
+    }
 }
 
-fn convert_period(period: &Period, cx: &WriteCx<'_>) -> Option<Period> {
-    let c = date_to_version(&period.value, None, period.phrase.as_ref(), cx)?;
-    c.time.is_none().then(|| Period {
-        value: Text::new(c.value.unwrap_or_default()),
-        phrase: text(c.phrase),
-        extra: period.extra.clone(),
-    })
+fn convert_period(period: &Period, cx: &WriteCx<'_>) -> Converted<Period> {
+    let c = match date_to_version(
+        &period.value,
+        None,
+        period.phrase.as_ref(),
+        Kind::DatePeriod,
+        cx,
+    ) {
+        DateConversion::Valid => return Converted::AsIs(Some(Kind::DatePeriod)),
+        DateConversion::AsIs => return Converted::AsIs(None),
+        DateConversion::Into(c) => c,
+    };
+    match c.time {
+        None => Converted::Into(Period {
+            value: Text::new(c.value.unwrap_or_default()),
+            phrase: text(c.phrase),
+            extra: period.extra.clone(),
+        }),
+        Some(_) => Converted::AsIs(None),
+    }
 }
 
 /// An age and its phrase in the target version's grammar
 /// ([`age::Age::to_version`]).
-fn convert_age(a: &Age, cx: &WriteCx<'_>) -> Option<Age> {
+fn convert_age(a: &Age, cx: &WriteCx<'_>) -> Converted<Age> {
     let age = age::Age {
         value: owned(Some(&a.value), cx),
         phrase: owned(a.phrase.as_ref(), cx),
@@ -216,10 +273,18 @@ fn convert_age(a: &Age, cx: &WriteCx<'_>) -> Option<Age> {
         crate::spec::payload::check(Kind::Age, None, v, family).is_none()
     });
     if valid && (cx.version.is_v7() || age.phrase.is_none()) {
-        return None;
+        // Valid as written when no character was left out of it.
+        let written = age
+            .value
+            .as_deref()
+            .is_some_and(|v| a.value.eq_str(cx.store, v));
+        return Converted::AsIs(written.then_some(Kind::Age));
     }
     let c = age.to_version(cx.version);
-    (c != age).then(|| Age {
+    if c == age {
+        return Converted::AsIs(None);
+    }
+    Converted::Into(Age {
         value: Text::new(c.value.unwrap_or_default()),
         phrase: text(c.phrase),
         extra: a.extra.clone(),

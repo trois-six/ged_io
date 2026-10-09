@@ -278,6 +278,23 @@ pub(crate) fn emit_tagged(
     standard: bool,
     payload: PayloadRef<'_>,
 ) -> Result<(), WriteError> {
+    emit_known(rules, sink, level, xref, tag, standard, payload, None)
+}
+
+/// [`emit_tagged`], the [`special_bytes`] of a text payload known when
+/// `special` is; for a pointer, `Some(_)` says it is one the writer mapped
+/// ([`XrefMap::pointer`](super::xref::XrefMap::pointer)), valid.
+#[allow(clippy::too_many_arguments)] // The parts of one line, as `emit_tagged` takes them.
+pub(crate) fn emit_known(
+    rules: &VersionRules,
+    sink: &mut LineSink<'_>,
+    level: usize,
+    xref: Option<&str>,
+    tag: &str,
+    standard: bool,
+    payload: PayloadRef<'_>,
+    special: Option<u8>,
+) -> Result<(), WriteError> {
     let level = if level > rules.max_level {
         level_repair(rules, sink, level)?
     } else {
@@ -321,7 +338,8 @@ pub(crate) fn emit_tagged(
         PayloadRef::None => sink.end_line(),
         PayloadRef::Pointer(p) => {
             sink.text.push(' ');
-            if is_valid_pointer(rules, p) {
+            if special.is_some() || is_valid_pointer(rules, p) {
+                debug_assert!(is_valid_pointer(rules, p), "{p}");
                 sink.text.push_str(p);
             } else {
                 let to = candidate_xref(rules, p);
@@ -334,7 +352,10 @@ pub(crate) fn emit_tagged(
             }
             sink.end_line()
         }
-        PayloadRef::Text(text) => emit_text(rules, sink, level, text),
+        PayloadRef::Text(text) => {
+            let special = special.unwrap_or_else(|| special_bytes(text));
+            emit_text_special(rules, sink, level, text, special)
+        }
     }
 }
 
@@ -371,15 +392,26 @@ fn level_repair(
 
 /// Writes the text payload of a started line, with its `CONT` and `CONC`
 /// lines.
+#[cfg(test)]
 fn emit_text(
     rules: &VersionRules,
     sink: &mut LineSink<'_>,
     level: usize,
     text: &str,
 ) -> Result<(), WriteError> {
+    emit_text_special(rules, sink, level, text, special_bytes(text))
+}
+
+/// [`emit_text`] of a text whose [`special_bytes`] are `special`.
+fn emit_text_special(
+    rules: &VersionRules,
+    sink: &mut LineSink<'_>,
+    level: usize,
+    text: &str,
+    special: u8,
+) -> Result<(), WriteError> {
     // Nearly all text is lines of characters that are never banned (LF
     // line breaks at most): each line is escaped and wrapped as it is.
-    let special = special_bytes(text);
     let at_signs = special & AT_SIGN != 0;
     match special & !AT_SIGN {
         0 => plain_line(rules, sink, level, text, at_signs),

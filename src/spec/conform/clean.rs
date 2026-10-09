@@ -14,7 +14,7 @@
 use super::{payload, Conformer, Family, Kind, Pick, StructId, DATASET};
 use crate::spec::schema::EnumSet;
 use crate::spec::validate::is_external_pointer;
-use crate::tree::{Node, PayloadRef};
+use crate::tree::{Flat, Node, PayloadRef};
 use crate::writer::XrefIndex;
 
 /// The occurrences of each tag among the substructures of one structure:
@@ -140,6 +140,52 @@ impl Conformer<'_> {
             },
             _ => false,
         }
+    }
+
+    /// [`Conformer::is_clean_record`] of a record of the typed model that
+    /// typed itself as it was written ([`Flat::typed`]): every structure is
+    /// placed where its type permits it and has what its type requires, so
+    /// only the payloads it did not make valid need a look.
+    /// Its extension structures are walked as any. `None` when one is an
+    /// alias of a standard structure ([`Aliases`](super::Aliases)), which
+    /// the record's walk checks as that structure.
+    pub(super) fn is_clean_typed(&self, flat: &Flat<'_>, walk: &mut Walk<'_>) -> Option<bool> {
+        if !self.aliases.structs.is_empty()
+            && flat
+                .extensions()
+                .any(|e| self.aliases.structs.contains_key(e.tag()))
+        {
+            return None;
+        }
+        walk.size += flat.size();
+        walk.rtype = flat.root_type().unwrap_or(DATASET);
+        Some(
+            flat.checks().all(|(payload, ty, special)| {
+                self.clean_payload_known(payload, ty, Some(special), walk)
+            }) && flat.extensions().all(|e| {
+                let at = At {
+                    xref: e.xref(),
+                    payload: e.payload(),
+                };
+                // An extension tag in the grammar, as a pick finds it.
+                self.rules.is_valid_tag(e.tag()) && self.clean_extension(e, at, true, walk)
+            }),
+        )
+    }
+
+    /// [`Conformer::is_clean`] of a record, its size bound added to
+    /// `walk`.
+    pub(super) fn is_clean_walked<'a, N: Node<'a>>(
+        &self,
+        n: N,
+        ty: StructId,
+        walk: &mut Walk<'_>,
+    ) -> bool {
+        let at = At {
+            xref: n.xref(),
+            payload: n.payload(),
+        };
+        self.clean(n, at, ty, true, walk)
     }
 
     /// Whether the repair of `n`, a structure of type `ty`, would change
@@ -321,6 +367,20 @@ impl Conformer<'_> {
     /// Whether the payload of `n`, of type `ty`, stays as it is
     /// ([`Conformer::payload`]).
     fn clean_payload(&self, payload: PayloadRef<'_>, ty: StructId, walk: &mut Walk<'_>) -> bool {
+        self.clean_payload_known(payload, ty, None, walk)
+    }
+
+    /// [`Conformer::clean_payload`], the [`special_bytes`] of a text
+    /// payload known when `special` is.
+    ///
+    /// [`special_bytes`]: crate::writer::special_bytes
+    fn clean_payload_known(
+        &self,
+        payload: PayloadRef<'_>,
+        ty: StructId,
+        special: Option<u8>,
+        walk: &mut Walk<'_>,
+    ) -> bool {
         let (kind, arg) = self.schema.kind(ty);
         let raw = match payload {
             p if matches!(kind, Kind::Pointer | Kind::NullablePointer) => {
@@ -330,8 +390,16 @@ impl Conformer<'_> {
             PayloadRef::Text(t) => t,
             PayloadRef::None => "",
         };
-        if payload::has_banned(raw, self.rules) {
+        let banned = match special {
+            Some(special) => payload::has_banned_known(raw, special, self.rules),
+            None => payload::has_banned(raw, self.rules),
+        };
+        if banned {
             return false;
+        }
+        // Any text without a banned character is a text.
+        if matches!(kind, Kind::Text | Kind::ListText) {
+            return true;
         }
         let set = matches!(kind, Kind::Enum | Kind::ListEnum)
             .then(|| self.schema.enum_set(arg))
@@ -392,7 +460,7 @@ impl Conformer<'_> {
 
 /// Whether an enumeration value is written as it is: it is its set's
 /// spelling ([`super::canonical`] gives `value` back).
-fn is_canonical(set: &EnumSet, value: &str, family: Family) -> bool {
+pub(super) fn is_canonical(set: &EnumSet, value: &str, family: Family) -> bool {
     match set.values.iter().find(|v| v.eq_ignore_ascii_case(value)) {
         Some(v) => *v == value,
         None => {
@@ -406,7 +474,7 @@ fn is_canonical(set: &EnumSet, value: &str, family: Family) -> bool {
 
 /// Whether a list of enumeration values is written as it is: each item its
 /// set's spelling, separated by `, ` ([`Conformer::list`]).
-fn is_canonical_list(set: &EnumSet, raw: &str, family: Family) -> bool {
+pub(super) fn is_canonical_list(set: &EnumSet, raw: &str, family: Family) -> bool {
     let mut rest = raw;
     let mut first = true;
     for item in payload::list_items(raw).filter(|i| !i.is_empty()) {

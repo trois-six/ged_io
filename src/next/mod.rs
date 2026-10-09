@@ -91,7 +91,7 @@ mod text;
 use std::io;
 
 use crate::spec::conform::Build;
-use crate::tree::{head_version, Builder, Escaping, Flat, FlatPayload, TagInterner};
+use crate::tree::{head_version, Builder, Escaping, Flat, FlatPayload, Structure, TagInterner};
 use crate::version::GedcomVersion;
 use crate::writer::{GedcomWriter, WriteError, WriteReport};
 
@@ -256,6 +256,11 @@ impl<'d> Build<'d> for Built<'d> {
             out.close(at);
         }
     }
+
+    fn owned(&self) -> Option<Structure> {
+        let header = self.record.filter(|r| matches!(r, RecordRef::Header(_)))?;
+        Some(header.to_structure(&self.cx))
+    }
 }
 
 impl Dataset {
@@ -307,6 +312,60 @@ pub mod ledger {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::spec::conform::Typing;
+    use crate::tree::Node as _;
+
+    /// Each record of `text` but the header, written typed for `version`:
+    /// whether it typed itself, the tags of the structures whose payloads
+    /// the check looks at, and of its extension structures.
+    fn typed(text: &str, version: GedcomVersion) -> Vec<(bool, Vec<String>, Vec<String>)> {
+        let data = read_str(text);
+        let cx = WriteCx {
+            store: &data.store,
+            version,
+            convert: true,
+        };
+        let mut flat = Flat::default();
+        flat.set_typing(Some(Typing::of(version)));
+        data.records()
+            .filter(|r| !matches!(r, RecordRef::Header(_)))
+            .map(|r| {
+                flat.clear();
+                r.to_flat(&cx, &mut flat);
+                let checks = flat.check_tags().map(str::to_string).collect();
+                let ext = flat.extensions().map(|e| e.tag().to_string()).collect();
+                (flat.typed(), checks, ext)
+            })
+            .collect()
+    }
+
+    /// A typed record places each structure by its type and trusts the
+    /// values its types made valid (an enumeration value, a date of the
+    /// commonest shapes); its texts and pointers are left to the check.
+    #[test]
+    fn typed_records_trust_their_typed_values() {
+        let text = "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 NAME Ann /Example/\n2 GIVN Ann\n1 SEX F\n1 BIRT\n2 DATE 1 JAN 1900\n2 PLAC Sampleton\n1 FAMS @F1@\n1 _UID 0123\n0 @F1@ FAM\n1 WIFE @I1@\n0 TRLR\n";
+        let records = typed(text, GedcomVersion::V5_5_1);
+        let (typed, checks, ext) = &records[0];
+        assert!(typed);
+        assert_eq!(checks, &["NAME", "GIVN", "PLAC", "FAMS"]);
+        assert_eq!(ext, &["_UID"]);
+        assert_eq!(records[1], (true, vec!["WIFE".to_string()], vec![]));
+    }
+
+    /// What a type cannot vouch for leaves the record to the check's walk:
+    /// a repeated singleton kept in `extra`, a structure the target version
+    /// does not have; an enumeration value of another set is looked at.
+    #[test]
+    fn untyped_structures_leave_the_record_to_the_walk() {
+        let text = "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 SEX F\n1 SEX M\n0 @I2@ INDI\n1 NO MARR\n0 @I3@ INDI\n1 CONL\n2 STAT DNS_CAN\n3 DATE 1 JAN 2000\n0 TRLR\n";
+        let records = typed(text, GedcomVersion::V5_5_1);
+        assert!(!records[0].0, "{records:?}");
+        assert!(!records[1].0, "{records:?}");
+        assert_eq!(records[2], (true, vec!["STAT".to_string()], vec![]));
+        let records = typed(text, GedcomVersion::V7_0);
+        assert!(records[1].0, "{records:?}");
+    }
 
     #[test]
     fn segments_read_as_one_text() {
