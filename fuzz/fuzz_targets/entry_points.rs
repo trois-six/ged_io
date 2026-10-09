@@ -1,7 +1,8 @@
 //! No input may make any entry point panic or hang: every reader (text,
 //! bytes, strict mode, a reader, streaming, GEDZIP), version detection,
 //! reference queries, the writer in every version followed by a re-read,
-//! `Debug`, the indexed view, navigation, and the date, age and time
+//! `Debug`, JSON (read back with the same structures), the indexed view,
+//! navigation, and the date, age and time
 //! grammars with their conversions between versions and calendars.
 #![no_main]
 
@@ -54,7 +55,13 @@ fn values(text: &str) {
 /// The dataset-level queries, plain and indexed.
 fn queries(data: Dataset) {
     let _ = format!("{data:?}");
-    let _ = serde_json::to_string(&data.to_structures());
+    if let Ok(json) = serde_json::to_string(&data) {
+        let back: Dataset = serde_json::from_str(&json).expect("a dataset's JSON reads back");
+        assert!(
+            back.to_structures() == data.to_structures(),
+            "JSON round trip"
+        );
+    }
     let _ = data.dangling_references();
     let _ = data.search_individuals("a").count();
     for indi in data.individuals.iter().take(16) {

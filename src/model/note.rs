@@ -55,6 +55,36 @@ impl super::relocate::Relocate for NoteContent {
     }
 }
 
+#[cfg(feature = "serde")]
+impl super::serde::SerializeIn for NoteContent {
+    fn serialize_in<S: ::serde::Serializer>(
+        &self,
+        store: &super::Store,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        match self {
+            NoteContent::Text(v) => super::serde::serialize_tagged("Text", v, store, s),
+            NoteContent::Shared(v) => super::serde::serialize_tagged("Shared", v, store, s),
+        }
+    }
+}
+
+#[cfg(feature = "serde")]
+impl super::serde::DeserializeIn for NoteContent {
+    fn deserialize_in<'de, D: ::serde::Deserializer<'de>>(
+        store: &mut super::Store,
+        d: D,
+    ) -> Result<Self, D::Error> {
+        super::serde::deserialize_either(
+            store,
+            d,
+            &["Text", "Shared"],
+            NoteContent::Text,
+            NoteContent::Shared,
+        )
+    }
+}
+
 /// A shared note is written `SNOTE` in 7.x, `NOTE` in 5.5.1.
 fn note_tag(note: &Note, tag: &'static str, cx: &WriteCx<'_>) -> &'static str {
     match note.content {

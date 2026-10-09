@@ -191,15 +191,13 @@ pub fn indexed_find(m: Model, xrefs: &[&str]) -> Vec<Option<String>> {
 }
 
 /// Serialises the model to JSON and back; returns the JSON text and whether
-/// the value read back holds the same structures.
+/// the dataset read back holds the same structures.
 #[cfg(feature = "serde")]
 pub fn json_round_trip(m: &Model) -> Result<(String, bool), String> {
     guard(|| {
-        let records = m.to_structures();
-        let json = serde_json::to_string(&records).map_err(|e| e.to_string())?;
-        let back: Vec<ged_io::tree::Structure> =
-            serde_json::from_str(&json).map_err(|e| e.to_string())?;
-        Ok((json, back == records))
+        let json = serde_json::to_string(m).map_err(|e| e.to_string())?;
+        let back: Model = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+        Ok((json, back.to_structures() == m.to_structures()))
     })
 }
 

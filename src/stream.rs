@@ -58,6 +58,12 @@ impl StreamedRecord {
         self.record.record_ref()
     }
 
+    /// The record, owned.
+    #[cfg(feature = "serde")]
+    pub(crate) fn record_owned(&self) -> &Record {
+        &self.record
+    }
+
     /// The store the record's texts and identifiers resolve against.
     #[must_use]
     pub fn store(&self) -> &Store {

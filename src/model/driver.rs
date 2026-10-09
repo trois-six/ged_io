@@ -597,6 +597,36 @@ macro_rules! tag_enum {
 
         $crate::model::relocate::relocate_nothing!($name);
 
+        #[cfg(feature = "serde")]
+        impl $crate::model::serde::SerializeIn for $name {
+            fn serialize_in<S: ::serde::Serializer>(
+                &self,
+                _store: &$crate::model::Store,
+                s: S,
+            ) -> Result<S::Ok, S::Error> {
+                match self {
+                    Self::$first => s.serialize_str(stringify!($first)),
+                    $(Self::$variant => s.serialize_str(stringify!($variant)),)*
+                }
+            }
+        }
+
+        #[cfg(feature = "serde")]
+        impl $crate::model::serde::DeserializeIn for $name {
+            fn deserialize_in<'de, D: ::serde::Deserializer<'de>>(
+                _store: &mut $crate::model::Store,
+                d: D,
+            ) -> Result<Self, D::Error> {
+                const NAMES: &[&str] = &[stringify!($first), $(stringify!($variant)),*];
+                let name = <$crate::model::serde::Str<'de> as ::serde::Deserialize>::deserialize(d)?;
+                match &*name.0 {
+                    stringify!($first) => Ok(Self::$first),
+                    $(stringify!($variant) => Ok(Self::$variant),)*
+                    other => Err(::serde::de::Error::unknown_variant(other, NAMES)),
+                }
+            }
+        }
+
         impl $crate::model::driver::TagField for $name {
             fn from_tag(tag: &'static str) -> Option<Self> {
                 match tag {
@@ -1636,6 +1666,115 @@ macro_rules! gedcom_struct {
                     }
                 )?
                 $crate::model::relocate::Relocate::relocate(&mut self.extra, r);
+            }
+        }
+
+        #[cfg(feature = "serde")]
+        impl $crate::model::serde::SerializeIn for $name {
+            fn serialize_in<S: ::serde::Serializer>(
+                &self,
+                store: &$crate::model::Store,
+                s: S,
+            ) -> Result<S::Ok, S::Error> {
+                use ::serde::ser::SerializeMap as _;
+                use $crate::model::serde::In;
+                let mut count = usize::from(!self.extra.is_empty_in());
+                $(count += usize::from(!self.$xfield.is_empty_in());)?
+                $(count += usize::from(!self.$tfield.is_empty_in());)?
+                $(count += usize::from(!self.$pfield.is_empty_in());)?
+                $(count += usize::from(!self.$field.is_empty_in());)*
+                $(
+                    {
+                        let d: &$dname = self.detail();
+                        $(count += usize::from(!d.$gfield.is_empty_in());)*
+                    }
+                )?
+                let mut map = s.serialize_map(Some(count))?;
+                $(
+                    if !self.$xfield.is_empty_in() {
+                        map.serialize_entry(stringify!($xfield), &In(store, &self.$xfield))?;
+                    }
+                )?
+                $(
+                    if !self.$tfield.is_empty_in() {
+                        map.serialize_entry(stringify!($tfield), &In(store, &self.$tfield))?;
+                    }
+                )?
+                $(
+                    if !self.$pfield.is_empty_in() {
+                        map.serialize_entry(stringify!($pfield), &In(store, &self.$pfield))?;
+                    }
+                )?
+                $(
+                    if !self.$field.is_empty_in() {
+                        map.serialize_entry(stringify!($field), &In(store, &self.$field))?;
+                    }
+                )*
+                $(
+                    {
+                        let d: &$dname = self.detail();
+                        $(
+                            if !d.$gfield.is_empty_in() {
+                                map.serialize_entry(stringify!($gfield), &In(store, &d.$gfield))?;
+                            }
+                        )*
+                    }
+                )?
+                if !self.extra.is_empty_in() {
+                    map.serialize_entry("extra", &In(store, &self.extra))?;
+                }
+                map.end()
+            }
+        }
+
+        #[cfg(feature = "serde")]
+        impl $crate::model::serde::DeserializeIn for $name {
+            fn deserialize_in<'de, D: ::serde::Deserializer<'de>>(
+                store: &mut $crate::model::Store,
+                d: D,
+            ) -> Result<Self, D::Error> {
+                /// The visitor of the fields.
+                struct V<'s>(&'s mut $crate::model::Store);
+                impl<'de> ::serde::de::Visitor<'de> for V<'_> {
+                    type Value = $name;
+                    fn expecting(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                        f.write_str(concat!("the fields of ", stringify!($name)))
+                    }
+                    fn visit_map<A: ::serde::de::MapAccess<'de>>(
+                        self,
+                        mut map: A,
+                    ) -> Result<$name, A::Error> {
+                        use $crate::model::serde::Seed;
+                        let store = self.0;
+                        let mut out = <$name as ::std::default::Default>::default();
+                        while let Some(key) = map.next_key::<$crate::model::serde::Str<'de>>()? {
+                            match &*key.0 {
+                                $(stringify!($xfield) => {
+                                    out.$xfield = map.next_value_seed(Seed::new(&mut *store))?;
+                                })?
+                                $(stringify!($tfield) => {
+                                    out.$tfield = map.next_value_seed(Seed::new(&mut *store))?;
+                                })?
+                                $(stringify!($pfield) => {
+                                    out.$pfield = map.next_value_seed(Seed::new(&mut *store))?;
+                                })?
+                                $(stringify!($field) => {
+                                    out.$field = map.next_value_seed(Seed::new(&mut *store))?;
+                                })*
+                                $($(stringify!($gfield) => {
+                                    out.detail_mut().$gfield =
+                                        map.next_value_seed(Seed::new(&mut *store))?;
+                                })*)?
+                                "extra" => {
+                                    out.extra = map.next_value_seed(Seed::new(&mut *store))?;
+                                }
+                                _ => $crate::model::serde::skip(&mut map)?,
+                            }
+                        }
+                        Ok(out)
+                    }
+                }
+                d.deserialize_map(V(store))
             }
         }
     };

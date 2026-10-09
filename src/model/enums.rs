@@ -226,6 +226,38 @@ macro_rules! gedcom_enum {
                 }
             }
         }
+
+        #[cfg(feature = "serde")]
+        impl $crate::model::serde::SerializeIn for $name {
+            fn serialize_in<S: ::serde::Serializer>(
+                &self,
+                store: &$crate::model::Store,
+                s: S,
+            ) -> Result<S::Ok, S::Error> {
+                match self {
+                    $(Self::$variant => s.serialize_str(stringify!($variant)),)*
+                    Self::Unknown(t) => $crate::model::serde::serialize_unknown(t, store, s),
+                }
+            }
+        }
+
+        #[cfg(feature = "serde")]
+        impl $crate::model::serde::DeserializeIn for $name {
+            fn deserialize_in<'de, D: ::serde::Deserializer<'de>>(
+                _store: &mut $crate::model::Store,
+                d: D,
+            ) -> Result<Self, D::Error> {
+                $crate::model::serde::deserialize_enum(
+                    d,
+                    &[$(stringify!($variant)),*],
+                    |name| match name {
+                        $(stringify!($variant) => Some(Self::$variant),)*
+                        _ => None,
+                    },
+                    Self::Unknown,
+                )
+            }
+        }
     };
     (@opt _) => { None };
     (@opt $l:literal) => { Some($l) };
@@ -947,6 +979,84 @@ impl<E: super::relocate::Relocate> super::relocate::Relocate for Phrased<E> {
         self.value.relocate(r);
         self.phrase.relocate(r);
         self.extra.relocate(r);
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<E: super::serde::SerializeIn> super::serde::SerializeIn for EnumList<E> {
+    fn serialize_in<S: ::serde::Serializer>(
+        &self,
+        store: &super::Store,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        self.0.serialize_in(store, s)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<E: super::serde::DeserializeIn> super::serde::DeserializeIn for EnumList<E> {
+    fn deserialize_in<'de, D: ::serde::Deserializer<'de>>(
+        store: &mut super::Store,
+        d: D,
+    ) -> Result<Self, D::Error> {
+        Vec::deserialize_in(store, d).map(Self)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<E: super::serde::SerializeIn> super::serde::SerializeIn for Phrased<E> {
+    fn serialize_in<S: ::serde::Serializer>(
+        &self,
+        store: &super::Store,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        use super::serde::In;
+        use ::serde::ser::SerializeMap as _;
+        let count = 1 + usize::from(self.phrase.is_some()) + usize::from(!self.extra.is_empty());
+        let mut map = s.serialize_map(Some(count))?;
+        map.serialize_entry("value", &In(store, &self.value))?;
+        if let Some(phrase) = &self.phrase {
+            map.serialize_entry("phrase", &In(store, phrase))?;
+        }
+        if !self.extra.is_empty() {
+            map.serialize_entry("extra", &In(store, &self.extra))?;
+        }
+        map.end()
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<E: super::serde::DeserializeIn + Default> super::serde::DeserializeIn for Phrased<E> {
+    fn deserialize_in<'de, D: ::serde::Deserializer<'de>>(
+        store: &mut super::Store,
+        d: D,
+    ) -> Result<Self, D::Error> {
+        /// The visitor of the fields.
+        struct V<'s, E>(&'s mut super::Store, std::marker::PhantomData<E>);
+        impl<'de, E: super::serde::DeserializeIn + Default> ::serde::de::Visitor<'de> for V<'_, E> {
+            type Value = Phrased<E>;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("an enumeration value and its phrase")
+            }
+            fn visit_map<A: ::serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Phrased<E>, A::Error> {
+                use super::serde::Seed;
+                let store = self.0;
+                let mut out = Phrased::new(E::default());
+                while let Some(key) = map.next_key::<super::serde::Str<'de>>()? {
+                    match &*key.0 {
+                        "value" => out.value = map.next_value_seed(Seed::new(&mut *store))?,
+                        "phrase" => out.phrase = map.next_value_seed(Seed::new(&mut *store))?,
+                        "extra" => out.extra = map.next_value_seed(Seed::new(&mut *store))?,
+                        _ => super::serde::skip(&mut map)?,
+                    }
+                }
+                Ok(out)
+            }
+        }
+        d.deserialize_map(V(store, std::marker::PhantomData))
     }
 }
 
