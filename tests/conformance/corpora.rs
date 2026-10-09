@@ -30,16 +30,10 @@ use std::path::{Path, PathBuf};
 
 const LOCK: &str = include_str!("../fixtures/corpora.lock.tsv");
 const BASELINE: &str = include_str!("../fixtures/conformance/corpora_baseline.tsv");
-/// The same for the pipeline under construction (`RATCHET_TIER=next`).
-const BASELINE_NEXT: &str = include_str!("../fixtures/conformance/corpora_baseline_next.tsv");
 
-/// The baseline of the tier under test, and its file name.
+/// The baseline, and its file name.
 fn baseline() -> (&'static str, &'static str) {
-    if crate::support::ratchet::tier() == "next" {
-        (BASELINE_NEXT, "corpora_baseline_next.tsv")
-    } else {
-        (BASELINE, "corpora_baseline.tsv")
-    }
+    (BASELINE, "corpora_baseline.tsv")
 }
 
 fn root() -> PathBuf {
@@ -183,8 +177,7 @@ fn measure(bytes: &[u8]) -> Measure {
     }
 }
 
-/// gedcom4j and Gramps samples against `corpora_baseline.tsv` (the `next`
-/// tier: `corpora_baseline_next.tsv`). A file that does better than its
+/// gedcom4j and Gramps samples against `corpora_baseline.tsv`. A file that does better than its
 /// baseline fails too, so the baseline only goes down;
 /// `CORPORA_BASELINE_WRITE=1` rewrites it.
 #[test]

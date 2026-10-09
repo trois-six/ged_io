@@ -74,7 +74,7 @@ pub(crate) fn complete(
     }
     head.substructures.splice(0..0, front);
     if let Some(submitter) = submitter {
-        // After what the typed model writes before it (`next::Header`), so
+        // After what the typed model writes before it (`model::Header`), so
         // that a header read back from the output is written the same.
         let at = head
             .substructures

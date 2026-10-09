@@ -17,13 +17,14 @@
 //! # #[cfg(feature = "gedzip")]
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use ged_io::gedzip::{GedzipReader, GedzipWriter};
+//! use ged_io::model::Dataset;
 //! use ged_io::GedcomBuilder;
 //! use std::fs::File;
 //!
 //! // Read a GEDZIP file
 //! let file = File::open("family.gdz")?;
 //! let mut reader = GedzipReader::new(file)?;
-//! let data = reader.parse_gedcom()?;
+//! let data = reader.read_dataset(&GedcomBuilder::new())?;
 //! println!("Found {} individuals", data.individuals.len());
 //!
 //! // List media files in the archive
@@ -32,12 +33,10 @@
 //! }
 //!
 //! // Write a GEDZIP file
-//! let source = "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 TRLR";
-//! let data = GedcomBuilder::new().build_from_str(source)?;
-//!
+//! let data = Dataset::parse("0 HEAD\n1 GEDC\n2 VERS 7.0\n0 TRLR\n");
 //! let output = File::create("output.gdz")?;
 //! let mut writer = GedzipWriter::new(output)?;
-//! writer.write_gedcom(&data)?;
+//! writer.write_dataset(&data)?;
 //! writer.finish()?;
 //! # Ok(())
 //! # }
@@ -52,26 +51,23 @@ use zip::read::ZipArchive;
 use zip::write::ZipWriter;
 use zip::CompressionMethod;
 
-use crate::types::GedcomData;
-use crate::writer::GedcomWriter;
-use crate::GedcomError;
+use crate::model::Dataset;
+use crate::writer::{GedcomWriter, WriteError};
+use crate::{GedcomBuilder, GedcomError};
 
 /// The required filename for the GEDCOM data stream within a GEDZIP archive.
 pub const GEDCOM_FILENAME: &str = "gedcom.ged";
 
-/// Error types specific to GEDZIP operations.
+/// Why a GEDZIP archive cannot be read or written.
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum GedzipError {
-    /// The ZIP archive could not be read or written.
-    ZipError(zip::result::ZipError),
-    /// The GEDZIP archive is missing the required gedcom.ged file.
-    MissingGedcomFile,
-    /// An error occurred while parsing the GEDCOM data.
-    GedcomError(GedcomError),
-    /// An I/O error occurred.
-    IoError(std::io::Error),
-    /// A media file referenced in the GEDCOM was not found in the archive.
-    MissingMediaFile(String),
+    /// The ZIP archive cannot be read or written.
+    Zip(zip::result::ZipError),
+    /// The archive has no `gedcom.ged`.
+    MissingGedcom,
+    /// The archive has no entry of this name.
+    MissingMedia(String),
     /// An entry is larger than the limit set with
     /// [`GedzipReader::max_entry_size`].
     EntryTooLarge {
@@ -80,21 +76,23 @@ pub enum GedzipError {
         /// The limit, in bytes.
         limit: u64,
     },
+    /// Reading or writing failed.
+    Io(std::io::Error),
+    /// Writing the dataset failed.
+    Write(WriteError),
 }
 
 impl std::fmt::Display for GedzipError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ZipError(e) => write!(f, "ZIP error: {e}"),
-            Self::MissingGedcomFile => write!(f, "GEDZIP archive missing required gedcom.ged file"),
-            Self::GedcomError(e) => write!(f, "GEDCOM error: {e}"),
-            Self::IoError(e) => write!(f, "I/O error: {e}"),
-            Self::MissingMediaFile(name) => {
-                write!(f, "Media file not found in archive: {name}")
-            }
+            Self::Zip(e) => write!(f, "ZIP error: {e}"),
+            Self::MissingGedcom => write!(f, "the archive has no {GEDCOM_FILENAME}"),
+            Self::MissingMedia(name) => write!(f, "the archive has no entry {name}"),
             Self::EntryTooLarge { name, limit } => {
-                write!(f, "Archive entry {name} exceeds the {limit}-byte limit")
+                write!(f, "the archive entry {name} exceeds the {limit}-byte limit")
             }
+            Self::Io(e) => write!(f, "I/O error: {e}"),
+            Self::Write(e) => write!(f, "{e}"),
         }
     }
 }
@@ -102,31 +100,29 @@ impl std::fmt::Display for GedzipError {
 impl std::error::Error for GedzipError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::ZipError(e) => Some(e),
-            Self::GedcomError(e) => Some(e),
-            Self::IoError(e) => Some(e),
-            Self::MissingGedcomFile | Self::MissingMediaFile(_) | Self::EntryTooLarge { .. } => {
-                None
-            }
+            Self::Zip(e) => Some(e),
+            Self::Io(e) => Some(e),
+            Self::Write(e) => Some(e),
+            Self::MissingGedcom | Self::MissingMedia(_) | Self::EntryTooLarge { .. } => None,
         }
     }
 }
 
 impl From<zip::result::ZipError> for GedzipError {
     fn from(err: zip::result::ZipError) -> Self {
-        Self::ZipError(err)
-    }
-}
-
-impl From<GedcomError> for GedzipError {
-    fn from(err: GedcomError) -> Self {
-        Self::GedcomError(err)
+        Self::Zip(err)
     }
 }
 
 impl From<std::io::Error> for GedzipError {
     fn from(err: std::io::Error) -> Self {
-        Self::IoError(err)
+        Self::Io(err)
+    }
+}
+
+impl From<WriteError> for GedzipError {
+    fn from(err: WriteError) -> Self {
+        Self::Write(err)
     }
 }
 
@@ -147,8 +143,8 @@ impl From<std::io::Error> for GedzipError {
 /// let file = File::open("family.gdz")?;
 /// let mut reader = GedzipReader::new(file)?;
 ///
-/// // Parse the GEDCOM data
-/// let data = reader.parse_gedcom()?;
+/// // Read the dataset
+/// let data = reader.read_dataset(&ged_io::GedcomBuilder::new())?;
 /// println!("Individuals: {}", data.individuals.len());
 ///
 /// // Read a specific media file
@@ -180,7 +176,7 @@ impl<R: Read + Seek> GedzipReader<R> {
         // Verify gedcom.ged exists
         let has_gedcom = archive.file_names().any(|name| name == GEDCOM_FILENAME);
         if !has_gedcom {
-            return Err(GedzipError::MissingGedcomFile);
+            return Err(GedzipError::MissingGedcom);
         }
 
         // Collect file names
@@ -208,7 +204,15 @@ impl<R: Read + Seek> GedzipReader<R> {
 
     /// Reads a whole entry, within the configured limit.
     fn read_entry(&mut self, name: &str) -> Result<Vec<u8>, GedzipError> {
-        let limit = self.max_entry_size;
+        self.read_entry_within(name, self.max_entry_size)
+    }
+
+    /// Reads a whole entry, within `limit`.
+    fn read_entry_within(
+        &mut self,
+        name: &str,
+        limit: Option<u64>,
+    ) -> Result<Vec<u8>, GedzipError> {
         let file = self.archive.by_name(name)?;
         let too_large = || GedzipError::EntryTooLarge {
             name: name.to_string(),
@@ -249,14 +253,25 @@ impl<R: Read + Seek> GedzipReader<R> {
             .map(String::as_str)
     }
 
-    /// Parses and returns the GEDCOM data from the archive.
+    /// Reads the dataset of the archive (its `gedcom.ged`) with `builder`.
+    /// The builder's size limit applies to `gedcom.ged` as it is
+    /// decompressed: over it, the entry is refused
+    /// ([`GedzipError::EntryTooLarge`]) before it is read whole.
     ///
     /// # Errors
     ///
-    /// Returns an error if the GEDCOM data cannot be read or parsed.
-    pub fn parse_gedcom(&mut self) -> Result<GedcomData, GedzipError> {
-        let bytes = self.read_gedcom_bytes()?;
-        Ok(crate::GedcomBuilder::new().build_from_bytes(&bytes)?)
+    /// [`GedcomError::Gedzip`] when the entry cannot be read; otherwise as
+    /// [`GedcomBuilder::build_from_bytes`].
+    pub fn read_dataset(&mut self, builder: &GedcomBuilder) -> Result<Dataset, GedcomError> {
+        let limit = match (self.max_entry_size, builder.file_size_limit()) {
+            (own, None) => own,
+            (own, Some(max)) => {
+                let max = u64::try_from(max).unwrap_or(u64::MAX);
+                Some(own.map_or(max, |own| own.min(max)))
+            }
+        };
+        let bytes = self.read_entry_within(GEDCOM_FILENAME, limit)?;
+        builder.build_from_bytes(bytes)
     }
 
     /// Reads the raw bytes of the `gedcom.ged` file.
@@ -302,7 +317,7 @@ impl<R: Read + Seek> GedzipReader<R> {
     pub fn read_media_file(&mut self, name: &str) -> Result<Vec<u8>, GedzipError> {
         let entry = self
             .find_entry(name)
-            .ok_or_else(|| GedzipError::MissingMediaFile(name.to_string()))?
+            .ok_or_else(|| GedzipError::MissingMedia(name.to_string()))?
             .to_string();
         self.read_entry(&entry)
     }
@@ -338,7 +353,7 @@ impl<R: Read + Seek> GedzipReader<R> {
 /// # #[cfg(feature = "gedzip")]
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// use ged_io::gedzip::GedzipWriter;
-/// use ged_io::GedcomBuilder;
+/// use ged_io::model::Dataset;
 /// use std::fs::File;
 ///
 /// let source = r#"
@@ -352,13 +367,13 @@ impl<R: Read + Seek> GedzipReader<R> {
 /// 2 FORM image/jpeg
 /// 0 TRLR
 /// "#;
-/// let data = GedcomBuilder::new().build_from_str(source)?;
+/// let data = Dataset::parse(source);
 ///
 /// let output = File::create("family.gdz")?;
 /// let mut writer = GedzipWriter::new(output)?;
 ///
-/// // Write the GEDCOM data
-/// writer.write_gedcom(&data)?;
+/// // Write the dataset
+/// writer.write_dataset(&data)?;
 ///
 /// // Add media files
 /// let photo_bytes = std::fs::read("photos/john.jpg")?;
@@ -390,21 +405,33 @@ impl<W: Write + Seek> GedzipWriter<W> {
         })
     }
 
-    /// Writes the GEDCOM data to the archive as `gedcom.ged`.
+    /// Writes a dataset to the archive as `gedcom.ged`, with the default
+    /// [`GedcomWriter`].
     ///
     /// This should be called before adding any media files.
     ///
     /// # Errors
     ///
-    /// Returns an error if the GEDCOM data cannot be serialized or written.
-    pub fn write_gedcom(&mut self, data: &GedcomData) -> Result<(), GedzipError> {
-        let writer = GedcomWriter::new();
-        let content = writer
-            .write_to_string(data)
-            .map_err(|e| GedzipError::GedcomError(GedcomError::InvalidFormat(e.to_string())))?;
+    /// Returns an error if the archive cannot be written.
+    pub fn write_dataset(&mut self, data: &Dataset) -> Result<(), GedzipError> {
+        self.write_dataset_with(data, &GedcomWriter::new())
+    }
 
-        self.write_gedcom_bytes(content.as_bytes())?;
-        Ok(())
+    /// Writes a dataset to the archive as `gedcom.ged`, with `writer`.
+    ///
+    /// # Errors
+    ///
+    /// [`GedzipError::Write`] when `writer` fails (under
+    /// [`RepairPolicy::Error`](crate::RepairPolicy::Error)); otherwise when
+    /// the archive cannot be written.
+    pub fn write_dataset_with(
+        &mut self,
+        data: &Dataset,
+        writer: &GedcomWriter,
+    ) -> Result<(), GedzipError> {
+        let mut bytes = Vec::new();
+        writer.write(&mut bytes, data)?;
+        self.write_gedcom_bytes(&bytes)
     }
 
     /// Writes raw GEDCOM bytes to the archive as `gedcom.ged`.
@@ -550,10 +577,8 @@ fn entry_key(name: &str) -> String {
 /// # #[cfg(not(feature = "gedzip"))]
 /// # fn main() {}
 /// ```
-pub fn read_gedzip(bytes: &[u8]) -> Result<GedcomData, GedzipError> {
-    let cursor = std::io::Cursor::new(bytes);
-    let mut reader = GedzipReader::new(cursor)?;
-    reader.parse_gedcom()
+pub fn read_gedzip(bytes: &[u8]) -> Result<Dataset, GedcomError> {
+    GedcomBuilder::new().build_from_gedzip(std::io::Cursor::new(bytes))
 }
 
 /// Writes GEDCOM data to a GEDZIP file and returns the bytes.
@@ -566,10 +591,9 @@ pub fn read_gedzip(bytes: &[u8]) -> Result<GedcomData, GedzipError> {
 /// # #[cfg(feature = "gedzip")]
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// use ged_io::gedzip::write_gedzip;
-/// use ged_io::GedcomBuilder;
+/// use ged_io::model::Dataset;
 ///
-/// let source = "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 TRLR";
-/// let data = GedcomBuilder::new().build_from_str(source)?;
+/// let data = Dataset::parse("0 HEAD\n1 GEDC\n2 VERS 7.0\n0 TRLR\n");
 ///
 /// let bytes = write_gedzip(&data)?;
 /// std::fs::write("output.gdz", bytes)?;
@@ -584,10 +608,10 @@ pub fn read_gedzip(bytes: &[u8]) -> Result<GedcomData, GedzipError> {
 /// Returns a `GedzipError` if:
 /// - The GEDCOM data cannot be serialized
 /// - The ZIP archive cannot be created
-pub fn write_gedzip(data: &GedcomData) -> Result<Vec<u8>, GedzipError> {
+pub fn write_gedzip(data: &Dataset) -> Result<Vec<u8>, GedzipError> {
     let cursor = std::io::Cursor::new(Vec::new());
     let mut writer = GedzipWriter::new(cursor)?;
-    writer.write_gedcom(data)?;
+    writer.write_dataset(data)?;
     let cursor = writer.finish()?;
     Ok(cursor.into_inner())
 }
@@ -605,11 +629,10 @@ pub fn write_gedzip(data: &GedcomData) -> Result<Vec<u8>, GedzipError> {
 /// # #[cfg(feature = "gedzip")]
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// use ged_io::gedzip::write_gedzip_with_media;
-/// use ged_io::GedcomBuilder;
+/// use ged_io::model::Dataset;
 /// use std::collections::HashMap;
 ///
-/// let source = "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 TRLR";
-/// let data = GedcomBuilder::new().build_from_str(source)?;
+/// let data = Dataset::parse("0 HEAD\n1 GEDC\n2 VERS 7.0\n0 TRLR\n");
 ///
 /// let mut media = HashMap::new();
 /// media.insert("photos/test.jpg".to_string(), vec![0xFF, 0xD8, 0xFF]);
@@ -629,12 +652,12 @@ pub fn write_gedzip(data: &GedcomData) -> Result<Vec<u8>, GedzipError> {
 /// - A media file cannot be written to the archive
 /// - The ZIP archive cannot be created
 pub fn write_gedzip_with_media<S: std::hash::BuildHasher>(
-    data: &GedcomData,
+    data: &Dataset,
     media_files: &HashMap<String, Vec<u8>, S>,
 ) -> Result<Vec<u8>, GedzipError> {
     let cursor = std::io::Cursor::new(Vec::new());
     let mut writer = GedzipWriter::new(cursor)?;
-    writer.write_gedcom(data)?;
+    writer.write_dataset(data)?;
     writer.add_media_files(media_files)?;
     let cursor = writer.finish()?;
     Ok(cursor.into_inner())
@@ -644,11 +667,8 @@ pub fn write_gedzip_with_media<S: std::hash::BuildHasher>(
 mod tests {
     use super::*;
 
-    fn create_minimal_gedcom() -> GedcomData {
-        let source = "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 TRLR";
-        crate::GedcomBuilder::new()
-            .build_from_str(source)
-            .expect("Failed to parse minimal GEDCOM")
+    fn create_minimal_gedcom() -> Dataset {
+        Dataset::parse("0 HEAD\n1 GEDC\n2 VERS 7.0\n0 TRLR\n")
     }
 
     #[test]
@@ -662,7 +682,7 @@ mod tests {
         let parsed = read_gedzip(&bytes).expect("Failed to read GEDZIP");
 
         // Verify
-        assert!(parsed.is_gedcom_7());
+        assert!(parsed.version().is_v7());
     }
 
     #[test]
@@ -707,7 +727,7 @@ mod tests {
 
         // Try to read as GEDZIP
         let result = GedzipReader::new(std::io::Cursor::new(cursor.into_inner()));
-        assert!(matches!(result, Err(GedzipError::MissingGedcomFile)));
+        assert!(matches!(result, Err(GedzipError::MissingGedcom)));
     }
 
     #[test]
@@ -749,9 +769,7 @@ mod tests {
 1 WIFE @I2@
 0 TRLR";
 
-        let data = crate::GedcomBuilder::new()
-            .build_from_str(source)
-            .expect("Failed to parse");
+        let data = Dataset::parse(source);
 
         // Roundtrip
         let bytes = write_gedzip(&data).expect("Failed to write");
@@ -769,6 +787,34 @@ mod tests {
         let mut reader = GedzipReader::new(cursor).expect("Failed to create reader");
 
         let result = reader.read_media_file("nonexistent.jpg");
-        assert!(matches!(result, Err(GedzipError::MissingMediaFile(_))));
+        assert!(matches!(result, Err(GedzipError::MissingMedia(_))));
+    }
+
+    #[test]
+    fn test_read_through_the_builder() {
+        let data = Dataset::parse("0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 SEX male\n0 TRLR\n");
+        let bytes = write_gedzip(&data).unwrap();
+        let archive = || std::io::Cursor::new(bytes.as_slice());
+        assert!(GedcomBuilder::new().build_from_gedzip(archive()).is_ok());
+        // The builder's limit applies to gedcom.ged, as it is decompressed.
+        assert!(matches!(
+            GedcomBuilder::new()
+                .max_file_size(10)
+                .build_from_gedzip(archive()),
+            Err(GedcomError::Gedzip(GedzipError::EntryTooLarge {
+                limit: 10,
+                ..
+            }))
+        ));
+        // Strict mode applies too: the writer repaired `SEX male`, so the
+        // archive holds a conformant file.
+        assert!(GedcomBuilder::new()
+            .strict(true)
+            .build_from_gedzip(archive())
+            .is_ok());
+        assert!(matches!(
+            GedcomBuilder::new().build_from_gedzip(std::io::Cursor::new(b"not a zip")),
+            Err(GedcomError::Gedzip(GedzipError::Zip(_)))
+        ));
     }
 }

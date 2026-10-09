@@ -15,7 +15,7 @@
 
 use ged_io::spec::{conform, validate, DeviationKind};
 use ged_io::tree::{Payload, Structure, Tag, Tree, Xref};
-use ged_io::{next, Bom, GedcomVersion, GedcomWriter};
+use ged_io::{Bom, Dataset, GedcomVersion, GedcomWriter};
 use std::path::{Path, PathBuf};
 
 /// The versions a dataset is conformed to.
@@ -75,8 +75,12 @@ fn idempotent(records: &[Structure], v: GedcomVersion) -> Option<String> {
         ));
     }
     let text: String = records.iter().map(|r| r.to_gedcom(0, v)).collect();
-    let out = next::write_string(&next::read_str(&text), &writer).expect("repairs");
-    let again = next::write_string(&next::read_str(&out), &writer).expect("repairs");
+    let out = writer
+        .write_to_string(&Dataset::parse(text))
+        .expect("repairs");
+    let again = writer
+        .write_to_string(&Dataset::parse(out.as_str()))
+        .expect("repairs");
     (again != out).then(|| format!("the model is written anew: {}", difference(&out, &again)))
 }
 

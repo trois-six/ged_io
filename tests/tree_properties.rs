@@ -8,7 +8,7 @@
 //! * the tree's dump reads back to the same tree;
 //! * streaming (any buffer size) reads the same records, line numbers
 //!   included, and decodes the same text;
-//! * the token-based entry points do not panic either.
+//! * the typed readers (in memory and streaming) do not panic either.
 //!
 //! The `fuzz/` crate runs the same checks under libFuzzer.
 
@@ -16,7 +16,8 @@ use std::io::{BufReader, Read};
 
 use ged_io::encoding::{decode, DecodeReader};
 use ged_io::tree::{parse_tree, Structure, Tree, TreeReader};
-use ged_io::{GedcomBuilder, GedcomStreamParser};
+use ged_io::version::detect_version;
+use ged_io::{Dataset, GedcomBuilder, GedcomStreamParser};
 
 struct Rng(u64);
 
@@ -129,19 +130,21 @@ fn check(bytes: &[u8], capacity: usize) {
     records.iter().for_each(|s| lines(s, &mut b));
     assert_eq!(a, b, "lines {bytes:?}");
 
-    // The token-based entry points must not panic.
+    // The typed readers must not panic.
     let _ = GedcomBuilder::new().build_from_bytes(bytes);
-    let _ = GedcomBuilder::new().build_from_str(&decoded.text);
+    let _ = GedcomBuilder::new().build_from_str(decoded.text.as_str());
+    let _ = GedcomBuilder::new().strict(true).build_from_bytes(bytes);
+    let _ = Dataset::from_bytes(bytes);
     if let Ok(parser) = GedcomStreamParser::new(BufReader::with_capacity(capacity, bytes)) {
         for record in parser {
             let _ = record;
         }
     }
-    let _ = ged_io::detect_version(&decoded.text);
+    let _ = detect_version(&decoded.text);
 }
 
 #[test]
-fn generated_inputs() {
+fn generated_inputs_never_panic_and_agree() {
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
     for _ in 0..4000 {
         let bytes = generate(&mut rng);
@@ -151,7 +154,7 @@ fn generated_inputs() {
 }
 
 #[test]
-fn fixtures_with_small_buffers() {
+fn fixtures_agree_with_small_buffers() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     for name in ["simple.ged", "sample.ged"] {
         let bytes = std::fs::read(dir.join(name)).unwrap();

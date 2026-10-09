@@ -1,5 +1,6 @@
 //! Reading a stream record by record.
 
+use std::collections::VecDeque;
 use std::io::{self, BufRead};
 
 use super::lexer::{
@@ -141,6 +142,80 @@ impl<R: BufRead> RecordSplitter<R> {
     }
 }
 
+/// The records of a stream of GEDCOM bytes of any encoding, as texts, and
+/// the version its first record declares: what [`TreeReader`] and the
+/// [`GedcomStreamParser`](crate::GedcomStreamParser) read.
+pub(crate) struct RecordSource<R> {
+    splitter: RecordSplitter<DecodeReader<R>>,
+    /// A record read ahead to find the version, and its first line.
+    next: Option<(String, u32)>,
+    escaping: Option<Escaping>,
+    vers: Option<Box<str>>,
+}
+
+impl<R: BufRead> RecordSource<R> {
+    /// Starts reading; this reads the first 64 KiB to choose the decoding.
+    pub(crate) fn new(reader: R) -> io::Result<Self> {
+        Ok(Self {
+            splitter: RecordSplitter::new(DecodeReader::new(reader)?),
+            next: None,
+            escaping: None,
+            vers: None,
+        })
+    }
+
+    pub(crate) fn encoding(&self) -> GedcomEncoding {
+        self.splitter.get_ref().encoding()
+    }
+
+    pub(crate) fn version(&self) -> GedcomVersion {
+        self.vers
+            .as_deref()
+            .map_or(GedcomVersion::V5_5_1, GedcomVersion::from_version_str)
+    }
+
+    pub(crate) fn declared_version(&self) -> Option<&str> {
+        self.vers.as_deref()
+    }
+
+    /// How the stream escapes `@`, once its first record is read.
+    pub(crate) fn escaping(&self) -> Escaping {
+        self.escaping.unwrap_or(Escaping::V551)
+    }
+
+    /// Reads the next record's text into `record`; the line number of its
+    /// first line, or `None` at the end of the input.
+    pub(crate) fn next_record(&mut self, record: &mut String) -> io::Result<Option<u32>> {
+        let first_line = match self.next.take() {
+            Some((text, line)) => {
+                *record = text;
+                line
+            }
+            None => match self.splitter.next_record(record)? {
+                Some(line) => line,
+                None => return Ok(None),
+            },
+        };
+        if self.escaping.is_none() {
+            // The version comes from the first record that starts with a
+            // structure line. Stray lines before it form one record of their
+            // own: read the next record to know how to read them.
+            if starts_stray(record) {
+                let mut next = String::new();
+                if let Some(line) = self.splitter.next_record(&mut next)? {
+                    let both = format!("{record}{next}");
+                    self.vers = head_version(&both).map(Box::from);
+                    self.next = Some((next, line));
+                }
+            } else {
+                self.vers = head_version(record).map(Box::from);
+            }
+            self.escaping = Some(Escaping::of(self.vers.as_deref()));
+        }
+        Ok(Some(first_line))
+    }
+}
+
 /// Reads GEDCOM bytes of any encoding as a stream of records, each a
 /// lossless [`Structure`] tree, with memory bounded by the largest record.
 ///
@@ -158,14 +233,12 @@ impl<R: BufRead> RecordSplitter<R> {
 /// # Ok::<(), std::io::Error>(())
 /// ```
 pub struct TreeReader<R> {
-    splitter: RecordSplitter<DecodeReader<R>>,
+    source: RecordSource<R>,
+    /// Records read already, to yield first.
+    pending: VecDeque<Structure>,
     builder: Builder,
     tags: TagInterner,
     record: String,
-    /// A record read ahead to find the version, and its first line.
-    next: Option<(String, u32)>,
-    escaping: Option<Escaping>,
-    vers: Option<Box<str>>,
 }
 
 impl<R: BufRead> TreeReader<R> {
@@ -175,21 +248,27 @@ impl<R: BufRead> TreeReader<R> {
     ///
     /// Only the I/O errors of `reader`.
     pub fn new(reader: R) -> io::Result<Self> {
-        Ok(Self {
-            splitter: RecordSplitter::new(DecodeReader::new(reader)?),
+        Ok(Self::from_source(
+            RecordSource::new(reader)?,
+            VecDeque::new(),
+        ))
+    }
+
+    /// Reads the rest of `source`, after the `pending` records.
+    pub(crate) fn from_source(source: RecordSource<R>, pending: VecDeque<Structure>) -> Self {
+        Self {
+            source,
+            pending,
             builder: Builder::new(Escaping::V551, 1),
             tags: TagInterner::default(),
             record: String::new(),
-            next: None,
-            escaping: None,
-            vers: None,
-        })
+        }
     }
 
     /// The encoding the input is decoded with.
     #[must_use]
     pub fn encoding(&self) -> GedcomEncoding {
-        self.splitter.get_ref().encoding()
+        self.source.encoding()
     }
 
     /// The version the file declares, once the record that tells it (the
@@ -198,47 +277,24 @@ impl<R: BufRead> TreeReader<R> {
     /// [`Tree::version`]: super::Tree::version
     #[must_use]
     pub fn version(&self) -> GedcomVersion {
-        self.vers
-            .as_deref()
-            .map_or(GedcomVersion::V5_5_1, GedcomVersion::from_version_str)
+        self.source.version()
     }
 
     /// The `HEAD.GEDC.VERS` payload as written, once read.
     #[must_use]
     pub fn declared_version(&self) -> Option<&str> {
-        self.vers.as_deref()
+        self.source.declared_version()
     }
 
     fn read_record(&mut self) -> io::Result<Option<Structure>> {
-        let first_line = match self.next.take() {
-            Some((record, line)) => {
-                self.record = record;
-                line
-            }
-            None => match self.splitter.next_record(&mut self.record)? {
-                Some(line) => line,
-                None => return Ok(None),
-            },
-        };
-        if self.escaping.is_none() {
-            // The version comes from the first record that starts with a
-            // structure line. Stray lines before it form one record of their
-            // own: read the next record to know how to read them.
-            if starts_stray(&self.record) {
-                let mut next = String::new();
-                if let Some(line) = self.splitter.next_record(&mut next)? {
-                    let both = format!("{}{next}", self.record);
-                    self.vers = head_version(&both).map(Box::from);
-                    self.next = Some((next, line));
-                }
-            } else {
-                self.vers = head_version(&self.record).map(Box::from);
-            }
-            self.escaping = Some(Escaping::of(self.vers.as_deref()));
+        if let Some(s) = self.pending.pop_front() {
+            return Ok(Some(s));
         }
+        let Some(first_line) = self.source.next_record(&mut self.record)? else {
+            return Ok(None);
+        };
         self.builder.reset(first_line);
-        self.builder
-            .set_escaping(self.escaping.unwrap_or(Escaping::V551));
+        self.builder.set_escaping(self.source.escaping());
         self.builder.read(&self.record, &mut self.tags);
         let view = arena::View {
             text: &self.record,

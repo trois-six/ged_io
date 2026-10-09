@@ -257,14 +257,14 @@ impl Ord for Tag {
     }
 }
 
-#[cfg(feature = "json")]
+#[cfg(feature = "serde")]
 impl serde::Serialize for Tag {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(self.as_str())
     }
 }
 
-#[cfg(feature = "json")]
+#[cfg(feature = "serde")]
 impl<'de> serde::Deserialize<'de> for Tag {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let s = <std::borrow::Cow<'de, str> as serde::Deserialize>::deserialize(deserializer)?;
