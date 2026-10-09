@@ -289,6 +289,12 @@ fn pointers() {
         v551("0 @I1@ INDI\n1 ASSO @I1!2@\n2 RELA x\n1 FAMC @A:F1@\n"),
         []
     );
+    // Only an identifier of the grammar is one of those: `@!@` is invalid,
+    // and names nothing.
+    assert_eq!(
+        v551("0 @I1@ INDI\n1 FAMC @!@\n"),
+        [(11, K::Xref), (11, K::DanglingPointer)]
+    );
     // A documented alias of a standard record is that record (7.x §1.5.1).
     let schma = "1 SCHMA\n2 TAG _USER https://gedcom.io/terms/v7/record-SUBM\n";
     assert_eq!(

@@ -15,7 +15,7 @@ use super::{Deviation, DeviationKind};
 use crate::tree::node::STANDARD_TAGS;
 use crate::tree::Node;
 use crate::tree::PayloadRef;
-use crate::version::VersionRules;
+use crate::version::{VersionRules, V551};
 
 /// The largest 5.5.1 record (p. 10: "less than 32K").
 pub(crate) const MAX_RECORD_BYTES: usize = 32_767;
@@ -199,9 +199,12 @@ pub(crate) fn xref_error(xref: &str, rules: &VersionRules) -> Option<String> {
 }
 
 /// Whether a 5.5.1 pointer names a substructure (`@I1!2@`) or a record of
-/// another file (`@A:B@`, p. 16): such pointers need no record here.
+/// another file (`@A:B@`, p. 16): such pointers need no record here. Only
+/// an identifier of the 5.5.1 grammar is one: `@!@` names nothing, and is
+/// checked (and repaired) as any pointer, which the writer's renaming of
+/// an invalid pointer (to `@X_@`, no longer of that form) relies on.
 pub(crate) fn is_external_pointer(pointer: &str, family: Family) -> bool {
-    family == Family::V551 && pointer.contains(['!', ':'])
+    family == Family::V551 && pointer.contains(['!', ':']) && V551.is_valid_xref(pointer)
 }
 
 /// What a tag is under a superstructure.
