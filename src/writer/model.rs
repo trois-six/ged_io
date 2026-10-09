@@ -230,8 +230,9 @@ impl<'c, 'a> Ctx<'c, 'a> {
     /// value without the shape of a pointer is not one, and is written as
     /// text.
     fn write_pointer(&mut self, level: usize, tag: &str, value: &str) -> Result<(), WriteError> {
-        if is_pointer_shaped(value) {
-            let pointer = self.xrefs.pointer(value.trim());
+        let shown = as_written(self.rules, value);
+        if is_pointer_shaped(&shown) {
+            let pointer = self.xrefs.pointer(shown.trim());
             self.out
                 .put(level, None, tag, PayloadRef::Pointer(&pointer))
         } else {
@@ -248,9 +249,10 @@ impl<'c, 'a> Ctx<'c, 'a> {
         tag: &str,
         value: Option<&str>,
     ) -> Result<(), WriteError> {
+        let shown = value.map(|v| as_written(self.rules, v));
         match value {
-            Some(v) if is_xref_pointer(v) => {
-                let pointer = self.xrefs.pointer(v);
+            Some(_) if shown.as_deref().is_some_and(is_xref_pointer) => {
+                let pointer = self.xrefs.pointer(shown.as_deref().unwrap_or_default());
                 self.out
                     .put(level, xref, tag, PayloadRef::Pointer(&pointer))
             }
@@ -619,7 +621,21 @@ impl<'c, 'a> Ctx<'c, 'a> {
     fn write_age(&mut self, level: usize, age: &Age) -> Result<(), WriteError> {
         let version = self.rules.version;
         let gedcom_7 = version.is_v7();
-        let age = age.to_version(version);
+        // Converted as it is written: without the characters the version
+        // bans, which would otherwise hide an age the next write converts.
+        let ((value, value_changed), (phrase, phrase_changed)) = (
+            written_part(self.rules, age.value.as_deref()),
+            written_part(self.rules, age.phrase.as_deref()),
+        );
+        let age = if value_changed || phrase_changed {
+            Age {
+                value: value.map(Cow::into_owned),
+                phrase: phrase.map(Cow::into_owned),
+            }
+            .to_version(version)
+        } else {
+            age.to_version(version)
+        };
         let value = age
             .value
             .as_deref()
@@ -1514,7 +1530,20 @@ impl<'c, 'a> Ctx<'c, 'a> {
     fn write_date(&mut self, level: usize, date: &Date) -> Result<(), WriteError> {
         let version = self.rules.version;
         let gedcom_7 = version.is_v7();
-        let date = date.to_version(version);
+        // Converted as it is written ([`Ctx::write_age`]).
+        let parts =
+            [&date.value, &date.time, &date.phrase].map(|p| written_part(self.rules, p.as_deref()));
+        let date = if parts.iter().any(|&(_, changed)| changed) {
+            let [value, time, phrase] = parts.map(|(p, _)| p.map(Cow::into_owned));
+            Date {
+                value,
+                time,
+                phrase,
+            }
+            .to_version(version)
+        } else {
+            date.to_version(version)
+        };
         let value = date
             .value
             .as_deref()
@@ -1722,7 +1751,14 @@ impl<'c, 'a> Ctx<'c, 'a> {
 
     /// Writes a note structure.
     fn write_note(&mut self, level: usize, note: &Note) -> Result<(), WriteError> {
-        if let Some(xref) = note.shared_note_xref() {
+        // A pointer as it is written ([`as_written`]): text that reads back
+        // as a pointer is one.
+        let written = note.value.as_deref().map(|v| as_written(self.rules, v));
+        let shared = written
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| is_xref_pointer(v));
+        if let Some(xref) = shared {
             // A pointer to a shared note record: `NOTE @N1@` in 5.5.1,
             // `SNOTE @N1@` in 7.0, where a NOTE payload is always text.
             let tag = if self.v7() { "SNOTE" } else { "NOTE" };
@@ -1784,6 +1820,36 @@ impl<'c, 'a> Ctx<'c, 'a> {
 
 /// Whether a pointer field's value has the shape of a pointer, `@…@`
 /// (surrounding spaces aside); anything else is text kept in a pointer field.
+/// `value` as the emitter writes it, without the characters the version
+/// bans (a 5.5.1 tab is a space): whether it is a pointer is decided on
+/// that, so that what is written as text never reads back as a pointer.
+fn as_written<'v>(rules: &VersionRules, value: &'v str) -> Cow<'v, str> {
+    if !value.chars().any(|c| rules.is_banned(c)) {
+        return Cow::Borrowed(value);
+    }
+    value
+        .chars()
+        .filter_map(|c| match c {
+            '\t' if rules.is_banned(c) => Some(' '),
+            c if rules.is_banned(c) => None,
+            c => Some(c),
+        })
+        .collect()
+}
+
+/// [`as_written`] of an optional part of a value, and whether that changed
+/// it: a part with nothing left, or nothing at all, is no part, as the
+/// writer writes none.
+fn written_part<'v>(rules: &VersionRules, part: Option<&'v str>) -> (Option<Cow<'v, str>>, bool) {
+    match part.map(|p| as_written(rules, p)) {
+        None => (None, false),
+        Some(p) => {
+            let changed = matches!(p, Cow::Owned(_)) || p.is_empty();
+            (Some(p).filter(|p| !p.is_empty()), changed)
+        }
+    }
+}
+
 fn is_pointer_shaped(value: &str) -> bool {
     let v = value.trim();
     v.len() >= 3 && v.starts_with('@') && v.ends_with('@') && !v[1..v.len() - 1].contains('@')

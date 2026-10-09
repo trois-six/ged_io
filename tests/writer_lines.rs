@@ -462,3 +462,36 @@ fn test_tabs_are_spaces_in_551_and_kept_in_7() {
     assert_eq!(report.repairs[0].kind, RepairKind::Characters);
     assert!(write(&data, GedcomVersion::V7_0).contains("1 NOTE a\tb\n"));
 }
+
+/// A date or an age is converted as it is written, without the characters
+/// the version bans: `> \u{81}69y` (a C1 control) is the 5.5.1 age `>69y`,
+/// not `> 69y` once the control is left out, which the next write would
+/// convert; an empty `PHRASE`, or one of banned characters only, is none
+/// (fuzz `writer`).
+#[test]
+fn test_values_are_converted_as_written() {
+    let input = "0 HEAD\n1 SOUR EXAMPLE\n1 SUBM @U1@\n1 GEDC\n2 VERS 5.5.1\n0 @U1@ SUBM\n1 NAME A\n0 @I1@ INDI\n1 DEAT Y\n2 DATE \u{81}1 JAN 1900\n2 AGE > \u{81}69y 11m\n1 BURI\n2 AGE about seventy\n3 PHRASE \u{1}\n1 CREM\n2 AGE nearly eighty\n3 PHRASE\n0 TRLR\n";
+    for version in VERSIONS {
+        let out = write(&read(input), version);
+        if version == GedcomVersion::V5_5_1 {
+            assert!(out.contains("2 AGE >69y 11m\n"), "{out}");
+            assert!(out.contains("2 DATE 1 JAN 1900\n"), "{out}");
+        }
+        assert_eq!(write(&read(&out), version), out);
+    }
+}
+
+/// A pointer field (or a note) holding a pointer and banned characters is
+/// written as the pointer, as it is written without them: written as text,
+/// it would read back as that pointer (fuzz `writer`).
+#[test]
+fn test_pointer_typing_follows_what_is_written() {
+    let input = "0 HEAD\n1 SOUR EXAMPLE\n1 SUBM @1@\u{1}\u{2}\n1 GEDC\n2 VERS 5.5.1\n0 @1@ SUBM\n1 NAME A\n1 NOTE \u{9d}@N1@\n0 @N1@ NOTE A shared note\n0 TRLR\n";
+    for version in VERSIONS {
+        let out = write(&read(input), version);
+        if version == GedcomVersion::V5_5_1 {
+            assert!(out.contains("1 SUBM @1@\n"), "{out}");
+        }
+        assert_eq!(write(&read(&out), version), out);
+    }
+}
