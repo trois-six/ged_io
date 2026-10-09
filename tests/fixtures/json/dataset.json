@@ -1,0 +1,220 @@
+{
+  "version": "7.0",
+  "declared_version": "7.0",
+  "header": {
+    "gedcom": {
+      "version": "7.0"
+    },
+    "source": {
+      "product": "SampleApp",
+      "version": "1.0"
+    },
+    "schema": {
+      "tags": [
+        "_HOBBY https://example.com/hobby"
+      ]
+    }
+  },
+  "submitters": [
+    {
+      "xref": "@U1@",
+      "name": "Sample Submitter"
+    }
+  ],
+  "individuals": [
+    {
+      "xref": "@I1@",
+      "names": [
+        {
+          "value": "Ann Marie /Example/",
+          "pieces": [
+            {
+              "kind": "Given",
+              "value": "Ann"
+            },
+            {
+              "kind": "Surname",
+              "value": "Example"
+            }
+          ],
+          "kind": {
+            "value": "Other",
+            "phrase": "Stage name"
+          }
+        }
+      ],
+      "sex": "Female",
+      "events": [
+        {
+          "kind": "Birth",
+          "date": {
+            "value": "ABT 1900",
+            "phrase": "about nineteen hundred"
+          },
+          "place": {
+            "name": "Sampleton, Region"
+          },
+          "citations": [
+            {
+              "source": {
+                "Pointer": "@S1@"
+              },
+              "page": "p. 7"
+            }
+          ],
+          "age": {
+            "value": "0y"
+          }
+        },
+        {
+          "kind": "Occupation",
+          "value": "Miller"
+        }
+      ],
+      "child_of": [
+        {
+          "family": "@F1@",
+          "pedigree": {
+            "value": {
+              "Unknown": "_FOSTERING"
+            }
+          }
+        }
+      ],
+      "spouse_of": [
+        {
+          "family": "@F2@"
+        }
+      ],
+      "notes": [
+        {
+          "content": {
+            "Text": "First line\nsecond line"
+          }
+        },
+        {
+          "content": {
+            "Shared": "@N1@"
+          }
+        }
+      ],
+      "restriction": [
+        "Confidential",
+        "Locked"
+      ],
+      "uids": [
+        "0b0f2b0a-0000-4000-8000-000000000001"
+      ],
+      "extra": [
+        {
+          "tag": "_HOBBY",
+          "text": "Weaving",
+          "children": [
+            {
+              "tag": "_SINCE",
+              "text": "1920"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "xref": "@I2@",
+      "names": [
+        {
+          "value": "Bob /Example/"
+        }
+      ],
+      "sex": "Male"
+    }
+  ],
+  "families": [
+    {
+      "xref": "@F1@",
+      "children": [
+        {
+          "individual": "@I1@"
+        }
+      ]
+    },
+    {
+      "xref": "@F2@",
+      "husband": {
+        "individual": "@I2@"
+      },
+      "wife": {
+        "individual": "@I1@"
+      },
+      "children": [
+        {
+          "individual": "@VOID@",
+          "phrase": "An unnamed child"
+        }
+      ],
+      "events": [
+        {
+          "kind": "Marriage",
+          "date": {
+            "value": "1 JUN 1925"
+          }
+        }
+      ]
+    }
+  ],
+  "notes": [
+    {
+      "xref": "@N1@",
+      "text": "A shared note"
+    }
+  ],
+  "sources": [
+    {
+      "xref": "@S1@",
+      "title": "Parish register",
+      "repositories": [
+        {
+          "repository": "@R1@",
+          "call_numbers": [
+            {
+              "value": "42",
+              "medium": {
+                "value": "Book"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "repositories": [
+    {
+      "xref": "@R1@",
+      "name": "Sample archive"
+    }
+  ],
+  "multimedia": [
+    {
+      "xref": "@M1@",
+      "files": [
+        {
+          "path": "photo.jpg",
+          "form": {
+            "format": "image/jpeg"
+          }
+        }
+      ]
+    }
+  ],
+  "extra": [
+    {
+      "tag": "_LOC",
+      "xref": "@L1@",
+      "children": [
+        {
+          "tag": "NAME",
+          "text": "Sampleton"
+        }
+      ]
+    }
+  ]
+}

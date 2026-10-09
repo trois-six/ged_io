@@ -58,6 +58,38 @@ impl super::relocate::Relocate for CitationSource {
     }
 }
 
+#[cfg(feature = "serde")]
+impl super::serde::SerializeIn for CitationSource {
+    fn serialize_in<S: ::serde::Serializer>(
+        &self,
+        store: &super::Store,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        match self {
+            CitationSource::Pointer(v) => super::serde::serialize_tagged("Pointer", v, store, s),
+            CitationSource::Description(v) => {
+                super::serde::serialize_tagged("Description", v, store, s)
+            }
+        }
+    }
+}
+
+#[cfg(feature = "serde")]
+impl super::serde::DeserializeIn for CitationSource {
+    fn deserialize_in<'de, D: ::serde::Deserializer<'de>>(
+        store: &mut super::Store,
+        d: D,
+    ) -> Result<Self, D::Error> {
+        super::serde::deserialize_either(
+            store,
+            d,
+            &["Pointer", "Description"],
+            CitationSource::Pointer,
+            CitationSource::Description,
+        )
+    }
+}
+
 gedcom_struct! {
     /// A source citation (`SOUR`): the source, where in it (`PAGE`), what
     /// it says (`DATA`), the event it records (`EVEN`), how reliable it is

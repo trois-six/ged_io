@@ -40,8 +40,10 @@ assert!(out.contains("2 DATE ABT JULIAN 1700\n"));
 
 # Features
 
-- `serde`: `Serialize` and `Deserialize` for the values of [`value`]
-  and the structures of [`tree`].
+- `serde`: `Serialize` and `Deserialize` for [`Dataset`] (its texts
+  and identifiers as strings), [`StreamedRecord`] (`Serialize`), the
+  values of [`value`] and the structures of [`tree`], in self-describing
+  formats such as JSON.
 - `gedzip`: GEDZIP archives (`ged_io::gedzip`).
 - `calendar`: conversions between calendars and day numbers
   ([`value::CalendarDate`]).
