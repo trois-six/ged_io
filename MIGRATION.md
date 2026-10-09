@@ -43,21 +43,26 @@ assert!(!GedcomVersion::V7_0.rules().uses_conc());
 |---------|--------------|------------|
 | Escaping Rule | All `@` doubled (`@@`) | Only leading `@` doubled |
 
-**Migration Note:** Use the utility functions for proper escaping:
+**Migration Note:** Reading unescapes `@@` by the rule of the file's
+version, and the writer escapes text by the rule of the version it writes:
 
 ```rust
-use ged_io::util::{escape_at_signs, unescape_at_signs};
+use ged_io::model::{Dataset, Note};
+use ged_io::{GedcomVersion, GedcomWriter};
 
-// GEDCOM 5.5.1: all @ doubled
-let escaped_v5 = escape_at_signs("email@example.com", false);
-assert_eq!(escaped_v5, "email@@example.com");
+let mut data = Dataset::new(GedcomVersion::V5_5_1);
+let id = data.store_mut().intern_xref("@I1@").unwrap();
+let mut person = ged_io::model::Individual { xref: Some(id), ..Default::default() };
+person.notes.push(Note::text("@home and ann@example.com"));
+data.individuals.push(person);
 
-// GEDCOM 7.0: only leading @ doubled
-let escaped_v7 = escape_at_signs("email@example.com", true);
-assert_eq!(escaped_v7, "email@example.com");
+// GEDCOM 5.5.1: every @ doubled
+let v551 = GedcomWriter::new().write_to_string(&data).unwrap();
+assert!(v551.contains("1 NOTE @@home and ann@@example.com\n"));
 
-let escaped_v7_leading = escape_at_signs("@reference", true);
-assert_eq!(escaped_v7_leading, "@@reference");
+// GEDCOM 7.0: only a leading @ doubled
+let v70 = GedcomWriter::new().gedcom_version(GedcomVersion::V7_0).write_to_string(&data).unwrap();
+assert!(v70.contains("1 NOTE @@home and ann@example.com\n"));
 ```
 
 ### 4. New Record Types
@@ -67,7 +72,7 @@ assert_eq!(escaped_v7_leading, "@@reference");
 GEDCOM 7.0 introduces `SNOTE` records for notes that can be referenced by multiple structures:
 
 ```rust
-use ged_io::Gedcom;
+use ged_io::Dataset;
 
 let gedcom_7 = "\
     0 HEAD\n\
@@ -78,20 +83,21 @@ let gedcom_7 = "\
     1 LANG en\n\
     0 TRLR";
 
-let mut parser = Gedcom::new(gedcom_7.chars()).unwrap();
-let data = parser.parse_data().unwrap();
-
-assert_eq!(data.shared_notes.len(), 1);
-let note = data.find_shared_note("@N1@").unwrap();
-assert!(note.text.contains("referenced"));
+let data = Dataset::parse(gedcom_7);
+assert_eq!(data.notes.len(), 1);
+let note = data.find_note("@N1@").unwrap();
+assert!(note.text.to_str(&data).contains("referenced"));
 ```
+
+A 5.5.1 `NOTE` record is a shared note too, written `NOTE` in 5.5.1 and
+`SNOTE` in 7.0.
 
 #### Schema (`SCHMA`)
 
 GEDCOM 7.0 formalizes extension tags via the `SCHMA` structure:
 
 ```rust
-use ged_io::Gedcom;
+use ged_io::Dataset;
 
 let gedcom_7 = "\
     0 HEAD\n\
@@ -101,13 +107,11 @@ let gedcom_7 = "\
     2 TAG _CUSTOM http://example.com/gedcom-extensions/custom\n\
     0 TRLR";
 
-let mut parser = Gedcom::new(gedcom_7.chars()).unwrap();
-let data = parser.parse_data().unwrap();
-
-let header = data.header.unwrap();
+let data = Dataset::parse(gedcom_7);
+let schema = data.header.as_ref().unwrap().schema.as_ref().unwrap();
 assert_eq!(
-    header.find_extension_uri("_CUSTOM"),
-    Some("http://example.com/gedcom-extensions/custom")
+    schema.tags[0].to_str(&data),
+    "_CUSTOM http://example.com/gedcom-extensions/custom"
 );
 ```
 
@@ -173,14 +177,16 @@ Defines a region of an image to display:
 GEDCOM 7.0 adds the `INIL` tag for LDS initiatory ordinances:
 
 ```rust
-use ged_io::types::lds::{LdsOrdinance, LdsOrdinanceType};
+use ged_io::Dataset;
+use ged_io::model::OrdinanceKind;
 
-let ordinance = LdsOrdinance::with_type(LdsOrdinanceType::Initiatory)
-    .with_date("15 MAR 1990")
-    .with_temple("SLAKE");
-
-assert!(ordinance.is_gedcom_7_only());
+let data = Dataset::parse("0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 INIL\n2 DATE 15 MAR 1990\n2 TEMP SLAKE\n0 TRLR\n");
+let ordinance = &data.individuals[0].detail().ordinances[0];
+assert_eq!(ordinance.kind, OrdinanceKind::Initiatory);
+assert_eq!(ordinance.kind.tag(), "INIL");
 ```
+
+Written as 5.5.1, which has no `INIL`, it is kept as the extension `_INIL`.
 
 **Available LDS Ordinance Types:**
 
@@ -206,10 +212,10 @@ assert!(ordinance.is_gedcom_7_only());
 The library automatically detects the GEDCOM version:
 
 ```rust
-use ged_io::{detect_version, GedcomVersion};
+use ged_io::version::detect_version;
 
-let content = std::fs::read_to_string("my_file.ged").unwrap();
-let version = detect_version(&content);
+let content = "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 TRLR\n";
+let version = detect_version(content);
 
 // 7.x declarations read as 7.0 or 7.1; anything else follows 5.5.1.
 if version.is_v7() {
@@ -226,32 +232,36 @@ println!("longest line: {:?}", rules.max_line_length());
 ## Checking Version Programmatically
 
 ```rust
-use ged_io::GedcomBuilder;
+use ged_io::Dataset;
 
-let data = GedcomBuilder::new().build_from_str(content)?;
+let data = Dataset::parse("0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @N1@ SNOTE Shared\n0 TRLR\n");
 
-if data.is_gedcom_7() {
-    // Use GEDCOM 7.0 features
-    for note in &data.shared_notes {
-        println!("Shared note: {}", note.text);
+if data.version().is_v7() {
+    for note in &data.notes {
+        println!("Shared note: {}", note.text.to_str(&data));
     }
-} else {
-    // Handle GEDCOM 5.5.1
 }
+// The declaration as written (`7.0`, `7.0.14`, `5.5`, …)
+assert_eq!(data.declared_version(), Some("7.0"));
 ```
 
 ## Writing Version-Specific Files
 
 ```rust
-use ged_io::{GedcomVersion, GedcomWriter};
+use ged_io::{Dataset, GedcomVersion, GedcomWriter};
+
+let data = Dataset::parse("0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 NAME Ann /Example/\n0 TRLR\n");
 
 // Write in the version the data declares (5.5.1 when it declares none)
-let writer = GedcomWriter::new();
-let output_551 = writer.write_to_string(&data)?;
+let output_551 = GedcomWriter::new().write_to_string(&data).unwrap();
+assert!(output_551.contains("2 VERS 5.5.1\n"));
 
 // Write as GEDCOM 7.0
-let writer = GedcomWriter::new().gedcom_version(GedcomVersion::V7_0);
-let output_70 = writer.write_to_string(&data)?;
+let output_70 = GedcomWriter::new()
+    .gedcom_version(GedcomVersion::V7_0)
+    .write_to_string(&data)
+    .unwrap();
+assert!(output_70.contains("2 VERS 7.0\n"));
 ```
 
 ## Best Practices for Migration
@@ -268,11 +278,21 @@ let output_70 = writer.write_to_string(&data)?;
 ### Converting Inline Notes to Shared Notes
 
 ```rust
-use ged_io::types::shared_note::SharedNote;
+use ged_io::model::{Note, SharedNote};
+use ged_io::{Dataset, GedcomVersion};
 
-// Create a shared note from common text
-let shared_note = SharedNote::with_text("@N1@", "Common note text used in multiple places");
-data.add_shared_note(shared_note);
+let mut data = Dataset::new(GedcomVersion::V7_0);
+// Create a shared note from common text, and point to it.
+let id = data.store_mut().intern_xref("@N1@").unwrap();
+data.notes.push(SharedNote {
+    xref: Some(id),
+    text: "Common note text used in multiple places".into(),
+    ..Default::default()
+});
+let mut person = ged_io::model::Individual::default();
+person.notes.push(Note::shared(id));
+data.individuals.push(person);
+assert!(data.dangling_references().is_empty());
 ```
 
 ### Handling CONC in 7.0
@@ -281,8 +301,14 @@ Reading joins `CONC` continuations into the text; writing GEDCOM 7.0 never
 splits a payload, so 7.0 output has no `CONC` at all:
 
 ```rust
+use ged_io::{Dataset, GedcomVersion, GedcomWriter};
+
+let text = format!("0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 NOTE {}\n2 CONC {}\n0 TRLR\n", "a".repeat(200), "b".repeat(200));
+let data = Dataset::parse(text);
 let writer = GedcomWriter::new().gedcom_version(GedcomVersion::V7_0);
 // Long text stays on one line; line breaks become CONT lines.
+let out = writer.write_to_string(&data).unwrap();
+assert!(!out.contains("CONC"));
 ```
 
 ## Additional Resources
