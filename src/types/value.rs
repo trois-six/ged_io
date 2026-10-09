@@ -65,9 +65,15 @@ impl From<GedcomVersion> for Grammar {
 /// Records the first deviation from a grammar while a payload is parsed.
 ///
 /// With no grammar, the parse is lenient and nothing is recorded; the reason
-/// closures are then never called, so leniency costs nothing.
+/// closures are then never called, so leniency costs nothing. A checker for
+/// a verdict only ([`Checker::verdict`]) records that the payload deviates,
+/// never why: its reasons are never written either.
 pub(crate) struct Checker {
     grammar: Option<Grammar>,
+    /// Whether a deviation was found.
+    failed: bool,
+    /// Whether to say why ([`Checker::finish`]).
+    explain: bool,
     violation: Option<String>,
 }
 
@@ -76,6 +82,8 @@ impl Checker {
     pub(crate) fn lenient() -> Checker {
         Checker {
             grammar: None,
+            failed: false,
+            explain: false,
             violation: None,
         }
     }
@@ -84,7 +92,18 @@ impl Checker {
     pub(crate) fn strict(grammar: Grammar) -> Checker {
         Checker {
             grammar: Some(grammar),
+            failed: false,
+            explain: true,
             violation: None,
+        }
+    }
+
+    /// A checker for a strict parse in `grammar` that only tells whether the
+    /// payload follows it ([`Checker::passed`]).
+    pub(crate) fn verdict(grammar: Grammar) -> Checker {
+        Checker {
+            explain: false,
+            ..Checker::strict(grammar)
         }
     }
 
@@ -106,8 +125,11 @@ impl Checker {
     /// Records a deviation, unless one is already recorded or the parse is
     /// lenient.
     pub(crate) fn fail(&mut self, reason: impl FnOnce() -> String) {
-        if self.grammar.is_some() && self.violation.is_none() {
-            self.violation = Some(reason());
+        if self.grammar.is_some() && !self.failed {
+            self.failed = true;
+            if self.explain {
+                self.violation = Some(reason());
+            }
         }
     }
 
@@ -118,6 +140,27 @@ impl Checker {
         }
     }
 
+    /// Whether no deviation was recorded.
+    pub(crate) fn passed(&self) -> bool {
+        !self.failed
+    }
+
+    /// Whether the parse's value is wanted: not for a verdict, whose parse
+    /// leaves the wording it keeps (an unread date, a phrase) empty.
+    pub(crate) fn builds(&self) -> bool {
+        self.grammar.is_none() || self.explain
+    }
+
+    /// `text` as the value keeps it: empty for a verdict
+    /// ([`Checker::builds`]), which needs no copy.
+    pub(crate) fn kept(&self, text: &str) -> String {
+        if self.builds() {
+            text.to_string()
+        } else {
+            String::new()
+        }
+    }
+
     /// The parse's result: `value`, or the first deviation recorded.
     pub(crate) fn finish<T>(
         self,
@@ -125,14 +168,14 @@ impl Checker {
         text: &str,
         value: T,
     ) -> Result<T, ValueError> {
-        match self.violation {
-            None => Ok(value),
-            Some(reason) => Err(ValueError {
-                expected,
-                text: text.to_string(),
-                reason,
-            }),
+        if !self.failed {
+            return Ok(value);
         }
+        Err(ValueError {
+            expected,
+            text: text.to_string(),
+            reason: self.violation.unwrap_or_default(),
+        })
     }
 }
 
@@ -147,41 +190,157 @@ pub(crate) struct Word<'a> {
 /// The longest text read between `@#` and `@` as one calendar escape.
 const MAX_ESCAPE_NAME: usize = 24;
 
-/// Splits `text` into words separated by whitespace.
-///
-/// A GEDCOM 5.5.1 calendar escape is one word even when it holds a space
-/// (`@#DFRENCH R@`): it runs from `@#` to the next `@`.
-pub(crate) fn words(text: &str) -> Vec<Word<'_>> {
-    let mut words = Vec::new();
-    let mut rest = text.char_indices().peekable();
-    while let Some(&(start, c)) = rest.peek() {
-        if c.is_whitespace() {
-            rest.next();
-            continue;
+/// The words a payload holds without an allocation: more spill to the heap.
+/// A date value has at most eleven (`BET @#DJULIAN@ 1 JAN 1700 AND …`),
+/// nearly all at most seven.
+const INLINE_WORDS: usize = 8;
+
+/// The words of a payload ([`words`]): kept inline, but for long payloads.
+pub(crate) struct Words<'a> {
+    len: usize,
+    inline: [Word<'a>; INLINE_WORDS],
+    spilled: Vec<Word<'a>>,
+}
+
+impl<'a> Words<'a> {
+    fn push(&mut self, word: Word<'a>) {
+        if !self.spilled.is_empty() {
+            self.spilled.push(word);
+        } else if let Some(slot) = self.inline.get_mut(self.len) {
+            *slot = word;
+            self.len += 1;
+        } else {
+            self.spilled.reserve(2 * INLINE_WORDS);
+            self.spilled.extend_from_slice(&self.inline);
+            self.spilled.push(word);
+        }
+    }
+}
+
+impl<'a> std::ops::Deref for Words<'a> {
+    type Target = [Word<'a>];
+
+    fn deref(&self) -> &[Word<'a>] {
+        if self.spilled.is_empty() {
+            self.inline.get(..self.len).unwrap_or_default()
+        } else {
+            &self.spilled
+        }
+    }
+}
+
+/// Whether an ASCII byte is white space (`char::is_whitespace`).
+#[inline]
+fn is_ascii_space(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\n' | 0x0B | 0x0C | b'\r')
+}
+
+/// The words of `text`, one after the other ([`words`]).
+pub(crate) struct WordIter<'a> {
+    text: &'a str,
+    at: usize,
+}
+
+impl WordIter<'_> {
+    /// The width of the white space character at byte `at`, if it is one
+    /// (`char::is_whitespace`).
+    #[inline]
+    fn space_at(&self, at: usize) -> Option<usize> {
+        let b = *self.text.as_bytes().get(at)?;
+        if b.is_ascii() {
+            return is_ascii_space(b).then_some(1);
+        }
+        let c = self.text.get(at..)?.chars().next()?;
+        c.is_whitespace().then(|| c.len_utf8())
+    }
+}
+
+impl<'a> Iterator for WordIter<'a> {
+    type Item = Word<'a>;
+
+    fn next(&mut self) -> Option<Word<'a>> {
+        let (text, bytes) = (self.text, self.text.as_bytes());
+        while let Some(width) = self.space_at(self.at) {
+            self.at += width;
+        }
+        let start = self.at;
+        if start >= bytes.len() {
+            return None;
         }
         // Escape names are short (`@#DGREGORIAN@` is the longest standard
         // one): a far `@` belongs to something else.
-        let escape_end = text[start..]
-            .starts_with("@#")
-            .then(|| text[start + 2..].find('@'))
+        let escape_end = bytes[start..]
+            .starts_with(b"@#")
+            .then(|| bytes[start + 2..].iter().position(|&b| b == b'@'))
             .flatten()
             .filter(|&close| close <= MAX_ESCAPE_NAME)
             .map(|close| start + 2 + close + 1);
         let end = escape_end.unwrap_or_else(|| {
-            text[start..]
-                .find(char::is_whitespace)
-                .map_or(text.len(), |at| start + at)
+            let mut end = start;
+            while let Some(&b) = bytes.get(end) {
+                if b.is_ascii() {
+                    if is_ascii_space(b) {
+                        break;
+                    }
+                    end += 1;
+                } else {
+                    // Past the whole character: a word ends on a boundary.
+                    match text.get(end..).and_then(|t| t.chars().next()) {
+                        Some(c) if !c.is_whitespace() => end += c.len_utf8(),
+                        _ => break,
+                    }
+                }
+            }
+            end
         });
-        words.push(Word {
+        self.at = end;
+        Some(Word {
             text: &text[start..end],
             start,
             end,
-        });
-        while rest.peek().is_some_and(|&(at, _)| at < end) {
-            rest.next();
-        }
+        })
+    }
+}
+
+/// The words of `text`, without collecting them.
+pub(crate) fn word_iter(text: &str) -> WordIter<'_> {
+    WordIter { text, at: 0 }
+}
+
+/// Splits `text` into words separated by whitespace.
+///
+/// A GEDCOM 5.5.1 calendar escape is one word even when it holds a space
+/// (`@#DFRENCH R@`): it runs from `@#` to the next `@`.
+#[inline]
+pub(crate) fn words(text: &str) -> Words<'_> {
+    let empty = Word {
+        text: "",
+        start: 0,
+        end: 0,
+    };
+    let mut words = Words {
+        len: 0,
+        inline: [empty; INLINE_WORDS],
+        spilled: Vec::new(),
+    };
+    for word in word_iter(text) {
+        words.push(word);
     }
     words
+}
+
+/// `word` in ASCII upper case and its length, when it has at most `N`
+/// bytes: compared with keywords without an allocation. Other characters
+/// are kept as they are, as `str::to_ascii_uppercase` keeps them.
+#[inline]
+pub(crate) fn ascii_upper<const N: usize>(word: &str) -> Option<([u8; N], usize)> {
+    let bytes = word.as_bytes();
+    let mut out = [0_u8; N];
+    out.get_mut(..bytes.len())?
+        .iter_mut()
+        .zip(bytes)
+        .for_each(|(o, b)| *o = b.to_ascii_uppercase());
+    Some((out, bytes.len()))
 }
 
 /// Whether `text` has no leading or trailing whitespace and its words are

@@ -67,6 +67,13 @@ impl Time {
         ck.finish("Time", text, time.unwrap_or_default())
     }
 
+    /// Whether [`strict`](Self::strict) accepts `text`, found without the
+    /// time or the reason.
+    pub(crate) fn is_strict(text: &str, grammar: Grammar) -> bool {
+        let mut ck = Checker::verdict(grammar);
+        time_parts(text, &mut ck).is_some() && ck.passed()
+    }
+
     /// The time in the grammar of `version`, with two-digit fields.
     ///
     /// GEDCOM 5.5.1 cannot say that a time is in UTC: the `Z` is left out.
@@ -93,6 +100,16 @@ impl Time {
 
 /// Reads a time, checking it against the checker's grammar.
 fn parse_time(text: &str, ck: &mut Checker) -> Option<Time> {
+    let (time, fraction) = time_parts(text, ck)?;
+    Some(Time {
+        fraction: fraction.map(str::to_string),
+        ..time
+    })
+}
+
+/// [`parse_time`], the fraction of a second borrowed from `text` (the time
+/// returned has none).
+fn time_parts<'t>(text: &'t str, ck: &mut Checker) -> Option<(Time, Option<&'t str>)> {
     let trimmed = text.trim();
     ck.require(trimmed.len() == text.len(), || {
         "leading or trailing whitespace".to_string()
@@ -112,7 +129,7 @@ fn parse_time(text: &str, ck: &mut Checker) -> Option<Time> {
             if fraction.is_empty() || !fraction.bytes().all(|b| b.is_ascii_digit()) {
                 return None;
             }
-            (clock, Some(fraction.to_string()))
+            (clock, Some(fraction))
         }
         None => (clock, None),
     };
@@ -126,13 +143,14 @@ fn parse_time(text: &str, ck: &mut Checker) -> Option<Time> {
     if fields.next().is_some() || (fraction.is_some() && second.is_none()) {
         return None;
     }
-    Some(Time {
+    let time = Time {
         hour,
         minute,
         second,
-        fraction,
+        fraction: None,
         utc,
-    })
+    };
+    Some((time, fraction))
 }
 
 /// Reads a field of one or two digits up to `max`; `two_digits` fields must

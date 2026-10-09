@@ -143,7 +143,7 @@ impl Date {
                 let Some(raw) = raw else {
                     return unchanged();
                 };
-                if DateValue::strict(raw, grammar).is_ok() {
+                if DateValue::is_strict(raw, grammar) {
                     return unchanged();
                 }
                 let value = DateValue::parse(raw);
@@ -162,7 +162,7 @@ impl Date {
                     value = resolve_dual_years(value, single);
                 }
                 let payload = value.format(grammar);
-                if DateValue::strict(&payload, grammar).is_err() {
+                if !DateValue::is_strict(&payload, grammar) {
                     return unchanged();
                 }
                 let phrase = match (phrase, carried) {
@@ -180,7 +180,7 @@ impl Date {
                 let value = match raw {
                     None => DateValue::Empty,
                     Some(raw) => {
-                        if phrase.is_none() && DateValue::strict(raw, grammar).is_ok() {
+                        if phrase.is_none() && DateValue::is_strict(raw, grammar) {
                             return unchanged();
                         }
                         let value = DateValue::parse(raw);
@@ -206,7 +206,7 @@ impl Date {
                     (value, phrase) => (value, phrase.map(str::to_string)),
                 };
                 let payload = value.format(grammar);
-                if DateValue::strict(&payload, grammar).is_err() {
+                if !DateValue::is_strict(&payload, grammar) {
                     return unchanged();
                 }
                 Date {
@@ -284,7 +284,7 @@ impl Date {
 /// The time in `grammar`: kept when it follows it, rewritten when it is a
 /// time, left as written otherwise.
 fn convert_time(raw: &str, grammar: Grammar) -> String {
-    if Time::strict(raw, grammar).is_ok() {
+    if Time::is_strict(raw, grammar) {
         return raw.to_string();
     }
     Time::parse(raw).map_or_else(|| raw.to_string(), |time| time.format(grammar))

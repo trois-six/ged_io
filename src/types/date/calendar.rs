@@ -12,7 +12,7 @@ use std::borrow::Cow;
 #[cfg(feature = "json")]
 use serde::{Deserialize, Serialize};
 
-use crate::types::value::{is_ext_tag, is_lenient_ext_tag, Grammar};
+use crate::types::value::{ascii_upper, is_ext_tag, is_lenient_ext_tag, Grammar};
 
 /// The calendar of a date.
 ///
@@ -124,25 +124,31 @@ impl Calendar {
     /// case, `ROMAN`/`UNKNOWN` as some 5.5.1 files write them, or an
     /// extension tag. Returns the calendar and how it was written.
     pub(crate) fn from_marker(word: &str) -> Option<(Calendar, MarkerForm)> {
+        // Markers start with `@`, a letter or `_`: most words are numbers.
+        if word.as_bytes().first().is_none_or(u8::is_ascii_digit) {
+            return None;
+        }
+        // The longest name compared: `GREGORIAN`.
+        let upper = |word: &str| ascii_upper::<9>(word);
         if let Some(name) = escape_name(word) {
-            let calendar = match name.to_ascii_uppercase().as_str() {
-                "GREGORIAN" => Calendar::Gregorian,
-                "JULIAN" => Calendar::Julian,
-                "HEBREW" => Calendar::Hebrew,
-                "FRENCH R" | "FRENCH_R" => Calendar::FrenchRepublican,
-                "ROMAN" => Calendar::Roman,
-                "UNKNOWN" => Calendar::Unknown,
+            let calendar = match upper(name).as_ref().and_then(|(u, n)| u.get(..*n)) {
+                Some(b"GREGORIAN") => Calendar::Gregorian,
+                Some(b"JULIAN") => Calendar::Julian,
+                Some(b"HEBREW") => Calendar::Hebrew,
+                Some(b"FRENCH R" | b"FRENCH_R") => Calendar::FrenchRepublican,
+                Some(b"ROMAN") => Calendar::Roman,
+                Some(b"UNKNOWN") => Calendar::Unknown,
                 _ => Calendar::Extension(name.to_string()),
             };
             return Some((calendar, MarkerForm::Escape));
         }
-        let calendar = match word.to_ascii_uppercase().as_str() {
-            "GREGORIAN" => Calendar::Gregorian,
-            "JULIAN" => Calendar::Julian,
-            "HEBREW" => Calendar::Hebrew,
-            "FRENCH_R" => Calendar::FrenchRepublican,
-            "ROMAN" | "_ROMAN" => Calendar::Roman,
-            "UNKNOWN" | "_UNKNOWN" => Calendar::Unknown,
+        let calendar = match upper(word).as_ref().and_then(|(u, n)| u.get(..*n)) {
+            Some(b"GREGORIAN") => Calendar::Gregorian,
+            Some(b"JULIAN") => Calendar::Julian,
+            Some(b"HEBREW") => Calendar::Hebrew,
+            Some(b"FRENCH_R") => Calendar::FrenchRepublican,
+            Some(b"ROMAN" | b"_ROMAN") => Calendar::Roman,
+            Some(b"UNKNOWN" | b"_UNKNOWN") => Calendar::Unknown,
             _ if is_lenient_ext_tag(word) => {
                 return Some((Calendar::Extension(word.to_string()), MarkerForm::ExtTag));
             }
@@ -412,29 +418,74 @@ impl Month {
         if is_ext_tag(tag) {
             return Some(Month::Extension(tag.to_string()));
         }
-        [
-            &GREGORIAN_MONTHS[..],
-            &FRENCH_REPUBLICAN_MONTHS[..],
-            &HEBREW_MONTHS[..],
-        ]
-        .into_iter()
-        .flatten()
-        .find(|month| month.tag() == tag)
-        .cloned()
+        Month::standard(tag.as_bytes())
+    }
+
+    /// The month of a standard month tag, exactly as the specifications
+    /// spell it.
+    fn standard(tag: &[u8]) -> Option<Month> {
+        Some(match tag {
+            b"JAN" => Month::Jan,
+            b"FEB" => Month::Feb,
+            b"MAR" => Month::Mar,
+            b"APR" => Month::Apr,
+            b"MAY" => Month::May,
+            b"JUN" => Month::Jun,
+            b"JUL" => Month::Jul,
+            b"AUG" => Month::Aug,
+            b"SEP" => Month::Sep,
+            b"OCT" => Month::Oct,
+            b"NOV" => Month::Nov,
+            b"DEC" => Month::Dec,
+            b"VEND" => Month::Vend,
+            b"BRUM" => Month::Brum,
+            b"FRIM" => Month::Frim,
+            b"NIVO" => Month::Nivo,
+            b"PLUV" => Month::Pluv,
+            b"VENT" => Month::Vent,
+            b"GERM" => Month::Germ,
+            b"FLOR" => Month::Flor,
+            b"PRAI" => Month::Prai,
+            b"MESS" => Month::Mess,
+            b"THER" => Month::Ther,
+            b"FRUC" => Month::Fruc,
+            b"COMP" => Month::Comp,
+            b"TSH" => Month::Tsh,
+            b"CSH" => Month::Csh,
+            b"KSL" => Month::Ksl,
+            b"TVT" => Month::Tvt,
+            b"SHV" => Month::Shv,
+            b"ADR" => Month::Adr,
+            b"ADS" => Month::Ads,
+            b"NSN" => Month::Nsn,
+            b"IYR" => Month::Iyr,
+            b"SVN" => Month::Svn,
+            b"TMZ" => Month::Tmz,
+            b"AAV" => Month::Aav,
+            b"ELL" => Month::Ell,
+            _ => return None,
+        })
     }
 
     /// Reads a month leniently: a standard tag of any case, an English month
     /// name (`March`), or an extension tag of any case.
     pub(crate) fn from_word(word: &str) -> Option<Month> {
+        // Months start with a letter or `_`: most words are numbers.
+        if word.as_bytes().first().is_none_or(u8::is_ascii_digit) {
+            return None;
+        }
         if is_lenient_ext_tag(word) {
             return Some(Month::Extension(word.to_string()));
         }
-        let upper = word.to_ascii_uppercase();
-        Month::from_tag(&upper).or_else(|| {
+        // The longest name: `SEPTEMBER`. Upper case, the word is no
+        // extension tag either (`_` and letters or digits would be one).
+        let (upper, len) = ascii_upper::<9>(word)?;
+        let upper = upper.get(..len)?;
+        Month::standard(upper).or_else(|| {
             ENGLISH_MONTH_NAMES
                 .iter()
-                .position(|name| *name == upper)
-                .map(|index| GREGORIAN_MONTHS[index].clone())
+                .position(|name| name.as_bytes() == upper)
+                .and_then(|index| GREGORIAN_MONTHS.get(index).cloned())
         })
     }
 

@@ -23,7 +23,8 @@ use serde::{Deserialize, Serialize};
 
 use super::calendar::{astronomical_year, max_day, Calendar, Epoch, Month, Spelling};
 use crate::types::value::{
-    is_ext_tag, is_integer, single_spaced, span, words, Checker, Grammar, ValueError, Word,
+    ascii_upper, is_ext_tag, is_integer, single_spaced, span, word_iter, words, Checker, Grammar,
+    ValueError, Word,
 };
 use crate::GedcomVersion;
 
@@ -171,16 +172,17 @@ enum Keyword {
 impl Keyword {
     /// Reads a keyword of any case.
     fn from_word(word: &str) -> Option<Keyword> {
-        Some(match word.to_ascii_uppercase().as_str() {
-            "ABT" => Keyword::Approximated(Approximation::About),
-            "CAL" => Keyword::Approximated(Approximation::Calculated),
-            "EST" => Keyword::Approximated(Approximation::Estimated),
-            "BEF" => Keyword::Before,
-            "AFT" => Keyword::After,
-            "BET" => Keyword::Between,
-            "FROM" => Keyword::From,
-            "TO" => Keyword::To,
-            "INT" => Keyword::Interpreted,
+        let (upper, len) = ascii_upper::<4>(word)?;
+        Some(match upper.get(..len)? {
+            b"ABT" => Keyword::Approximated(Approximation::About),
+            b"CAL" => Keyword::Approximated(Approximation::Calculated),
+            b"EST" => Keyword::Approximated(Approximation::Estimated),
+            b"BEF" => Keyword::Before,
+            b"AFT" => Keyword::After,
+            b"BET" => Keyword::Between,
+            b"FROM" => Keyword::From,
+            b"TO" => Keyword::To,
+            b"INT" => Keyword::Interpreted,
             _ => return None,
         })
     }
@@ -279,18 +281,19 @@ impl CalendarDate {
             return;
         }
         if let Some(day) = self.day {
-            part(out, &day.to_string());
+            part(out, "");
+            let _ = write!(out, "{day}");
         }
         if let Some(month) = &self.month {
             part(out, month.tag());
         }
         if let Some(year) = self.year {
-            let mut written = year.to_string();
+            part(out, "");
+            let _ = write!(out, "{year}");
             if let (Some(dual), Grammar::V551) = (self.dual_year, grammar) {
-                written.push('/');
-                written.push_str(&dual_suffix(year, dual));
+                out.push('/');
+                out.push_str(&dual_suffix(year, dual));
             }
-            part(out, &written);
         }
         if let Some(epoch) = &self.epoch {
             part(out, epoch.tag(grammar));
@@ -329,6 +332,14 @@ impl DateValue {
         let mut ck = Checker::strict(grammar);
         let value = parse_value(text, &mut ck);
         ck.finish("DateValue", text, value)
+    }
+
+    /// Whether [`strict`](Self::strict) accepts `text`, found without the
+    /// value or the reason.
+    pub(crate) fn is_strict(text: &str, grammar: Grammar) -> bool {
+        let mut ck = Checker::verdict(grammar);
+        let _ = parse_value(text, &mut ck);
+        ck.passed()
     }
 
     /// The value in the grammar of `version`.
@@ -467,16 +478,20 @@ impl DatePeriod {
     /// `DatePeriod` (7.0) or `DATE_PERIOD` (5.5.1).
     pub fn parse_strict(text: &str, version: GedcomVersion) -> Result<DatePeriod, ValueError> {
         let mut ck = Checker::strict(Grammar::from(version));
-        let value = parse_value(text, &mut ck);
-        let period = match value {
+        let period = DatePeriod::checked(text, &mut ck);
+        ck.finish("DatePeriod", text, period)
+    }
+
+    /// Reads a period, checking it against the checker's grammar.
+    fn checked(text: &str, ck: &mut Checker) -> DatePeriod {
+        match parse_value(text, ck) {
             DateValue::Empty => DatePeriod::default(),
             DateValue::Period(period) => period,
             _ => {
                 ck.fail(|| "not a period: it must start with FROM or TO".to_string());
                 DatePeriod::default()
             }
-        };
-        ck.finish("DatePeriod", text, period)
+        }
     }
 
     /// The period in the grammar of `version`.
@@ -536,12 +551,18 @@ impl DateExact {
     /// `DateExact` (7.0) or `DATE_EXACT` (5.5.1).
     pub fn parse_strict(text: &str, version: GedcomVersion) -> Result<DateExact, ValueError> {
         let mut ck = Checker::strict(Grammar::from(version));
-        let value = parse_value(text, &mut ck);
+        let exact = DateExact::checked(text, &mut ck);
+        ck.finish("DateExact", text, exact)
+    }
+
+    /// Reads an exact date, checking it against the checker's grammar.
+    fn checked(text: &str, ck: &mut Checker) -> DateExact {
+        let value = parse_value(text, ck);
         let exact = match &value {
-            DateValue::Date(date) if words(text).len() == 3 => DateExact::from_date(date),
+            DateValue::Date(date) if word_iter(text).count() == 3 => DateExact::from_date(date),
             _ => None,
         };
-        let exact = exact.unwrap_or_else(|| {
+        exact.unwrap_or_else(|| {
             ck.fail(|| "an exact date is a day, a month and a year".to_string());
             DateExact {
                 day: 0,
@@ -549,8 +570,7 @@ impl DateExact {
                 year: 0,
                 dual_year: None,
             }
-        });
-        ck.finish("DateExact", text, exact)
+        })
     }
 
     fn from_date(date: &CalendarDate) -> Option<DateExact> {
@@ -595,7 +615,7 @@ impl From<DateExact> for CalendarDate {
 fn unrecognised(text: &str, ck: &mut Checker) -> DateValue {
     ck.fail(|| "not a date value".to_string());
     DateValue::Date(CalendarDate {
-        text: Some(text.trim().to_string()),
+        text: Some(ck.kept(text.trim())),
         ..CalendarDate::default()
     })
 }
@@ -622,7 +642,7 @@ fn parse_value(text: &str, ck: &mut Checker) -> DateValue {
             inside
         });
         ck.require(!phrase.is_empty(), || "empty date phrase".to_string());
-        return DateValue::Phrase(phrase.to_string());
+        return DateValue::Phrase(ck.kept(phrase));
     }
 
     let all = words(text);
@@ -716,11 +736,10 @@ fn parse_interpreted(
     let after_keyword = list[0].end;
     let open = text[after_keyword..].find('(').map(|at| after_keyword + at);
     let date_end = open.unwrap_or(text.len());
-    let date_words: Vec<Word<'_>> = list[1..]
-        .iter()
-        .copied()
-        .filter(|w| w.end <= date_end)
-        .collect();
+    // The words before the phrase: words come in order.
+    let count = list[1..].iter().take_while(|w| w.end <= date_end).count();
+    let head = &list[..=count];
+    let date_words = &head[1..];
     if date_words.is_empty() {
         return unrecognised(text, ck);
     }
@@ -741,23 +760,21 @@ fn parse_interpreted(
                 trimmed
             });
             ck.require(!phrase.is_empty(), || "empty date phrase".to_string());
-            Some(phrase.to_string())
+            Some(ck.kept(phrase))
         }
     };
     if ck.grammar().is_some() {
         // `INT date (` with single spaces; the phrase itself is free text.
         let head_end = date_words.last().map_or(after_keyword, |w| w.end);
-        let mut head: Vec<Word<'_>> = vec![list[0]];
-        head.extend(date_words.iter().copied());
         let spaced = list[0].start == 0
-            && single_spaced(&text[..head_end], &head)
+            && single_spaced(&text[..head_end], head)
             && open.is_some_and(|open| open == head_end + 1 && &text[head_end..open] == " ");
         ck.require(spaced, || {
             "words must be separated by single spaces".to_string()
         });
     }
     DateValue::Interpreted {
-        date: parse_date(text, &date_words, default, ck),
+        date: parse_date(text, date_words, default, ck),
         phrase,
     }
 }
@@ -926,7 +943,7 @@ fn parse_date(
     }
     let nothing_read = read == 0 && !rest.is_empty();
     if read < rest.len() || nothing_read {
-        date.text = Some(span(text, rest).to_string());
+        date.text = Some(ck.kept(span(text, rest)));
     }
 
     if let Some(grammar) = ck.grammar() {
