@@ -388,7 +388,6 @@ enum71/SOUR/QUAY/_EXTVAL	parse	TS3	FATAL	-	Parse error at line 6: Unknown Certai
 enum71/record-INDI/SEX/_EXTVAL	parse	TS3	FATAL	-	Parse error at line 5: Unknown gender value _EXTVAL
 feature/read/extensions70	parse	TS3	FATAL	-	Parse error at line 21: Unrecognized FamilyLink.pedigree code: _ENUMVAL
 feature/streaming/extensions70	parse	TS3	-	FATAL	Parse error at line 9: Unrecognized FamilyLink.pedigree code: _ENUMVAL
-feature/write-551/test-files-7-date-all	output:payload-date	TS25	NONCONFORMANT	-	line 1007: payload-date: DATE "BET 1950 AND 302 BCE": not in the date grammar
 feature/write-551/test-files-7-date-all	output:record-size	TS27	NONCONFORMANT	NONCONFORMANT	line 4876: record-size: 128973 bytes
 feature/write-551/test-files-7-obje-1	output:payload-enum	TS25	NONCONFORMANT	-	line 10: payload-enum: FORM "audio/wav": not in MULTIMEDIA_FORMAT
 feature/write-70/maximal551	output:cardinality-min	TS25	NONCONFORMANT	-	line 262: cardinality-min: TYPE under FACT: missing

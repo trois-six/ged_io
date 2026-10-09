@@ -991,11 +991,17 @@ fn check_date(date: &CalendarDate, grammar: Grammar, ck: &mut Checker, words: Da
             format!("the day {word:?} has more than two digits")
         });
         ck.require(day >= 1, || "there is no day 0".to_string());
-        if let Some(max) = date
-            .month
-            .as_ref()
-            .and_then(|month| max_day(calendar, month, date.astronomical_year()))
-        {
+        // 7.0 holds a day to its month's length (§2.4: "a month-specific
+        // maximum"). A 5.5.1 day is any `dd` up to 31: its readers keep
+        // `31 NOV` as written, so a 5.5.1 file is not told otherwise.
+        let max = match grammar {
+            Grammar::V7 => date
+                .month
+                .as_ref()
+                .and_then(|month| max_day(calendar, month, date.astronomical_year())),
+            Grammar::V551 => Some(31),
+        };
+        if let Some(max) = max {
             ck.require(day <= max, || format!("the month has no day {day}"));
         }
     }
@@ -1287,8 +1293,14 @@ mod tests {
         assert!(DateValue::parse_strict("", V551).is_err());
         assert!(DateValue::parse_strict("JULIAN 1700", V551).is_err());
         assert!(DateValue::parse_strict("@#DJULIAN@ 1700", V7).is_err());
-        assert!(DateValue::parse_strict("@#DFRENCH R@ 13 COMP 3", V551).is_err());
-        assert!(DateValue::parse_strict("@#DFRENCH R@ 6 COMP 3", V551).is_ok());
+        assert!(DateValue::parse_strict("FRENCH_R 13 COMP 3", V7).is_err());
+        assert!(DateValue::parse_strict("FRENCH_R 6 COMP 3", V7).is_ok());
+        // A 5.5.1 day goes up to 31 in any month; 7.0 holds it to the month.
+        assert!(DateValue::parse_strict("@#DFRENCH R@ 13 COMP 3", V551).is_ok());
+        assert!(DateValue::parse_strict("31 NOV 1900", V551).is_ok());
+        assert!(DateValue::parse_strict("31 NOV 1900", V7).is_err());
+        assert!(DateValue::parse_strict("30 NOV 1900", V7).is_ok());
+        assert!(DateValue::parse_strict("32 JAN 1900", V551).is_err());
     }
 
     #[test]
