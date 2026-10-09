@@ -285,7 +285,9 @@ pub enum Month {
     Aav,
     /// Elul (`ELL`).
     Ell,
-    /// A month named by an extension tag (`_MONTH`), as written.
+    /// A month named by an extension tag (`_MONTH`), or a month of an
+    /// extension calendar, whose months that calendar defines (`POP` in
+    /// `_MAYAN 1 POP 1`), as written.
     Extension(String),
 }
 

@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use super::calendar::{astronomical_year, max_day, Calendar, Epoch, Month, Spelling};
 use crate::types::value::{
-    is_integer, single_spaced, span, words, Checker, Grammar, ValueError, Word,
+    is_ext_tag, is_integer, single_spaced, span, words, Checker, Grammar, ValueError, Word,
 };
 use crate::GedcomVersion;
 
@@ -834,6 +834,15 @@ fn dual_suffix(year: u32, dual: u32) -> String {
 }
 
 /// Reads one date from `list`, a non-empty run of the words of `text`.
+/// Whether `word` is a tag: a standard tag (`POP`: an upper-case letter,
+/// then upper-case letters, digits or underscores) or an extension tag.
+fn is_tag(word: &str) -> bool {
+    let mut bytes = word.bytes();
+    let first = bytes.next();
+    (first.is_some_and(|b| b.is_ascii_uppercase()) || is_ext_tag(word))
+        && bytes.all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+}
+
 fn parse_date(
     text: &str,
     list: &[Word<'_>],
@@ -867,8 +876,22 @@ fn parse_date(
     let mut dual_digits = 0;
     let mut epoch_spelling = None;
     let mut epoch_attached = false;
-    if let [day, month, ..] = rest {
-        if is_integer(day.text) && Month::from_word(month.text).is_some() {
+    // The month of `rest[i]`, followed by its year: an extension calendar
+    // defines its own months, so any tag names one there.
+    let month_at = |i: usize| -> Option<Month> {
+        let word = rest.get(i)?.text;
+        if matches!(date.calendar, Calendar::Extension(_))
+            && is_tag(word)
+            && rest
+                .get(i + 1)
+                .is_some_and(|w| parse_year(w.text).is_some())
+        {
+            return Some(Month::Extension(word.to_string()));
+        }
+        Month::from_word(word)
+    };
+    if let [day, ..] = rest {
+        if is_integer(day.text) && month_at(1).is_some() {
             if let Ok(value) = day.text.parse::<u8>() {
                 date.day = Some(value);
                 day_word = Some(day.text);
@@ -876,12 +899,10 @@ fn parse_date(
             }
         }
     }
-    if let Some(word) = rest.get(read) {
-        if let Some(month) = Month::from_word(word.text) {
-            date.month = Some(month);
-            month_word = Some(word.text);
-            read += 1;
-        }
+    if let Some(month) = month_at(read) {
+        date.month = Some(month);
+        month_word = rest.get(read).map(|w| w.text);
+        read += 1;
     }
     if let Some(year) = rest.get(read).and_then(|w| parse_year(w.text)) {
         date.year = Some(year.year);
@@ -1174,7 +1195,24 @@ mod tests {
         assert_eq!(date.year, Some(1500));
         assert!(DateValue::parse_strict("_MYCAL 12 _MON 1500", V7).is_ok());
         assert!(DateValue::parse_strict("_MYCAL 1500 _AUC", V7).is_ok());
-        assert!(DateValue::parse_strict("_MYCAL 12 JAN 1500", V7).is_err());
+        // An extension calendar defines its months: any tag names one
+        // (7.0 §2.4: `month = stdTag / extTag`, constrained by the calendar).
+        let value = DateValue::parse("_MAYAN 1 POP 1");
+        let DateValue::Date(date) = &value else {
+            panic!("{value:?}")
+        };
+        assert_eq!(date.day, Some(1));
+        assert_eq!(date.month, Some(Month::Extension("POP".into())));
+        assert_eq!(date.year, Some(1));
+        assert_eq!(date.text, None);
+        assert_eq!(value.to_gedcom(V7), "_MAYAN 1 POP 1");
+        assert!(DateValue::parse_strict("_MAYAN 1 POP 1", V7).is_ok());
+        assert!(DateValue::parse_strict("_MYCAL 12 JAN 1500", V7).is_ok());
+        assert!(DateValue::parse_strict("_MAYAN POP 1", V7).is_ok());
+        // Not a month without a year after it, nor in lower case.
+        assert!(DateValue::parse("_MAYAN 1 POP").has_unrecognised_text());
+        assert!(DateValue::parse_strict("_MAYAN 1 pop 1", V7).is_err());
+        assert!(DateValue::parse_strict("1 POP 1", V7).is_err());
         assert!(DateValue::parse_strict("_MYCAL 12 _MON 1500", V551).is_err());
         assert!(DateValue::parse_strict("12 _MON 1500", V7).is_err());
     }
