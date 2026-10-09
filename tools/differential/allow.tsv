@@ -1,0 +1,7 @@
+# Reviewed changes of what this checkout writes, against ged_io 0.17.0: file (a * matches any
+# run of characters), the lost item as the run prints it, and why the change is intended.
+# file	item	reason
+date.ged	text BET FRENCH_R 13 COMP 25 AND OCT 246 *	A 7.0 date outside the grammar (day 13 of the 5-day complementary month) is repaired: an empty DATE and the text in its PHRASE (repair d).
+date-all.ged	text BET FRENCH_R 13 COMP 25 AND OCT 246 *	A 7.0 date outside the grammar (day 13 of the 5-day complementary month) is repaired: an empty DATE and the text in its PHRASE (repair d).
+imp_notetest_dfs.ged	text Film *	A 5.5.1 controlled value is written in the specification's spelling (`TYPE film`, repair b); `FORM jpeg`, not a 5.5.1 format, is kept as `_FORM`.
+washington.ged	text 31 March 1727/28 *	A 5.5.1 date outside the grammar (an English month name) is written in it, with nothing lost: `31 MAR 1727/28`.
