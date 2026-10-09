@@ -143,6 +143,7 @@ impl std::fmt::Display for GedcomEncoding {
 }
 
 /// Text decoded from bytes, with what was found about its encoding.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Decoded {
     /// The text, without a byte order mark. Line terminators are kept as
@@ -233,6 +234,7 @@ fn decode_body(body: &[u8], mode: Mode) -> String {
 }
 
 /// A character an encoding cannot represent: why [`encode`] failed.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EncodeError {
     /// The encoding.

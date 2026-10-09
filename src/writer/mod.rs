@@ -143,6 +143,7 @@ impl fmt::Display for OutputEncoding {
 }
 
 /// What the writer does with data that does not fit the target version.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum RepairPolicy {
     /// Rewrite it into a conformant form and report a [`Repair`] (the
@@ -227,6 +228,7 @@ pub enum RepairKind {
 }
 
 /// What a write did besides writing: the repairs it made.
+#[non_exhaustive]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WriteReport {
     /// Every repair, in output order (identifier renames first).
@@ -247,6 +249,7 @@ pub enum WriteError {
 }
 
 /// A character the output encoding cannot represent.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Unencodable {
     /// The output encoding.

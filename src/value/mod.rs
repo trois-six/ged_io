@@ -66,6 +66,7 @@ use crate::GedcomVersion;
 ///
 /// Returned by the `parse_strict` functions of the payload types, such as
 /// [`DateValue::parse_strict`].
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ValueError {
     /// The payload type that was expected, as the specifications name it
