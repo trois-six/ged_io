@@ -44,9 +44,11 @@ keeps all data; writing is conformant to GEDCOM 5.5.1, 7.0 or 7.1.
   UTF-16); `Bom`; GEDCOM 7.1 as a write target.
 - `GedcomStreamWriter`: writes a header, then records one at a time (from a
   `GedcomStreamParser` or a dataset), then the trailer, with the
-  conformance repair and line rules of `GedcomWriter` and memory bounded by
-  one record; its documentation lists where it differs from writing the
-  whole dataset (identifiers, pointers, stub submitter, relocations).
+  conformance repair, conversion between version families and line rules
+  of `GedcomWriter` and memory bounded by one record; its documentation
+  lists where it differs from writing the whole dataset (identifiers,
+  pointers, stub submitter, relocations, records a conversion adds,
+  `HEAD.SCHMA` declarations).
 - Encodings: Windows-1252 (`ANSI`), IBM PC (cp437), Macintosh, UTF-16
   without BOM; ANSEL composed to Unicode NFC; `DecodeReader` for streams;
   decoding never fails.
