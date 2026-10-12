@@ -58,3 +58,10 @@ path = "fuzz_targets/convert.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "editing"
+path = "fuzz_targets/editing.rs"
+test = false
+doc = false
+bench = false
