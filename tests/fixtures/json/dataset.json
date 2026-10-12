@@ -60,7 +60,24 @@
                 "Pointer": "@S1@"
               },
               "page": "p. 7"
-            }
+            },
+            [
+              1,
+              {
+                "content": {
+                  "Text": "Copied from the register"
+                }
+              }
+            ],
+            [
+              2,
+              {
+                "source": {
+                  "Pointer": "@S1@"
+                },
+                "page": "p. 8"
+              }
+            ]
           ],
           "age": {
             "value": "0y"
@@ -109,8 +126,9 @@
         {
           "tag": "_HOBBY",
           "text": "Weaving",
-          "children": [
+          "descendants": [
             {
+              "level": 1,
               "tag": "_SINCE",
               "text": "1920"
             }
@@ -209,8 +227,9 @@
     {
       "tag": "_LOC",
       "xref": "@L1@",
-      "children": [
+      "descendants": [
         {
+          "level": 1,
           "tag": "NAME",
           "text": "Sampleton"
         }

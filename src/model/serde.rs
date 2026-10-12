@@ -7,6 +7,14 @@
 //! deserializes into a fresh store, its texts owned and its identifiers
 //! interned. The traits below carry the store through every type; the
 //! macros that declare the model implement them for its structures.
+//!
+//! Structures nest to any depth only where they hold each other: notes and
+//! citations ([`Chain`]), and untyped nodes. Both are serialized flat, so
+//! that the JSON of any dataset nests a bounded number of levels and reads
+//! back within the nesting limit of deserializers (128 for `serde_json`):
+//! a list of notes or citations lists each note and citation after the one
+//! that holds it, with its depth ([`serialize_chain`]), and a node lists its
+//! descendants with their levels ([`Node`]'s implementation).
 
 use std::borrow::Cow;
 use std::fmt;
@@ -32,6 +40,27 @@ pub(crate) trait SerializeIn {
     fn is_empty_in(&self) -> bool {
         false
     }
+
+    /// Serializes a structure as [`SerializeIn::serialize_in`] does, but
+    /// for the field named `skip` ([`serialize_chain`]).
+    fn serialize_but<S: Serializer>(
+        &self,
+        store: &Store,
+        s: S,
+        skip: &str,
+    ) -> Result<S::Ok, S::Error> {
+        let _ = skip;
+        self.serialize_in(store, s)
+    }
+
+    /// Serializes a list of values: each in turn, unless the type says
+    /// otherwise.
+    fn serialize_list<S: Serializer>(items: &[Self], store: &Store, s: S) -> Result<S::Ok, S::Error>
+    where
+        Self: Sized,
+    {
+        serialize_items(items, store, s)
+    }
 }
 
 /// A value of the model, deserialized into a store.
@@ -40,6 +69,16 @@ pub(crate) trait DeserializeIn: Sized {
     /// `store`, its texts owned.
     fn deserialize_in<'de, D: Deserializer<'de>>(store: &mut Store, d: D)
         -> Result<Self, D::Error>;
+
+    /// Deserializes a list of values, each given to `push`, as
+    /// [`SerializeIn::serialize_list`] writes it.
+    fn deserialize_list<'de, D: Deserializer<'de>>(
+        store: &mut Store,
+        d: D,
+        push: &mut dyn FnMut(Self),
+    ) -> Result<(), D::Error> {
+        deserialize_items(store, d, push)
+    }
 }
 
 /// A value and its store, to serialize.
@@ -346,7 +385,7 @@ fn deserialize_items<'de, T: DeserializeIn, D: Deserializer<'de>>(
 
 impl<T: SerializeIn> SerializeIn for [T] {
     fn serialize_in<S: Serializer>(&self, store: &Store, s: S) -> Result<S::Ok, S::Error> {
-        serialize_items(self, store, s)
+        T::serialize_list(self, store, s)
     }
 
     fn is_empty_in(&self) -> bool {
@@ -356,7 +395,7 @@ impl<T: SerializeIn> SerializeIn for [T] {
 
 impl<T: SerializeIn> SerializeIn for Vec<T> {
     fn serialize_in<S: Serializer>(&self, store: &Store, s: S) -> Result<S::Ok, S::Error> {
-        serialize_items(self, store, s)
+        T::serialize_list(self, store, s)
     }
 
     fn is_empty_in(&self) -> bool {
@@ -370,7 +409,7 @@ impl<T: DeserializeIn> DeserializeIn for Vec<T> {
         d: D,
     ) -> Result<Self, D::Error> {
         let mut out = Vec::new();
-        deserialize_items(store, d, &mut |item| out.push(item))?;
+        T::deserialize_list(store, d, &mut |item| out.push(item))?;
         out.shrink_to_fit();
         Ok(out)
     }
@@ -378,7 +417,7 @@ impl<T: DeserializeIn> DeserializeIn for Vec<T> {
 
 impl<T: SerializeIn> SerializeIn for ThinVec<T> {
     fn serialize_in<S: Serializer>(&self, store: &Store, s: S) -> Result<S::Ok, S::Error> {
-        serialize_items(self, store, s)
+        T::serialize_list(self, store, s)
     }
 
     fn is_empty_in(&self) -> bool {
@@ -392,7 +431,7 @@ impl<T: DeserializeIn> DeserializeIn for ThinVec<T> {
         d: D,
     ) -> Result<Self, D::Error> {
         let mut out = ThinVec::new();
-        deserialize_items(store, d, &mut |item| out.push(item))?;
+        T::deserialize_list(store, d, &mut |item| out.push(item))?;
         Ok(out)
     }
 }
@@ -418,35 +457,186 @@ impl DeserializeIn for Extra {
     }
 }
 
-/// A node: `{"tag", "xref", "pointer" or "text", "children"}`; the payload
-/// or identifier a typed structure keeps aside has no tag.
+/// The tag, identifier and payload of a node, the payload a typed
+/// structure keeps aside having no tag: the keys a node's map and each of
+/// its descendants' have.
+fn node_entries<M: SerializeMap>(map: &mut M, node: &Node, store: &Store) -> Result<(), M::Error> {
+    if node.tag != TagId::ASIDE {
+        map.serialize_entry("tag", store.tag(node.tag))?;
+    }
+    if let Some(xref) = node.xref {
+        map.serialize_entry("xref", store.xref(xref))?;
+    }
+    match &node.payload {
+        Value::None => {}
+        Value::Pointer(p) => map.serialize_entry("pointer", store.xref(*p))?,
+        Value::Text(t) if t.is_empty() => {}
+        Value::Text(t) => map.serialize_entry("text", &*t.to_str(store))?,
+    }
+    Ok(())
+}
+
+/// The number of [`node_entries`] of `node`.
+fn node_entry_count(node: &Node) -> usize {
+    usize::from(node.tag != TagId::ASIDE)
+        + usize::from(node.xref.is_some())
+        + usize::from(match &node.payload {
+            Value::None => false,
+            Value::Pointer(_) => true,
+            Value::Text(t) => !t.is_empty(),
+        })
+}
+
+/// A descendant of a node, its level below it (1 for a child), without
+/// its own substructures: they follow it.
+struct Descendant<'a>(&'a Store, &'a Node, u32);
+
+impl Serialize for Descendant<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let Descendant(store, node, level) = *self;
+        let mut map = s.serialize_map(Some(1 + node_entry_count(node)))?;
+        map.serialize_entry("level", &level)?;
+        node_entries(&mut map, node, store)?;
+        map.end()
+    }
+}
+
+/// The descendants of a node, depth first, each with its level.
+struct Descendants<'a>(&'a Store, &'a Node);
+
+impl Serialize for Descendants<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let Descendants(store, node) = *self;
+        let mut seq = s.serialize_seq(None)?;
+        // The children not visited yet of each open level.
+        let mut open = vec![node.children.iter()];
+        while let Some(children) = open.last_mut() {
+            let Some(child) = children.next() else {
+                open.pop();
+                continue;
+            };
+            let level = u32::try_from(open.len()).unwrap_or(u32::MAX);
+            seq.serialize_element(&Descendant(store, child, level))?;
+            open.push(child.children.iter());
+        }
+        seq.end()
+    }
+}
+
+/// A node: `{"tag", "xref", "pointer" or "text", "descendants"}`, its
+/// descendants listed depth first, each with its `"level"` below the node
+/// (1 for a child) and its tag, identifier and payload, so that the nodes
+/// nest no deeper in JSON however deep they are; the payload or identifier
+/// a typed structure keeps aside has no tag.
 impl SerializeIn for Node {
     fn serialize_in<S: Serializer>(&self, store: &Store, s: S) -> Result<S::Ok, S::Error> {
-        let tag = (self.tag != TagId::ASIDE).then(|| store.tag(self.tag));
-        let payload = match &self.payload {
-            Value::None => None,
-            Value::Pointer(p) => Some(("pointer", store.xref(*p).into())),
-            Value::Text(t) if t.is_empty() => None,
-            Value::Text(t) => Some(("text", t.to_str(store))),
-        };
-        let count = usize::from(tag.is_some())
-            + usize::from(self.xref.is_some())
-            + usize::from(payload.is_some())
-            + usize::from(!self.children.is_empty());
+        let count = node_entry_count(self) + usize::from(!self.children.is_empty());
         let mut map = s.serialize_map(Some(count))?;
-        if let Some(tag) = tag {
-            map.serialize_entry("tag", tag)?;
-        }
-        if let Some(xref) = self.xref {
-            map.serialize_entry("xref", store.xref(xref))?;
-        }
-        if let Some((key, value)) = payload {
-            map.serialize_entry(key, &value)?;
-        }
+        node_entries(&mut map, self, store)?;
         if !self.children.is_empty() {
-            map.serialize_entry("children", &In(store, &self.children))?;
+            map.serialize_entry("descendants", &Descendants(store, self))?;
         }
         map.end()
+    }
+}
+
+/// Reads the tag, identifier or payload of a node under `key`; whether
+/// `key` names one.
+fn node_entry<'de, A: MapAccess<'de>>(
+    node: &mut Node,
+    key: &str,
+    map: &mut A,
+    store: &mut Store,
+) -> Result<bool, A::Error> {
+    match key {
+        "tag" => node.tag = store.intern_tag(&map.next_value::<Str<'de>>()?.0),
+        "xref" => node.xref = map.next_value_seed(Seed::new(&mut *store))?,
+        "pointer" => node.payload = Value::Pointer(map.next_value_seed(Seed::new(&mut *store))?),
+        "text" => node.payload = Value::Text(map.next_value_seed(Seed::new(&mut *store))?),
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+/// The descendants of a node, as [`Descendants`] lists them, into the
+/// children of the node they belong to.
+struct DescendantsSeed<'s>(&'s mut Store);
+
+impl<'de> DeserializeSeed<'de> for DescendantsSeed<'_> {
+    type Value = Vec<Node>;
+
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<Vec<Node>, D::Error> {
+        d.deserialize_seq(self)
+    }
+}
+
+impl<'de> Visitor<'de> for DescendantsSeed<'_> {
+    type Value = Vec<Node>;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a node's descendants")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<Node>, A::Error> {
+        // The open nodes, the node itself first, as a stand-in.
+        let mut open = vec![Node::new(TagId::ASIDE)];
+        while let Some((level, node)) = seq.next_element_seed(DescendantSeed(&mut *self.0))? {
+            if level == 0 || level > open.len() {
+                return Err(de::Error::custom(format!(
+                    "a descendant at level {level} under one at level {}",
+                    open.len() - 1
+                )));
+            }
+            close_nodes(&mut open, level);
+            open.push(node);
+        }
+        close_nodes(&mut open, 1);
+        Ok(open.pop().map(|root| root.children).unwrap_or_default())
+    }
+}
+
+/// Closes the open nodes down to `len` of them, each a child of the one
+/// before it.
+fn close_nodes(open: &mut Vec<Node>, len: usize) {
+    while open.len() > len {
+        let Some(node) = open.pop() else { break };
+        if let Some(parent) = open.last_mut() {
+            parent.children.push(node);
+        }
+    }
+}
+
+/// A descendant of a node, as [`Descendant`] writes it: its level and the
+/// node.
+struct DescendantSeed<'s>(&'s mut Store);
+
+impl<'de> DeserializeSeed<'de> for DescendantSeed<'_> {
+    type Value = (usize, Node);
+
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<(usize, Node), D::Error> {
+        d.deserialize_map(self)
+    }
+}
+
+impl<'de> Visitor<'de> for DescendantSeed<'_> {
+    type Value = (usize, Node);
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a node's descendant")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(usize, Node), A::Error> {
+        let store = self.0;
+        let (mut node, mut level) = (Node::new(TagId::ASIDE), None);
+        while let Some(key) = map.next_key::<Str<'de>>()? {
+            if &*key.0 == "level" {
+                level = Some(map.next_value::<u32>()?);
+            } else if !node_entry(&mut node, &key.0, &mut map, store)? {
+                skip(&mut map)?;
+            }
+        }
+        let level = level.ok_or_else(|| de::Error::missing_field("level"))?;
+        Ok((usize::try_from(level).unwrap_or(usize::MAX), node))
     }
 }
 
@@ -465,27 +655,200 @@ impl DeserializeIn for Node {
                 let store = self.0;
                 let mut node = Node::new(TagId::ASIDE);
                 while let Some(key) = map.next_key::<Str<'de>>()? {
-                    match &*key.0 {
-                        "tag" => node.tag = store.intern_tag(&map.next_value::<Str<'de>>()?.0),
-                        "xref" => node.xref = map.next_value_seed(Seed::new(&mut *store))?,
-                        "pointer" => {
-                            node.payload =
-                                Value::Pointer(map.next_value_seed(Seed::new(&mut *store))?);
-                        }
-                        "text" => {
-                            node.payload =
-                                Value::Text(map.next_value_seed(Seed::new(&mut *store))?);
-                        }
-                        "children" => {
-                            node.children = map.next_value_seed(Seed::new(&mut *store))?;
-                        }
-                        _ => skip(&mut map)?,
+                    if &*key.0 == "descendants" {
+                        node.children = map.next_value_seed(DescendantsSeed(&mut *store))?;
+                    } else if !node_entry(&mut node, &key.0, &mut map, store)? {
+                        skip(&mut map)?;
                     }
                 }
                 Ok(node)
             }
         }
         d.deserialize_map(V(store))
+    }
+}
+
+/// A type whose structures hold, in one of their fields ([`Chain::LINK`]),
+/// structures of another type that hold structures of this one in turn:
+/// notes hold citations (their sources), citations hold notes, to any
+/// depth.
+pub(crate) trait Chain: SerializeIn + DeserializeIn + Sized {
+    /// The type of the structures held.
+    type Other: Chain<Other = Self>;
+    /// The name of the field that holds them.
+    const LINK: &'static str;
+    /// The structures held.
+    fn links(&self) -> &[Self::Other];
+    /// The structures held, to add to.
+    fn links_mut(&mut self) -> &mut Vec<Self::Other>;
+}
+
+/// A structure of a chain as an entry of its flattened list.
+struct Entry<'a, T>(&'a Store, &'a T, u32);
+
+impl<T: Chain> Serialize for Entry<'_, T> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let Entry(store, value, depth) = *self;
+        if depth == 0 {
+            value.serialize_but(store, s, T::LINK)
+        } else {
+            let mut seq = s.serialize_seq(Some(2))?;
+            seq.serialize_element(&depth)?;
+            seq.serialize_element(&EntryFields(store, value))?;
+            seq.end()
+        }
+    }
+}
+
+/// The fields of a structure of a chain, but the one that holds the next
+/// structures.
+struct EntryFields<'a, T>(&'a Store, &'a T);
+
+impl<T: Chain> Serialize for EntryFields<'_, T> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.1.serialize_but(self.0, s, T::LINK)
+    }
+}
+
+/// Serializes `items`, structures of a [`Chain`], with every structure they
+/// hold, depth first, in one flat list: an item is the map of its fields
+/// but the one that holds the next structures, and each structure held
+/// follows the one that holds it as `[depth, {fields}]`, `depth` counting
+/// from the items' (1 for what an item holds); its type follows from its
+/// depth, the items' type at even depths, the other at odd ones. The JSON
+/// of a note held in a citation held in a note… thus nests no deeper than
+/// one note.
+pub(crate) fn serialize_chain<T: Chain, S: Serializer>(
+    items: &[T],
+    store: &Store,
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    let mut seq = s.serialize_seq(None)?;
+    chain_entries(&mut seq, items, store, 0)?;
+    seq.end()
+}
+
+/// Serializes `items`, at `depth`, and what they hold, into `seq`.
+fn chain_entries<T: Chain, M: SerializeSeq>(
+    seq: &mut M,
+    items: &[T],
+    store: &Store,
+    depth: u32,
+) -> Result<(), M::Error> {
+    for item in items {
+        seq.serialize_element(&Entry(store, item, depth))?;
+        chain_entries(seq, item.links(), store, depth.saturating_add(1))?;
+    }
+    Ok(())
+}
+
+/// A structure of a chain being read: of the list's type or the other.
+enum Open<T: Chain> {
+    This(T),
+    Other(T::Other),
+}
+
+/// Deserializes a list [`serialize_chain`] wrote: each item of the list's
+/// type to `push`, with what it holds.
+pub(crate) fn deserialize_chain<'de, T: Chain, D: Deserializer<'de>>(
+    store: &mut Store,
+    d: D,
+    push: &mut dyn FnMut(T),
+) -> Result<(), D::Error> {
+    struct V<'s, 'p, T>(&'s mut Store, &'p mut dyn FnMut(T));
+    impl<'de, T: Chain> Visitor<'de> for V<'_, '_, T> {
+        type Value = ();
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("a list of notes or citations")
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+            let V(store, push) = self;
+            // The structures open, one per depth.
+            let mut open: Vec<Open<T>> = Vec::new();
+            loop {
+                let seed = EntrySeed::<T>(&mut *store, open.len(), PhantomData);
+                let Some((depth, entry)) = seq.next_element_seed(seed)? else {
+                    break;
+                };
+                close_chain(&mut open, depth, push);
+                open.push(entry);
+            }
+            close_chain(&mut open, 0, push);
+            Ok(())
+        }
+    }
+    d.deserialize_seq(V(store, push))
+}
+
+/// Closes the open structures of a chain down to `len` of them, each held
+/// by the one before it, the first given to `push`.
+fn close_chain<T: Chain>(open: &mut Vec<Open<T>>, len: usize, push: &mut dyn FnMut(T)) {
+    while open.len() > len {
+        let Some(last) = open.pop() else { break };
+        match (last, open.last_mut()) {
+            (Open::This(t), None) => push(t),
+            (Open::This(t), Some(Open::Other(o))) => o.links_mut().push(t),
+            (Open::Other(o), Some(Open::This(t))) => t.links_mut().push(o),
+            // The types alternate with the depth ([`EntrySeed`]): nothing
+            // else is ever open.
+            (Open::Other(_), None | Some(Open::Other(_)))
+            | (Open::This(_), Some(Open::This(_))) => {}
+        }
+    }
+}
+
+/// An entry of a chain's list, `open` structures being open: its depth and
+/// the structure, of the list's type at even depths.
+struct EntrySeed<'s, T>(&'s mut Store, usize, PhantomData<T>);
+
+impl<'de, T: Chain> DeserializeSeed<'de> for EntrySeed<'_, T> {
+    type Value = (usize, Open<T>);
+
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+        d.deserialize_any(self)
+    }
+}
+
+impl<'de, T: Chain> Visitor<'de> for EntrySeed<'_, T> {
+    type Value = (usize, Open<T>);
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a note or citation, or [depth, note or citation]")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+        let item = T::deserialize_in(self.0, de::value::MapAccessDeserializer::new(map))?;
+        Ok((0, Open::This(item)))
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let EntrySeed(store, open, _) = self;
+        let depth: u32 = seq
+            .next_element()?
+            .ok_or_else(|| de::Error::invalid_length(0, &"[depth, fields]"))?;
+        let depth = usize::try_from(depth).unwrap_or(usize::MAX);
+        if depth == 0 || depth > open {
+            return Err(de::Error::custom(format!(
+                "an entry at depth {depth} after one at depth {}",
+                open.saturating_sub(1)
+            )));
+        }
+        let missing = || de::Error::invalid_length(1, &"[depth, fields]");
+        let entry = if depth % 2 == 0 {
+            Open::This(
+                seq.next_element_seed(Seed::<T>::new(store))?
+                    .ok_or_else(missing)?,
+            )
+        } else {
+            Open::Other(
+                seq.next_element_seed(Seed::<T::Other>::new(store))?
+                    .ok_or_else(missing)?,
+            )
+        };
+        if seq.next_element::<IgnoredAny>()?.is_some() {
+            return Err(de::Error::invalid_length(3, &"[depth, fields]"));
+        }
+        Ok((depth, entry))
     }
 }
 

@@ -122,7 +122,7 @@ gedcom_struct! {
     /// 7.x gives a note text a media type (`MIME`), a language (`LANG`),
     /// translations (`TRAN`) and citations (`SOUR`); 7.1 says what kind of
     /// note it is (`KIND`).
-    pub struct Note [tag = note_tag] {
+    pub struct Note [tag = note_tag] [chain = citations: Citation] {
         @payload
         /// The note's text, or the shared note it points to.
         content: NoteContent;

@@ -115,7 +115,7 @@ gedcom_struct! {
     /// A source citation (`SOUR`): the source, where in it (`PAGE`), what
     /// it says (`DATA`), the event it records (`EVEN`), how reliable it is
     /// (`QUAY`), and media and notes.
-    pub struct Citation {
+    pub struct Citation [chain = notes: Note] {
         @payload
         /// The source cited.
         source: CitationSource;

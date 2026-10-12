@@ -22,6 +22,9 @@
 2 AGE 0y
 2 SOUR @S1@
 3 PAGE p. 7
+3 NOTE Copied from the register
+4 SOUR @S1@
+5 PAGE p. 8
 1 OCCU Miller
 1 FAMC @F1@
 2 PEDI _FOSTERING

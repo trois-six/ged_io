@@ -1308,10 +1308,15 @@ pub(crate) fn write(s: &dyn Fields, tag: &'static str, cx: &WriteCx<'_>) -> Stru
 /// structure holds it as `detail: Option<Box<…>>`, allocated when one of
 /// its fields is read or set, and has `detail()` (the detail, or an empty
 /// one) and `detail_mut()` (allocating it).
+///
+/// A `[chain = field: Type]` last says that the detail's `field`, a `Vec`
+/// of `Type`, holds structures that hold this type in turn (notes and
+/// citations): a list of either is serialized flat
+/// ([`serialize_chain`](crate::model::serde::serialize_chain)).
 macro_rules! gedcom_struct {
     (
         $(#[$meta:meta])*
-        pub struct $name:ident $([tag = $tagfn:path])? $([convert = $convfn:path, $untypedfn:path])? {
+        pub struct $name:ident $([tag = $tagfn:path])? $([convert = $convfn:path, $untypedfn:path])? $([chain = $link:ident : $other:ty])? {
             $(@xref $(#[$xmeta:meta])* $xfield:ident;)?
             $(@tag $(#[$tmeta:meta])* $tfield:ident : $tty:ty;)?
             $(@payload $(#[$pmeta:meta])* $pfield:ident : $pty:ty;)?
@@ -1735,17 +1740,26 @@ macro_rules! gedcom_struct {
                 store: &$crate::model::Store,
                 s: S,
             ) -> Result<S::Ok, S::Error> {
+                self.serialize_but(store, s, "")
+            }
+
+            fn serialize_but<S: ::serde::Serializer>(
+                &self,
+                store: &$crate::model::Store,
+                s: S,
+                skip: &str,
+            ) -> Result<S::Ok, S::Error> {
                 use ::serde::ser::SerializeMap as _;
                 use $crate::model::serde::In;
                 let mut count = usize::from(!self.extra.is_empty_in());
                 $(count += usize::from(!self.$xfield.is_empty_in());)?
                 $(count += usize::from(!self.$tfield.is_empty_in());)?
                 $(count += usize::from(!self.$pfield.is_empty_in());)?
-                $(count += usize::from(!self.$field.is_empty_in());)*
+                $(count += usize::from(stringify!($field) != skip && !self.$field.is_empty_in());)*
                 $(
                     {
                         let d: &$dname = self.detail();
-                        $(count += usize::from(!d.$gfield.is_empty_in());)*
+                        $(count += usize::from(stringify!($gfield) != skip && !d.$gfield.is_empty_in());)*
                     }
                 )?
                 let mut map = s.serialize_map(Some(count))?;
@@ -1765,7 +1779,7 @@ macro_rules! gedcom_struct {
                     }
                 )?
                 $(
-                    if !self.$field.is_empty_in() {
+                    if stringify!($field) != skip && !self.$field.is_empty_in() {
                         map.serialize_entry(stringify!($field), &In(store, &self.$field))?;
                     }
                 )*
@@ -1773,7 +1787,7 @@ macro_rules! gedcom_struct {
                     {
                         let d: &$dname = self.detail();
                         $(
-                            if !d.$gfield.is_empty_in() {
+                            if stringify!($gfield) != skip && !d.$gfield.is_empty_in() {
                                 map.serialize_entry(stringify!($gfield), &In(store, &d.$gfield))?;
                             }
                         )*
@@ -1784,7 +1798,34 @@ macro_rules! gedcom_struct {
                 }
                 map.end()
             }
+
+            $(
+                fn serialize_list<S: ::serde::Serializer>(
+                    items: &[Self],
+                    store: &$crate::model::Store,
+                    s: S,
+                ) -> Result<S::Ok, S::Error> {
+                    let _: ::std::marker::PhantomData<$other> = ::std::marker::PhantomData;
+                    $crate::model::serde::serialize_chain(items, store, s)
+                }
+            )?
         }
+
+        $(
+            #[cfg(feature = "serde")]
+            impl $crate::model::serde::Chain for $name {
+                type Other = $other;
+                const LINK: &'static str = stringify!($link);
+
+                fn links(&self) -> &[$other] {
+                    &self.detail().$link
+                }
+
+                fn links_mut(&mut self) -> &mut Vec<$other> {
+                    &mut self.detail_mut().$link
+                }
+            }
+        )?
 
         #[cfg(feature = "serde")]
         impl $crate::model::serde::DeserializeIn for $name {
@@ -1835,6 +1876,17 @@ macro_rules! gedcom_struct {
                 }
                 d.deserialize_map(V(store))
             }
+
+            $(
+                fn deserialize_list<'de, D: ::serde::Deserializer<'de>>(
+                    store: &mut $crate::model::Store,
+                    d: D,
+                    push: &mut dyn FnMut(Self),
+                ) -> Result<(), D::Error> {
+                    let _: ::std::marker::PhantomData<$other> = ::std::marker::PhantomData;
+                    $crate::model::serde::deserialize_chain(store, d, push)
+                }
+            )?
         }
     };
     (@read_xref $self:ident $node:ident $cx:ident) => {{

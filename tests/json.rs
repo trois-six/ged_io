@@ -100,6 +100,66 @@ fn streamed_records_serialize() {
     );
 }
 
+/// The largest number of arrays and maps open at once in `json`.
+fn nesting(json: &str) -> usize {
+    let (mut depth, mut max, mut string, mut escaped) = (0_usize, 0, false, false);
+    for c in json.chars() {
+        match c {
+            _ if escaped => escaped = false,
+            '\\' if string => escaped = true,
+            '"' => string = !string,
+            '{' | '[' if !string => {
+                depth += 1;
+                max = max.max(depth);
+            }
+            '}' | ']' if !string => depth -= 1,
+            _ => {}
+        }
+    }
+    max
+}
+
+/// Structures nested as deep as a file can nest them (255 levels): notes
+/// and citations holding each other and extension structures. Their JSON
+/// nests a few levels only, so that it reads back within the nesting limit
+/// of `serde_json` (128), with the same structures.
+#[test]
+fn deep_structures_read_back_within_the_nesting_limit() {
+    let mut text = String::from("0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @S1@ SOUR\n0 @I1@ INDI\n");
+    for level in 1..255 {
+        let line = if level % 2 == 1 {
+            "NOTE Copied"
+        } else {
+            "SOUR @S1@"
+        };
+        text.push_str(&format!("{level} {line}\n"));
+    }
+    text.push_str("1 BIRT\n2 SOUR @S1@\n3 DATA\n4 TEXT Entry\n5 _X\n");
+    for level in 6..255 {
+        text.push_str(&format!("{level} _X {level}\n"));
+    }
+    text.push_str("0 _REC\n");
+    for level in 1..255 {
+        text.push_str(&format!("{level} _Y\n"));
+    }
+    text.push_str("0 TRLR\n");
+    let data = Dataset::parse(text.as_str());
+    let json = serde_json::to_string(&data).unwrap();
+    assert!(nesting(&json) < 16, "{}", nesting(&json));
+    let back: Dataset = serde_json::from_str(&json).unwrap();
+    assert!(back.to_structures() == data.to_structures());
+    let note = &back.find_individual("@I1@").unwrap().notes[0];
+    assert_eq!(note.detail().citations.len(), 1);
+    // A list jumping a depth or a level is refused.
+    for json in [
+        r#"{"individuals":[{"notes":[{"content":{"Text":"a"}},[2,{}]]}]}"#,
+        r#"{"individuals":[{"notes":[[1,{}]]}]}"#,
+        r#"{"extra":[{"tag":"_X","descendants":[{"level":2,"tag":"_Y"}]}]}"#,
+    ] {
+        assert!(serde_json::from_str::<Dataset>(json).is_err(), "{json}");
+    }
+}
+
 /// What JSON cannot hold for the dataset is refused, not guessed.
 #[test]
 fn malformed_json_is_an_error() {
