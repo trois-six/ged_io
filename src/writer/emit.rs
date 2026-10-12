@@ -59,6 +59,9 @@ pub(crate) struct LineSink<'w> {
     pub(crate) repairs: Vec<Repair>,
     /// The source line of the structure being written, 0 when unknown.
     pub(crate) source_line: u32,
+    /// Where the lines of this sink start in `text`, when it writes after
+    /// the text of another ([`LineSink::lend`]).
+    base: usize,
 }
 
 impl<'w> LineSink<'w> {
@@ -92,6 +95,7 @@ impl<'w> LineSink<'w> {
             line_no: 1,
             repairs: Vec::new(),
             source_line: 0,
+            base: 0,
         }
     }
 
@@ -137,14 +141,43 @@ impl<'w> LineSink<'w> {
     /// The UTF-8 text written so far (UTF-8 output) or of the open line.
     #[cfg(debug_assertions)]
     pub(crate) fn text(&self) -> &str {
-        &self.text
+        self.text.get(self.base..).unwrap_or("")
     }
 
-    /// Empties a sink without a writer.
+    /// Lends the text written so far to `lines`, a sink of
+    /// [`LineSink::record_lines`], which writes its lines after it until
+    /// [`LineSink::take_back`]: a record's lines are written in place, not
+    /// copied. For a sink without a writer, in UTF-8.
+    pub(crate) fn lend(&mut self, lines: &mut LineSink<'_>) {
+        debug_assert!(self.writer.is_none() && self.encoding == OutputEncoding::Utf8);
+        lines.text.clear();
+        std::mem::swap(&mut self.text, &mut lines.text);
+        lines.base = lines.text.len();
+        lines.line_start = lines.base;
+        lines.line_no = 1;
+    }
+
+    /// Takes back the text lent to `lines` ([`LineSink::lend`]), with the
+    /// lines written there since when `keep`, without them otherwise.
+    pub(crate) fn take_back(&mut self, lines: &mut LineSink<'_>, keep: bool) {
+        if keep {
+            self.line_no += lines.line_no - 1;
+        } else {
+            lines.text.truncate(lines.base);
+        }
+        std::mem::swap(&mut self.text, &mut lines.text);
+        self.line_start = self.text.len();
+        lines.clear();
+        lines.base = 0;
+        lines.line_start = 0;
+    }
+
+    /// Empties a sink without a writer (of the lines written since
+    /// [`LineSink::lend`], for one lent text).
     pub(crate) fn clear(&mut self) {
-        self.text.clear();
+        self.text.truncate(self.base);
         self.buf.clear();
-        self.line_start = 0;
+        self.line_start = self.base;
         self.line_no = 1;
         self.repairs.clear();
         self.source_line = 0;

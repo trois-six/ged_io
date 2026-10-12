@@ -309,7 +309,7 @@ impl<W: io::Write> GedcomStreamWriter<W> {
                     let outcome = self.conform.record(
                         &built,
                         xref.as_deref().map(|x| Cow::Owned(x.to_string())),
-                        &self.sink,
+                        &mut self.sink,
                         &mut || xrefs.unique("@N1@"),
                         self.convert.as_ref().map(|c| &c.watch),
                     );
@@ -370,7 +370,7 @@ impl<W: io::Write> GedcomStreamWriter<W> {
         let outcome = self.conform.record(
             &entry,
             xref.as_deref().map(|x| Cow::Owned(x.to_string())),
-            &self.sink,
+            &mut self.sink,
             &mut || xrefs.unique("@N1@"),
             None,
         );
@@ -388,11 +388,9 @@ impl<W: io::Write> GedcomStreamWriter<W> {
         tag: &str,
     ) -> Result<(), WriteError> {
         match outcome {
-            Outcome::Lines => {
-                if let Some(lines) = self.conform.lines() {
-                    self.sink.append(lines)?;
-                }
-            }
+            // At the end of the sink already; a record to convert is
+            // converted first, when a conversion is looked for.
+            Outcome::Lines | Outcome::Convert => {}
             Outcome::Clean(flat) => {
                 if let Some(root) = flat.root() {
                     let mut out = Emitter {
@@ -413,8 +411,6 @@ impl<W: io::Write> GedcomStreamWriter<W> {
                     self.put_with(note, xref)?;
                 }
             }
-            // Only with a look for conversions, which is acted on first.
-            Outcome::Convert => {}
         }
         Ok(())
     }
