@@ -261,6 +261,10 @@ fn payloads() {
     assert_eq!(v551("0 @I1@ INDI\n1 DEAT\n2 AGE > 79y\n"), []);
     assert_eq!(v551("0 @I1@ INDI\n1 DEAT\n2 AGE <79y\n"), []);
     assert_eq!(v551("0 @I1@ INDI\n1 DEAT\n2 DATE (some day)\n"), []);
+    // An individual's EVEN takes its descriptor in 5.5.1 too (551-errata.tsv:
+    // EVENT_DESCRIPTOR, p. 48, as the family's EVEN, p. 32).
+    let even = "0 @I1@ INDI\n1 EVEN Appointed chairperson\n2 TYPE Civic appointment\n";
+    assert_eq!(v551(even), []);
 }
 
 #[test]

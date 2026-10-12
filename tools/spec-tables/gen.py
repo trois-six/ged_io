@@ -214,9 +214,10 @@ def gen_v551(base):
         if r[0] == 'substructure':
             sup, tag, typ, c = r[1], r[2].split('|')[0], r[2].split('|')[1], r[2].split('|')[2]
             subs.append((sup, tag, typ, *card(c)))
+    payload_errata = {r[1]: r[2] for r in errata if r[0] == 'payload'}
     pays = []
     for typ, p in read_tsv(files['payloads']):
-        p = p.strip()
+        p = payload_errata.get(typ, p).strip()
         if p in ('', '<NULL>'):
             kind = 'None'
         elif p == '[Y|<NULL>]':

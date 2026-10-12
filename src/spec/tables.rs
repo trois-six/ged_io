@@ -15,7 +15,7 @@
 //! * `c4c20ffc4b45500d4831504f0d80a4f18ee71d5a7290ea097149101fe121bd57` gedcom-go-5.5.1/payloads.tsv
 //! * `3d2eadef9afeb96d6d0363754a4d136ae4b0759f4ff62a372d9f9cbf45135ae7` gedcom-go-5.5.1/primitives.tsv
 //! * `ab91481a030771468d6eaf0877040db72532e23a396d278292f2f613598e2f90` gedcom-go-5.5.1/substructures.tsv
-//! * `b3c6ea5a3f41f47b2603a628d8a7bdeabdc1fe9811d761a9995ebe02e7ddcc13` tools/spec-tables/551-errata.tsv
+//! * `fd408f4885c8f1f0181b0f0ad0cf760c5b7c584feab889ab2979b969d4b1cc39` tools/spec-tables/551-errata.tsv
 //! * `cf665f5cd5d3115bdcfce9ead209d6921d85336e502a3489092fc09b981c97be` fs-gedcom-7.0/extracted-files/cardinalities.tsv
 //! * `93a2e168e3d0aed5ccb58b0caeae224684dc48070d2cfbacf34733d3960cf999` fs-gedcom-7.0/extracted-files/enumerations.tsv
 //! * `1f898fc753a9156b044ef678ed324b865a0a451f164564bf35c04f5fe5250b86` fs-gedcom-7.0/extracted-files/enumerationsets.tsv
@@ -263,7 +263,7 @@ pub(crate) static V551: Schema = Schema {
         d(2633, 31, 37, K::None, 0, 808, 19, 0), // 106 INDIVIDUAL_EVENT_STRUCTURE.CREM
         d(2664, 31, 42, K::Y, 0, 827, 19, 0), // 107 INDIVIDUAL_EVENT_STRUCTURE.DEAT
         d(2695, 31, 51, K::None, 0, 846, 19, 0), // 108 INDIVIDUAL_EVENT_STRUCTURE.EMIG
-        d(2726, 31, 54, K::None, 0, 865, 19, 0), // 109 INDIVIDUAL_EVENT_STRUCTURE.EVEN
+        d(2726, 31, 54, K::Text, 0, 865, 19, 0), // 109 INDIVIDUAL_EVENT_STRUCTURE.EVEN
         d(2757, 31, 62, K::None, 0, 884, 19, 0), // 110 INDIVIDUAL_EVENT_STRUCTURE.FCOM
         d(2788, 31, 68, K::None, 0, 903, 19, 0), // 111 INDIVIDUAL_EVENT_STRUCTURE.GRAD
         d(2819, 31, 73, K::None, 0, 922, 19, 0), // 112 INDIVIDUAL_EVENT_STRUCTURE.IMMI
