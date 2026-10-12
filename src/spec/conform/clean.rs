@@ -465,6 +465,9 @@ pub(super) fn is_canonical(set: &EnumSet, value: &str, family: Family) -> bool {
         Some(v) => *v == value,
         None => {
             set.open
+                || family == Family::V551
+                    && set.name == payload::OPEN_551_FORMATS
+                    && payload::is_open_format(value)
                 || family == Family::V7
                     && !value.bytes().any(|b| b.is_ascii_lowercase())
                     && payload::is_ext_tag(value)

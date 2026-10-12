@@ -67,11 +67,11 @@ gramps/data/tests/imp_CustTags.ged	OK	0
 gramps/data/tests/imp_FTM_16dec2015a-mod1.ged	OK	6	cardinality-min,payload-date
 gramps/data/tests/imp_FTM_LINK.ged	OK	0	cardinality-min
 gramps/data/tests/imp_FTM_OCCU_bug.ged	OK	0	cardinality-min
-gramps/data/tests/imp_FTM_PHOTO.ged	OK	0	cardinality-min,payload-enum
+gramps/data/tests/imp_FTM_PHOTO.ged	OK	0	cardinality-min
 gramps/data/tests/imp_Latin_1_CR.ged	OK	0	payload-enum
 gramps/data/tests/imp_Latin_1_CRLF.ged	OK	0	payload-enum
 gramps/data/tests/imp_Latin_1_LF.ged	OK	0	payload-enum
-gramps/data/tests/imp_MediaTest.ged	OK	20	cardinality-min,misplaced,payload-enum
+gramps/data/tests/imp_MediaTest.ged	OK	20	cardinality-min,misplaced
 gramps/data/tests/imp_MixInlineXrefNote.ged	OK	0	
 gramps/data/tests/imp_Paris.ged	OK	2	
 gramps/data/tests/imp_PhonFax_dfs.ged	OK	0	misplaced

@@ -799,6 +799,14 @@ fn enum_ok(spec: &Spec, set: &str, value: &str, v7: bool) -> bool {
     }
     if v7 {
         values.contains(&value) || (value.starts_with('_') && tag_ok(value, Version::V70))
+    } else if set == "MULTIMEDIA_FORMAT" {
+        // The crate's one accepted practice (src/spec/mod.rs): the 5.5.1
+        // file formats are open, a list value in its spelling or any other
+        // word, but not a media type.
+        values.contains(&value)
+            || (!value.is_empty()
+                && !value.contains('/')
+                && !values.iter().any(|v| v.eq_ignore_ascii_case(value)))
     } else {
         // Readers match 5.5.1 values case-insensitively; a writer uses the
         // spec's spelling.

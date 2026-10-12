@@ -714,44 +714,75 @@ fn pointer(tag: &str, xref: &str) -> Structure {
     }
 }
 
+/// File extensions and their media types; the first extension of a type
+/// is its 5.5.1 file format (`image/jpeg` is `jpg`).
+const FILE_TYPES: [(&[&str], &str); 16] = [
+    (&["jpg", "jpeg"], "image/jpeg"),
+    (&["png"], "image/png"),
+    (&["gif"], "image/gif"),
+    (&["bmp"], "image/bmp"),
+    (&["tif", "tiff"], "image/tiff"),
+    (&["webp"], "image/webp"),
+    (&["svg"], "image/svg+xml"),
+    (&["pdf"], "application/pdf"),
+    (&["txt"], "text/plain"),
+    (&["htm", "html"], "text/html"),
+    (&["wav"], "audio/wav"),
+    (&["mp3"], "audio/mpeg"),
+    (&["ogg"], "audio/ogg"),
+    (&["mp4"], "video/mp4"),
+    (&["mpg", "mpeg"], "video/mpeg"),
+    (&["avi"], "video/x-msvideo"),
+];
+
 /// The media type of a file from its extension; `application/octet-stream`
 /// when unknown.
 fn media_type(path: &str) -> &'static str {
     let ext = extension(path);
+    FILE_TYPES
+        .iter()
+        .find(|(exts, _)| exts.contains(&ext.as_str()))
+        .map_or("application/octet-stream", |&(_, media_type)| media_type)
+}
+
+/// The 5.5.1 file format of a file from its extension (p. 54): a format of
+/// the list under its own spelling (`jpeg` is `jpg`), else the extension
+/// (accepted practice: the list is open), else `unknown`.
+fn multimedia_format(path: &str) -> String {
+    let ext = extension(path);
     match ext.as_str() {
-        "jpg" | "jpeg" => "image/jpeg",
-        "png" => "image/png",
-        "gif" => "image/gif",
-        "bmp" => "image/bmp",
-        "tif" | "tiff" => "image/tiff",
-        "webp" => "image/webp",
-        "svg" => "image/svg+xml",
-        "pdf" => "application/pdf",
-        "txt" => "text/plain",
-        "htm" | "html" => "text/html",
-        "wav" => "audio/wav",
-        "mp3" => "audio/mpeg",
-        "ogg" => "audio/ogg",
-        "mp4" => "video/mp4",
-        "mpg" | "mpeg" => "video/mpeg",
-        "avi" => "video/x-msvideo",
-        _ => "application/octet-stream",
+        "jpeg" => "jpg".into(),
+        "tiff" => "tif".into(),
+        "" => "unknown".into(),
+        _ => ext,
     }
 }
 
-/// The 5.5.1 `MULTIMEDIA_FORMAT` of a file from its extension (p. 54), if
-/// the list has one.
-fn multimedia_format(path: &str) -> Option<&'static str> {
-    match extension(path).as_str() {
-        "bmp" => Some("bmp"),
-        "gif" => Some("gif"),
-        "jpg" | "jpeg" => Some("jpg"),
-        "ole" => Some("ole"),
-        "pcx" => Some("pcx"),
-        "tif" | "tiff" => Some("tif"),
-        "wav" => Some("wav"),
-        _ => None,
+/// The 5.5.1 file format of a media type: the extension of a known type
+/// (`application/pdf` is `pdf`, `image/jpeg` is `jpg`), else the subtype
+/// without its `x-` or `vnd.` prefix and `+` suffix (`image/x-icon` is
+/// `icon`), else the type, else `unknown`; lower case.
+fn file_format_of_media_type(media_type: &str) -> String {
+    let lower = media_type.to_ascii_lowercase();
+    let mt = lower.split(';').next().unwrap_or("").trim();
+    if let Some((exts, _)) = FILE_TYPES.iter().find(|&&(_, t)| t == mt) {
+        return exts.first().copied().unwrap_or("unknown").to_string();
     }
+    let (ty, sub) = mt.split_once('/').unwrap_or((mt, ""));
+    let sub = sub.split('+').next().unwrap_or("");
+    let sub = sub
+        .strip_prefix("x-")
+        .or_else(|| sub.strip_prefix("vnd."))
+        .unwrap_or(sub);
+    let token = |s: &str| -> String {
+        s.chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+            .collect()
+    };
+    [token(sub), token(ty)]
+        .into_iter()
+        .find(|t| !t.is_empty())
+        .unwrap_or_else(|| "unknown".into())
 }
 
 fn extension(path: &str) -> String {
@@ -1895,6 +1926,24 @@ impl<'n> Conformer<'n> {
             }
             return Fate::Keep;
         }
+        // The 5.5.1 file formats are open (accepted practice): a word is
+        // written as it is, a media type as its file format (`image/png`
+        // as `png`).
+        if self.family == Family::V551 && set.name == payload::OPEN_551_FORMATS {
+            if payload::is_open_format(raw) {
+                return Fate::Keep;
+            }
+            if raw.contains('/') {
+                let fixed = file_format_of_media_type(raw);
+                self.repair(
+                    s.line,
+                    RepairKind::EnumValue,
+                    format!("{here} {raw:?}: a media type; written as the file format {fixed}"),
+                );
+                s.payload = Payload::Text(fixed.into());
+                return Fate::Keep;
+            }
+        }
         if self.family == Family::V7
             && set.values.contains(&"OTHER")
             && self.takes(ty, "PHRASE").is_some()
@@ -2118,7 +2167,7 @@ impl<'n> Conformer<'n> {
                 if v7 {
                     text("FORM", media_type(file))
                 } else {
-                    text("FORM", multimedia_format(file)?)
+                    text("FORM", &multimedia_format(file))
                 }
             }
             ("TRAN", "LANG") if v7 => text("LANG", "und"),

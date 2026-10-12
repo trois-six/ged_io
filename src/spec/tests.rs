@@ -606,9 +606,13 @@ fn repair_g_required() {
     );
     assert_eq!(k, [], "{k:?}");
     assert_eq!(out, "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 TRLR\n");
-    // A FILE without a 5.5.1 format to stand for its FORM.
+    // A FILE's FORM from its extension, in 5.5.1 too (the formats are
+    // open: accepted practice).
     let (_, out) = repair551("0 @O1@ OBJE\n1 FILE a.png\n0 @O2@ OBJE\n1 FILE b.jpeg\n");
-    assert!(out.contains("0 @O1@ _OBJE\n1 _FILE a.png\n"), "{out}");
+    assert!(
+        out.contains("0 @O1@ OBJE\n1 FILE a.png\n2 FORM png\n"),
+        "{out}"
+    );
     assert!(
         out.contains("0 @O2@ OBJE\n1 FILE b.jpeg\n2 FORM jpg\n"),
         "{out}"
@@ -767,4 +771,66 @@ fn substructures_are_sorted_by_tag() {
             }
         }
     }
+}
+
+/// The 5.5.1 file formats are open (accepted practice): any word is a
+/// format, a media type is written as its format, a missing `FORM` comes
+/// from the file's extension, and nothing cascades into extensions. 7.x
+/// keeps media types.
+#[test]
+fn open_551_file_formats() {
+    let obje = |file: &str| format!("0 @I1@ INDI\n1 OBJE @M1@\n0 @M1@ OBJE\n{file}");
+    assert_eq!(v551(&obje("1 FILE a.png\n2 FORM png\n")), []);
+    assert_eq!(v551(&obje("1 FILE a.pdf\n2 FORM PDF\n")), []);
+    assert_eq!(v551(&obje("1 FILE a.jpg\n2 FORM Jpg\n")), []);
+    assert_eq!(
+        v551(&obje("1 FILE a.png\n2 FORM image/png\n")),
+        [(14, K::EnumValue)]
+    );
+    assert_eq!(v70(&obje("1 FILE a.png\n2 FORM png\n")), [(8, K::Payload)]);
+
+    for (file, written, kinds) in [
+        (
+            "1 FILE a.png\n2 FORM png\n",
+            "1 FILE a.png\n2 FORM png\n",
+            vec![],
+        ),
+        ("1 FILE a.webp\n2 FORM webp\n", "2 FORM webp\n", vec![]),
+        (
+            "1 FILE a.pdf\n2 FORM application/pdf\n",
+            "2 FORM pdf\n",
+            vec![R::EnumValue],
+        ),
+        (
+            "1 FILE a.jpg\n2 FORM image/jpeg\n",
+            "2 FORM jpg\n",
+            vec![R::EnumValue],
+        ),
+        (
+            "1 FILE a.ico\n2 FORM image/x-icon\n",
+            "2 FORM icon\n",
+            vec![R::EnumValue],
+        ),
+        (
+            "1 FILE a.PNG\n",
+            "1 FILE a.PNG\n2 FORM png\n",
+            vec![R::Required],
+        ),
+        ("1 FILE a.jpeg\n", "2 FORM jpg\n", vec![R::Required]),
+        (
+            "1 FILE scan\n",
+            "1 FILE scan\n2 FORM unknown\n",
+            vec![R::Required],
+        ),
+    ] {
+        let (k, out) = repair551(&obje(file));
+        assert_eq!(k, kinds, "{file}\n{out}");
+        assert!(out.contains(written), "{file}\n{out}");
+        assert!(out.contains("1 OBJE @M1@\n0 @M1@ OBJE\n"), "{file}\n{out}");
+        assert!(!out.contains("_FORM") && !out.contains("_FILE"), "{out}");
+    }
+    // 7.x: a media type from the extension, as before.
+    let (k, out) = repair70(&obje("1 FILE a.png\n"));
+    assert_eq!(k, [R::Required]);
+    assert!(out.contains("2 FORM image/png\n"), "{out}");
 }
