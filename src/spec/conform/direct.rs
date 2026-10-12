@@ -233,7 +233,7 @@ impl<'n> Direct<'n> {
             // identifiers make the check's walk follow them.
             let targets = self.c.renamed.is_empty().then(|| Rc::clone(&self.ids));
             let stream = Stream::new(self.c.rules, sink.record_lines(), targets);
-            self.arena.set_stream(Some(Box::new(stream)));
+            self.arena.set_stream(Some(stream));
         }
     }
 

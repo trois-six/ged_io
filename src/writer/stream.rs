@@ -16,7 +16,7 @@ use crate::model::write::Built;
 use crate::model::Header;
 use crate::model::{RecordRef, Store};
 use crate::spec::conform::streamed::{Outcome, Streamed};
-use crate::tree::{Node, PayloadRef, Structure, Tag, Xref};
+use crate::tree::{PayloadRef, Structure, Tag, Xref};
 use crate::version::{VersionRules, XrefGrammar};
 
 /// The identifier of the stub submitter a 5.5.1 header without one points
@@ -157,8 +157,8 @@ impl<W: io::Write> GedcomStreamWriter<W> {
             convert: true,
         };
         let mut head = RecordRef::Header(header).to_structure(&cx);
-        let submitter = head::needs_submitter(&head, rules).then(|| STUB.to_string());
-        let conform = Streamed::header(rules.version, &mut head, submitter.clone());
+        let mut stubbed = false;
+        let conform = Streamed::header(rules.version, &mut head, STUB, &mut stubbed);
         let mut this = Self {
             writer,
             policy,
@@ -169,9 +169,9 @@ impl<W: io::Write> GedcomStreamWriter<W> {
             held: Vec::new(),
         };
         this.repairs_since(0)?;
-        let stub = submitter.map(|x| {
-            this.xrefs.take(&x);
-            head::stub_submitter(x)
+        let stub = stubbed.then(|| {
+            this.xrefs.take(STUB);
+            head::stub_submitter(STUB.to_string())
         });
         map_pointers(&mut head, &mut this.xrefs);
         let charset = this.sink.charset();
@@ -218,7 +218,7 @@ impl<W: io::Write> GedcomStreamWriter<W> {
                     "a second HEAD written as a _HEAD record",
                 ));
                 self.repairs_since(mark)?;
-                self.put_owned(&s, None)?;
+                self.put_owned(&s)?;
             }
             RecordRef::Other(n) if store.as_ref().tag(n.tag) == "TRLR" => {
                 if !record.is_empty() || n.xref.is_some() {
@@ -231,18 +231,30 @@ impl<W: io::Write> GedcomStreamWriter<W> {
                         "a TRLR with content written as a _TRLR record",
                     ));
                     self.repairs_since(mark)?;
-                    self.put_owned(&s, None)?;
+                    self.put_owned(&s)?;
                 }
             }
             _ => {
+                let own = record.xref().map(|id| cx.store.xref(id));
+                let tag = record.tag(cx.store, self.rules.version);
+                let xref = self.record_xref(own, tag)?;
                 let built = Built::new(record, cx);
                 let xrefs = &mut self.xrefs;
-                let outcome = self.conform.record(&built, &mut || xrefs.unique("@N1@"));
+                let outcome = self.conform.record(
+                    &built,
+                    xref.as_deref().map(|x| Cow::Owned(x.to_string())),
+                    &self.sink,
+                    &mut || xrefs.unique("@N1@"),
+                );
                 self.repairs_since(mark)?;
                 match outcome {
+                    Outcome::Lines => {
+                        if let Some(lines) = self.conform.lines() {
+                            self.sink.append(lines)?;
+                        }
+                    }
                     Outcome::Clean(flat) => {
                         if let Some(root) = flat.root() {
-                            let xref = self.record_xref(root.xref(), root.tag())?;
                             let mut out = Emitter {
                                 rules: self.rules,
                                 sink: &mut self.sink,
@@ -251,17 +263,14 @@ impl<W: io::Write> GedcomStreamWriter<W> {
                         }
                     }
                     Outcome::Repaired(s, notes) => {
-                        let tag = record.tag(store.as_ref(), self.rules.version);
                         if s.tag.as_str().starts_with('_') && !tag.starts_with('_') {
-                            let xref = self
-                                .record_xref(s.xref.as_ref().map(Xref::as_str), s.tag.as_str())?;
                             self.held.push((s, xref));
                             return self.sink.drain_to(&mut self.writer, false);
                         }
-                        self.put_owned(&s, None)?;
+                        self.put_with(&s, xref.as_deref())?;
                         for note in &notes {
-                            let xref = note.xref.as_ref().map(|x| x.as_str().to_string());
-                            self.put_owned(note, xref)?;
+                            let xref = note.xref.as_ref().map(Xref::as_str);
+                            self.put_with(note, xref)?;
                         }
                     }
                 }
@@ -279,7 +288,7 @@ impl<W: io::Write> GedcomStreamWriter<W> {
     /// [`WriteError::Io`] when the writer fails.
     pub fn finish(mut self) -> Result<(W, WriteReport), WriteError> {
         for (s, xref) in std::mem::take(&mut self.held) {
-            self.put_owned(&s, xref)?;
+            self.put_with(&s, xref.as_deref())?;
         }
         let mut out = Emitter {
             rules: self.rules,
@@ -315,24 +324,20 @@ impl<W: io::Write> GedcomStreamWriter<W> {
         Ok(new)
     }
 
-    /// Writes an owned record; `xref` is the identifier it is written
-    /// with, when it is one the writer made already.
-    fn put_owned(&mut self, s: &Structure, xref: Option<String>) -> Result<(), WriteError> {
-        let xref = match xref {
-            Some(x) => Some(x),
-            None => self.record_xref(s.xref.as_ref().map(Xref::as_str), s.tag.as_str())?,
-        };
+    /// Writes an owned record, its identifier made by the writer.
+    fn put_owned(&mut self, s: &Structure) -> Result<(), WriteError> {
+        let xref = self.record_xref(s.xref.as_ref().map(Xref::as_str), s.tag.as_str())?;
+        self.put_with(s, xref.as_deref())
+    }
+
+    /// Writes an owned record with the identifier `xref`, which the writer
+    /// made already.
+    fn put_with(&mut self, s: &Structure, xref: Option<&str>) -> Result<(), WriteError> {
         let mut out = Emitter {
             rules: self.rules,
             sink: &mut self.sink,
         };
-        put_record(
-            &mut out,
-            &mut self.xrefs,
-            xref.as_deref(),
-            s,
-            &mut Vec::new(),
-        )
+        put_record(&mut out, &mut self.xrefs, xref, s, &mut Vec::new())
     }
 }
 

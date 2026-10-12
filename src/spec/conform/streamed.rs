@@ -19,13 +19,16 @@
 //! than its type permits becomes an extension record as in the whole
 //! pass.
 
+use std::borrow::Cow;
+
 use super::clean::Walk;
-use super::{bump, encoded_len, Aliases, Conformer, Family, Typing, DATASET};
+use super::{bump, encoded_len, Aliases, Conformer, Family, StructId, Typing, DATASET};
 use crate::spec::conform::Build;
 use crate::spec::validate::MAX_RECORD_BYTES;
 use crate::tree::Node;
-use crate::tree::{Flat, Structure};
-use crate::writer::{complete_head, Repair, RepairKind};
+use crate::tree::{Flat, Stream, StreamBuffers, Structure};
+use crate::writer::LineSink;
+use crate::writer::{complete_head, needs_submitter, Repair, RepairKind};
 use crate::GedcomVersion;
 
 /// The state of records written one at a time: see the [module
@@ -38,29 +41,36 @@ pub(crate) struct Streamed {
     counts: Vec<(u8, u32)>,
     /// The repairs, in order.
     pub(crate) repairs: Vec<Repair>,
+    /// The room of stream mode, from record to record.
+    buffers: Option<StreamBuffers>,
 }
 
 /// A record as [`Streamed::record`] leaves it.
 pub(crate) enum Outcome<'r> {
+    /// Written as lines ([`Streamed::lines`]).
+    Lines,
     /// As it wrote itself, typed, in this arena.
-    Clean(Flat<'r>),
+    Clean(Box<Flat<'r>>),
     /// Repaired, with the notes moved out of it.
     Repaired(Structure, Vec<Structure>),
 }
 
 impl Streamed {
     /// Completes and repairs `head`, the header of records of `version`,
-    /// as the whole pass does, pointing to `submitter` when it needs one.
+    /// as the whole pass does, pointing to the record `stub` when it needs
+    /// a submitter: then `stubbed` is set, for the stub to be written.
     pub(crate) fn header(
         version: GedcomVersion,
         head: &mut Structure,
-        submitter: Option<String>,
+        stub: &str,
+        stubbed: &mut bool,
     ) -> Self {
         let mut this = Self {
             version,
             aliases: Aliases::default(),
             counts: Vec::new(),
             repairs: Vec::new(),
+            buffers: None,
         };
         let mut c = this.conformer();
         if let Some(x) = head.xref.take() {
@@ -72,15 +82,23 @@ impl Streamed {
         }
         c.aliases = Aliases::of(Some(&*head), c.schema);
         let head_ty = c.record_of("HEAD");
-        complete_head(head, c.rules, "UTF-8", submitter);
+        let mut complete = |c: &Conformer<'_>, head: &mut Structure| {
+            let submitter = needs_submitter(head, c.rules).then(|| {
+                *stubbed = true;
+                stub.to_string()
+            });
+            complete_head(head, c.rules, "UTF-8", submitter);
+            if let Some(ty) = head_ty {
+                c.model_order_to(head, ty, 2);
+            }
+        };
+        complete(&c, head);
         if let Some(ty) = head_ty {
-            c.model_order_to(head, ty, 2);
             if !c.is_clean(&*head, ty, true) {
                 c.path.clear();
                 let _ = c.fix(head, ty, true);
                 c.model_order(head, ty);
-                complete_head(head, c.rules, "UTF-8", None);
-                c.model_order_to(head, ty, 2);
+                complete(&c, head);
             }
         }
         this.aliases = Aliases::of(Some(&*head), c.schema);
@@ -99,40 +117,56 @@ impl Streamed {
     }
 
     /// Writes `record` typed and checks it; repairs it when it needs it.
-    /// `fresh` makes the identifier of a `NOTE` record a note moves to.
+    /// It is first written as lines, as `sink` writes them, with the
+    /// identifier `xref` ([`Outcome::Lines`]); when that needs the
+    /// structures, it is written into an arena. `fresh` makes the
+    /// identifier of a `NOTE` record a note moves to.
     pub(crate) fn record<'r>(
         &mut self,
         record: &dyn Build<'r>,
+        xref: Option<Cow<'r, str>>,
+        sink: &LineSink<'_>,
         fresh: &mut dyn FnMut() -> String,
     ) -> Outcome<'r> {
         let mut c = self.conformer();
+        let typing = Typing::of(self.version);
+        if c.aliases.structs.is_empty() && c.aliases.words.is_empty() {
+            let buffers = self
+                .buffers
+                .take()
+                .unwrap_or_else(|| StreamBuffers::new(sink.record_lines()));
+            let mut flat = Flat::default();
+            flat.set_typing(Some(typing));
+            flat.set_stream(Some(Stream::with_buffers(c.rules, buffers, None)));
+            flat.begin_stream(xref);
+            record.build(&mut flat);
+            let mut walk = Walk::default();
+            let clean = !flat.spoiled()
+                && c.is_clean_streamed(&flat, &mut walk)
+                && !(c.family == Family::V551 && walk.size > MAX_RECORD_BYTES);
+            self.buffers = flat.take_stream().map(Stream::into_buffers);
+            if clean && self.count(&c, walk.rtype) {
+                return Outcome::Lines;
+            }
+        }
         let mut flat = Flat::default();
-        flat.set_typing(Some(Typing::of(self.version)));
+        flat.set_typing(Some(typing));
         record.build(&mut flat);
         let mut walk = Walk::default();
         let clean = c.is_clean_written(&flat, &mut walk);
         if clean {
-            let mut over = false;
-            if walk.rtype != DATASET {
-                let t = c.schema.tag_id(walk.rtype).unwrap_or(0);
-                let n = bump(&mut self.counts, t);
-                if c.picker
-                    .max(DATASET, t)
-                    .is_some_and(|max| n > u32::from(max))
-                {
-                    if let Some((_, n)) = self.counts.iter_mut().find(|(k, _)| *k == t) {
-                        *n -= 1;
-                    }
-                    over = true;
-                }
-            }
+            let over = !self.count(&c, walk.rtype);
             let big = c.family == Family::V551
                 && walk.size > MAX_RECORD_BYTES
                 && flat
                     .root()
                     .is_some_and(|n| encoded_len(n, 0, c.family) > MAX_RECORD_BYTES);
             if !over && !big {
-                return Outcome::Clean(flat);
+                return Outcome::Clean(Box::new(flat));
+            }
+            if !over {
+                // Counted again by the repair.
+                self.uncount(&c, walk.rtype);
             }
         }
         let mut s = flat
@@ -144,6 +178,38 @@ impl Streamed {
         let notes = Self::notes(&mut c, &mut s, fresh);
         self.repairs.append(&mut c.repairs);
         Outcome::Repaired(s, notes)
+    }
+
+    /// The lines of the last record left as [`Outcome::Lines`].
+    pub(crate) fn lines(&self) -> Option<&LineSink<'static>> {
+        self.buffers.as_ref().map(StreamBuffers::lines)
+    }
+
+    /// Counts a clean record of type `rtype` towards the records of its
+    /// type the dataset permits: `false`, and not counted, when it is one
+    /// too many.
+    fn count(&mut self, c: &Conformer<'_>, rtype: StructId) -> bool {
+        if rtype == DATASET {
+            return true;
+        }
+        let t = c.schema.tag_id(rtype).unwrap_or(0);
+        let n = bump(&mut self.counts, t);
+        if c.picker
+            .max(DATASET, t)
+            .is_some_and(|max| n > u32::from(max))
+        {
+            self.uncount(c, rtype);
+            return false;
+        }
+        true
+    }
+
+    /// Takes back a count of [`Streamed::count`].
+    fn uncount(&mut self, c: &Conformer<'_>, rtype: StructId) {
+        let t = c.schema.tag_id(rtype).unwrap_or(0);
+        if let Some((_, n)) = self.counts.iter_mut().find(|(k, _)| *k == t) {
+            *n -= 1;
+        }
     }
 
     /// (j) The notes moved out of `s` when it is a 5.5.1 record over 32K.

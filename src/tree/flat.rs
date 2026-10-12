@@ -103,7 +103,7 @@ pub(crate) struct Flat<'s> {
     /// The extension structures under typed ones, which the check walks.
     extensions: Vec<u32>,
     /// The state of stream mode, when set.
-    stream: Option<Box<Stream<'s>>>,
+    stream: Option<Stream<'s>>,
 }
 
 /// A structure open in stream mode.
@@ -120,6 +120,30 @@ struct Open {
     empty: bool,
     /// Whether a substructure is tagged `MIME` or `LANG`.
     lang: bool,
+}
+
+/// The room of a [`Stream`] that outlives the records it wrote: its line
+/// buffer and its stacks, to reuse for records that borrow other stores.
+pub(crate) struct StreamBuffers {
+    lines: LineSink<'static>,
+    open: Vec<Open>,
+    counts: Vec<(u8, u32)>,
+}
+
+impl StreamBuffers {
+    /// Buffers for lines as `lines` (a record's sink) writes them.
+    pub(crate) fn new(lines: LineSink<'static>) -> Self {
+        Self {
+            lines,
+            open: Vec::new(),
+            counts: Vec::new(),
+        }
+    }
+
+    /// The lines of the last record written.
+    pub(crate) fn lines(&self) -> &LineSink<'static> {
+        &self.lines
+    }
 }
 
 /// What stream mode keeps of a record: its lines, and what the check must
@@ -160,6 +184,15 @@ pub(crate) struct Stream<'s> {
 }
 
 impl<'s> Stream<'s> {
+    /// The room to reuse for another record ([`Stream::with_buffers`]).
+    pub(crate) fn into_buffers(self) -> StreamBuffers {
+        StreamBuffers {
+            lines: self.lines,
+            open: self.open,
+            counts: self.counts,
+        }
+    }
+
     /// The occurrences of `tag` among the counts from `from` on.
     #[inline]
     fn count(&self, from: u32, tag: u8) -> u32 {
@@ -190,14 +223,37 @@ impl<'s> Stream<'s> {
         lines: LineSink<'static>,
         targets: Option<Rc<IdTypes<'s>>>,
     ) -> Self {
+        Self::with_buffers(
+            rules,
+            StreamBuffers {
+                lines,
+                open: Vec::new(),
+                counts: Vec::new(),
+            },
+            targets,
+        )
+    }
+
+    /// [`Stream::new`] reusing the room of `buffers`, which another
+    /// stream kept ([`Stream::into_buffers`]).
+    pub(crate) fn with_buffers(
+        rules: &'static VersionRules,
+        buffers: StreamBuffers,
+        targets: Option<Rc<IdTypes<'s>>>,
+    ) -> Self {
+        let StreamBuffers {
+            lines,
+            open,
+            counts,
+        } = buffers;
         Self {
             rules,
             family: Family::of(rules),
             targets,
             lines,
             xref: None,
-            open: Vec::new(),
-            counts: Vec::new(),
+            open,
+            counts,
             extension: None,
             spoiled: false,
             checks: Vec::new(),
@@ -260,7 +316,7 @@ impl std::fmt::Debug for Flat<'_> {
 impl<'s> Flat<'s> {
     /// Sets stream mode ([`Stream`]), or node mode (`None`), for the
     /// records written from now on.
-    pub(crate) fn set_stream(&mut self, stream: Option<Box<Stream<'s>>>) {
+    pub(crate) fn set_stream(&mut self, stream: Option<Stream<'s>>) {
         self.stream = stream;
     }
 
@@ -270,7 +326,7 @@ impl<'s> Flat<'s> {
     }
 
     /// The state of stream mode, taken out: the arena is in node mode.
-    pub(crate) fn take_stream(&mut self) -> Option<Box<Stream<'s>>> {
+    pub(crate) fn take_stream(&mut self) -> Option<Stream<'s>> {
         self.stream.take()
     }
 
@@ -278,7 +334,7 @@ impl<'s> Flat<'s> {
     /// on its line.
     pub(crate) fn begin_stream(&mut self, xref: Option<Cow<'s, str>>) {
         self.clear();
-        if let Some(st) = self.stream.as_deref_mut() {
+        if let Some(st) = self.stream.as_mut() {
             st.lines.clear();
             st.xref = xref;
             st.open.clear();
@@ -297,13 +353,13 @@ impl<'s> Flat<'s> {
     /// its lines would be repaired.
     pub(crate) fn spoiled(&self) -> bool {
         self.stream
-            .as_deref()
+            .as_ref()
             .is_none_or(|st| st.spoiled || st.written == 0 || !st.open.is_empty())
     }
 
     /// The lines of the record streamed.
     pub(crate) fn stream_lines(&mut self) -> Option<&mut LineSink<'static>> {
-        self.stream.as_deref_mut().map(|st| &mut st.lines)
+        self.stream.as_mut().map(|st| &mut st.lines)
     }
 
     /// The typed pointers of the record streamed, which the check looks
@@ -311,7 +367,7 @@ impl<'s> Flat<'s> {
     pub(crate) fn stream_pointers(
         &self,
     ) -> impl Iterator<Item = (PayloadRef<'_>, Option<XrefId>, StructId)> {
-        let checks: &[_] = self.stream.as_deref().map_or(&[], |st| &st.checks);
+        let checks: &[_] = self.stream.as_ref().map_or(&[], |st| &st.checks);
         checks.iter().map(|(p, ty, _)| {
             let id = match p {
                 FlatPayload::Pointer(_, id) => *id,
@@ -324,7 +380,7 @@ impl<'s> Flat<'s> {
     /// The pointers of the extension structures of the record streamed,
     /// each to name a record, with their ids.
     pub(crate) fn stream_extension_pointers(&self) -> impl Iterator<Item = (&str, Option<XrefId>)> {
-        let pointers: &[_] = self.stream.as_deref().map_or(&[], |st| &st.pointers);
+        let pointers: &[_] = self.stream.as_ref().map_or(&[], |st| &st.pointers);
         pointers.iter().map(|(p, id)| (&**p, *id))
     }
 
@@ -382,7 +438,7 @@ impl<'s> Flat<'s> {
 
     /// The type of the record being written, once typed.
     pub(crate) fn root_type(&self) -> Option<StructId> {
-        if let Some(st) = self.stream.as_deref() {
+        if let Some(st) = self.stream.as_ref() {
             return Some(st.root).filter(|&t| t != UNTYPED);
         }
         self.nodes
@@ -426,7 +482,7 @@ impl<'s> Flat<'s> {
     /// Something not typed is written: the check walks the record.
     pub(crate) fn untrusted(&mut self) {
         self.untyped = true;
-        if let Some(st) = self.stream.as_deref_mut() {
+        if let Some(st) = self.stream.as_mut() {
             st.spoiled = true;
         }
     }
@@ -626,7 +682,7 @@ impl<'s> Flat<'s> {
         let repeat = std::mem::take(&mut self.repeat);
         let depth = self.depth;
         self.depth += 1;
-        let (Some(st), Some(typing)) = (self.stream.as_deref_mut(), self.typing.as_ref()) else {
+        let (Some(st), Some(typing)) = (self.stream.as_mut(), self.typing.as_ref()) else {
             return;
         };
         if st.spoiled {
@@ -716,7 +772,7 @@ impl<'s> Flat<'s> {
     ) {
         let depth = self.depth;
         self.depth += 1;
-        let Some(st) = self.stream.as_deref_mut() else {
+        let Some(st) = self.stream.as_mut() else {
             return;
         };
         if st.spoiled {
@@ -775,7 +831,7 @@ impl<'s> Flat<'s> {
     #[inline]
     fn stream_close(&mut self) {
         self.depth = self.depth.saturating_sub(1);
-        let (Some(st), Some(typing)) = (self.stream.as_deref_mut(), self.typing.as_ref()) else {
+        let (Some(st), Some(typing)) = (self.stream.as_mut(), self.typing.as_ref()) else {
             return;
         };
         if st.spoiled {
