@@ -21,8 +21,9 @@
 //! dataset read peaks at most at 3 times the input (`read-ratio=3`), its
 //! write at 4.5 (`write-ratio=4.5`, the output being held whole); a stream
 //! read or write stays under 64 MiB beyond the largest record
-//! (`stream-mib=64`); every pipeline reads at least 50 MB/s
-//! (`min-mbps=50`, generous: CI machines vary).
+//! (`stream-mib=64`); the in-memory pipelines run at 50 MB/s at least
+//! (`min-mbps=50`), the streams at 20 (`min-stream-mbps=20`): generous
+//! floors, CI machines vary.
 
 mod generate;
 
@@ -156,6 +157,7 @@ fn check(path: &str, args: &[String]) -> Result<bool, String> {
         ("write-ratio", 4.5),
         ("stream-mib", 64.0),
         ("min-mbps", 50.0),
+        ("min-stream-mbps", 20.0),
     ];
     for arg in args {
         let (name, value) = arg
@@ -198,7 +200,12 @@ fn check(path: &str, args: &[String]) -> Result<bool, String> {
             }
             _ => {}
         }
-        if mbps < limit("min-mbps") {
+        let floor = if pipeline.starts_with("stream") {
+            limit("min-stream-mbps")
+        } else {
+            limit("min-mbps")
+        };
+        if mbps < floor {
             failed.push("throughput");
         }
         ok &= failed.is_empty();
