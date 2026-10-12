@@ -19,6 +19,7 @@
 use std::borrow::Cow;
 
 use super::{Node, Payload, PayloadRef, Structure, Tag, Xref};
+use crate::model::XrefId;
 use crate::spec::conform::Typing;
 use crate::spec::schema::{Kind, StructId, DATASET};
 use crate::version::VersionRules;
@@ -33,8 +34,9 @@ pub(crate) enum FlatPayload<'s> {
     /// No payload.
     #[default]
     None,
-    /// A pointer, delimiters included.
-    Pointer(Cow<'s, str>),
+    /// A pointer, delimiters included, with its id in the store of the
+    /// dataset it was written from, when it has one.
+    Pointer(Cow<'s, str>, Option<XrefId>),
     /// Text, unescaped, continuations joined.
     Text(Cow<'s, str>),
 }
@@ -43,7 +45,7 @@ impl From<Payload> for FlatPayload<'_> {
     fn from(p: Payload) -> Self {
         match p {
             Payload::None => FlatPayload::None,
-            Payload::Pointer(x) => FlatPayload::Pointer(Cow::Owned(x.as_str().to_string())),
+            Payload::Pointer(x) => FlatPayload::Pointer(Cow::Owned(x.as_str().to_string()), None),
             Payload::Text(t) => FlatPayload::Text(Cow::Owned(t.into_string())),
         }
     }
@@ -106,61 +108,15 @@ pub(crate) struct Flat<'s> {
 struct Open {
     /// Its type.
     ty: StructId,
-    /// The occurrences of the tags (indices into the tables' tags) of its
-    /// typed substructures so far: `len` of them.
-    tags: [u8; OPEN_TAGS],
-    counts: [u8; OPEN_TAGS],
-    len: u8,
+    /// Where the occurrences of the tags of its typed substructures start
+    /// in [`Stream::counts`].
+    counts: u32,
     /// Whether it has a substructure.
     children: bool,
     /// Whether its payload is empty.
     empty: bool,
     /// Whether a substructure is tagged `MIME` or `LANG`.
     lang: bool,
-}
-
-/// The distinct tags of typed substructures counted under one structure
-/// in stream mode; a structure with more spoils the stream.
-const OPEN_TAGS: usize = 16;
-
-impl Open {
-    /// The occurrences of `tag` so far.
-    #[inline]
-    fn count(&self, tag: u8) -> u8 {
-        let len = usize::from(self.len);
-        match self
-            .tags
-            .get(..len)
-            .and_then(|t| t.iter().position(|&x| x == tag))
-        {
-            Some(i) => self.counts.get(i).copied().unwrap_or(0),
-            None => 0,
-        }
-    }
-
-    /// Counts one more `tag`; `false` when there is no room.
-    #[inline]
-    fn bump(&mut self, tag: u8) -> bool {
-        let len = usize::from(self.len);
-        if let Some(i) = self
-            .tags
-            .get(..len)
-            .and_then(|t| t.iter().position(|&x| x == tag))
-        {
-            if let Some(n) = self.counts.get_mut(i) {
-                *n = n.saturating_add(1);
-            }
-            return true;
-        }
-        match (self.tags.get_mut(len), self.counts.get_mut(len)) {
-            (Some(t), Some(n)) => {
-                (*t, *n) = (tag, 1);
-                self.len += 1;
-                true
-            }
-            _ => false,
-        }
-    }
 }
 
 /// What stream mode keeps of a record: its lines, and what the check must
@@ -176,15 +132,20 @@ pub(crate) struct Stream<'s> {
     xref: Option<Cow<'s, str>>,
     /// The structures open.
     open: Vec<Open>,
+    /// The occurrences of each tag (an index into the tables' tags) of the
+    /// typed substructures of each structure open, from its
+    /// [`Open::counts`] on.
+    counts: Vec<(u8, u32)>,
     /// The depth of the extension structure being written, while one is.
     extension: Option<u32>,
     /// Whether the stream is spoiled.
     spoiled: bool,
-    /// The typed payloads the check looks at, with their types and
-    /// [`special_bytes`].
+    /// The typed pointers the check looks up, with their types (and the
+    /// [`special_bytes`] of any payload).
     checks: Vec<(FlatPayload<'s>, StructId, u8)>,
-    /// The pointers of extension structures, each to name a record.
-    pointers: Vec<Cow<'s, str>>,
+    /// The pointers of extension structures, each to name a record, with
+    /// their ids.
+    pointers: Vec<(Cow<'s, str>, Option<XrefId>)>,
     /// The type of the record, once typed.
     root: StructId,
     /// The structures written.
@@ -192,6 +153,28 @@ pub(crate) struct Stream<'s> {
 }
 
 impl Stream<'_> {
+    /// The occurrences of `tag` among the counts from `from` on.
+    #[inline]
+    fn count(&self, from: u32, tag: u8) -> u32 {
+        self.counts
+            .get(from as usize..)
+            .and_then(|c| c.iter().find(|&&(t, _)| t == tag))
+            .map_or(0, |&(_, n)| n)
+    }
+
+    /// Counts one more `tag` among the counts from `from` on.
+    #[inline]
+    fn bump(&mut self, from: u32, tag: u8) {
+        match self
+            .counts
+            .get_mut(from as usize..)
+            .and_then(|c| c.iter_mut().find(|(t, _)| *t == tag))
+        {
+            Some((_, n)) => *n += 1,
+            None => self.counts.push((tag, 1)),
+        }
+    }
+
     /// Stream mode for `rules`, with lines as `sink` writes them.
     pub(crate) fn new(rules: &'static VersionRules, lines: LineSink<'static>) -> Self {
         Self {
@@ -199,6 +182,7 @@ impl Stream<'_> {
             lines,
             xref: None,
             open: Vec::new(),
+            counts: Vec::new(),
             extension: None,
             spoiled: false,
             checks: Vec::new(),
@@ -231,7 +215,7 @@ impl Stream<'_> {
         let payload = match payload {
             FlatPayload::None => PayloadRef::None,
             FlatPayload::Text(t) => PayloadRef::Text(t),
-            FlatPayload::Pointer(p) => PayloadRef::Pointer(p),
+            FlatPayload::Pointer(p, _) => PayloadRef::Pointer(p),
         };
         if emit_typed(
             self.rules,
@@ -283,6 +267,7 @@ impl<'s> Flat<'s> {
             st.lines.clear();
             st.xref = xref;
             st.open.clear();
+            st.counts.clear();
             st.extension = None;
             st.spoiled = false;
             st.checks.clear();
@@ -306,25 +291,26 @@ impl<'s> Flat<'s> {
         self.stream.as_deref_mut().map(|st| &mut st.lines)
     }
 
-    /// What the check of the record streamed looks at: the typed payloads
-    /// with their types and [`special_bytes`], and the pointers of its
-    /// extension structures.
-    pub(crate) fn stream_checks(
+    /// The typed pointers of the record streamed, which the check looks
+    /// up: their payloads, ids and types.
+    pub(crate) fn stream_pointers(
         &self,
-    ) -> (
-        impl Iterator<Item = (PayloadRef<'_>, StructId, u8)>,
-        impl Iterator<Item = &str>,
-    ) {
-        let (checks, pointers): (&[_], &[_]) = match self.stream.as_deref() {
-            Some(st) => (&st.checks, &st.pointers),
-            None => (&[], &[]),
-        };
-        (
-            checks
-                .iter()
-                .map(|(p, ty, special)| (payload_ref(p), *ty, *special)),
-            pointers.iter().map(|p| &**p),
-        )
+    ) -> impl Iterator<Item = (PayloadRef<'_>, Option<XrefId>, StructId)> {
+        let checks: &[_] = self.stream.as_deref().map_or(&[], |st| &st.checks);
+        checks.iter().map(|(p, ty, _)| {
+            let id = match p {
+                FlatPayload::Pointer(_, id) => *id,
+                FlatPayload::None | FlatPayload::Text(_) => None,
+            };
+            (payload_ref(p), id, *ty)
+        })
+    }
+
+    /// The pointers of the extension structures of the record streamed,
+    /// each to name a record, with their ids.
+    pub(crate) fn stream_extension_pointers(&self) -> impl Iterator<Item = (&str, Option<XrefId>)> {
+        let pointers: &[_] = self.stream.as_deref().map_or(&[], |st| &st.pointers);
+        pointers.iter().map(|(p, id)| (&**p, *id))
     }
 
     /// The number of structures.
@@ -464,7 +450,7 @@ impl<'s> Flat<'s> {
             };
             // Only a record has an identifier.
             let fits = sup != UNTYPED && (xref.is_none() || parent.is_none());
-            let is_pointer = matches!(payload, FlatPayload::Pointer(_));
+            let is_pointer = matches!(payload, FlatPayload::Pointer(..));
             // One more of a field that holds several: the occurrences of
             // its tag so far.
             let count = match (repeat, parent) {
@@ -567,7 +553,7 @@ impl<'s> Flat<'s> {
     ) -> usize {
         let special = match &payload {
             FlatPayload::Text(t) => special_bytes(t),
-            FlatPayload::None | FlatPayload::Pointer(_) => 0,
+            FlatPayload::None | FlatPayload::Pointer(..) => 0,
         };
         self.nodes.push(FlatNode {
             standard,
@@ -647,39 +633,36 @@ impl<'s> Flat<'s> {
         }
         let spec = standard.and_then(|s| typing.spec_tag(s));
         let count = match (repeat, parent, spec) {
-            (true, Some(p), Some(t)) => u32::from(p.count(t)) + 1,
+            (true, Some(p), Some(t)) => st.count(p.counts, t) + 1,
             _ => 1,
         };
-        let is_pointer = matches!(payload, FlatPayload::Pointer(_));
+        let is_pointer = matches!(payload, FlatPayload::Pointer(..));
         let (Some(ty), Some(spec)) = (typing.place(sup, standard, is_pointer, count), spec) else {
             st.spoiled = true;
             return;
         };
         let special = match &payload {
             FlatPayload::Text(t) => special_bytes(t),
-            FlatPayload::None | FlatPayload::Pointer(_) => 0,
+            FlatPayload::None | FlatPayload::Pointer(..) => 0,
         };
         self.size += size_bound(tag, standard, xref, &payload);
         st.line(depth, tag, standard.is_some(), &payload, special);
         if let Some(p) = st.open.last_mut() {
             p.children = true;
             p.lang |= matches!(tag, "MIME" | "LANG");
-            if !p.bump(spec) {
-                st.spoiled = true;
-            }
+            let from = p.counts;
+            st.bump(from, spec);
         } else {
             st.root = ty;
         }
         let empty = match &payload {
             FlatPayload::None => true,
-            FlatPayload::Pointer(_) => false,
+            FlatPayload::Pointer(..) => false,
             FlatPayload::Text(t) => t.is_empty(),
         };
         st.open.push(Open {
             ty,
-            tags: [0; OPEN_TAGS],
-            counts: [0; OPEN_TAGS],
-            len: 0,
+            counts: u32::try_from(st.counts.len()).unwrap_or(u32::MAX),
             children: false,
             empty,
             lang: false,
@@ -744,12 +727,12 @@ impl<'s> Flat<'s> {
                 }
                 special
             }
-            FlatPayload::None | FlatPayload::Pointer(_) => 0,
+            FlatPayload::None | FlatPayload::Pointer(..) => 0,
         };
         self.size += size_bound(tag, standard, xref, &payload);
         st.line(depth, tag, standard.is_some(), &payload, special);
-        if let FlatPayload::Pointer(p) = payload {
-            st.pointers.push(p);
+        if let FlatPayload::Pointer(p, id) = payload {
+            st.pointers.push((p, id));
         }
         st.written += 1;
     }
@@ -775,7 +758,10 @@ impl<'s> Flat<'s> {
             st.spoiled = true;
             return;
         };
-        let complete = typing.required(o.ty).all(|(tag, min)| o.count(tag) >= min);
+        let complete = typing
+            .required(o.ty)
+            .all(|(tag, min)| st.count(o.counts, tag) >= u32::from(min));
+        st.counts.truncate(o.counts as usize);
         let v7_ok = !typing.v7()
             || ((st.open.is_empty() || !o.empty || o.children)
                 && (!typing.is_note_tran(o.ty) || o.lang));
@@ -813,7 +799,7 @@ impl<'s> Flat<'s> {
         if typing.v7() {
             let empty = match &node.payload {
                 FlatPayload::None => true,
-                FlatPayload::Pointer(_) => false,
+                FlatPayload::Pointer(..) => false,
                 FlatPayload::Text(t) => t.is_empty(),
             };
             let record = self.open.is_empty();
@@ -882,7 +868,7 @@ fn size_bound(
     let tag = standard.map_or(tag.len(), |_| 6);
     let payload = match payload {
         FlatPayload::None => 0,
-        FlatPayload::Pointer(p) | FlatPayload::Text(p) => p.len(),
+        FlatPayload::Pointer(p, _) | FlatPayload::Text(p) => p.len(),
     };
     8 + tag + xref.map_or(0, str::len) + 13 * payload
 }
@@ -891,7 +877,7 @@ fn size_bound(
 #[inline]
 fn payload_ref<'a>(payload: &'a FlatPayload<'_>) -> PayloadRef<'a> {
     match payload {
-        FlatPayload::Pointer(p) => PayloadRef::Pointer(p),
+        FlatPayload::Pointer(p, _) => PayloadRef::Pointer(p),
         FlatPayload::Text(t) => PayloadRef::Text(t),
         FlatPayload::None => PayloadRef::None,
     }

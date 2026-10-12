@@ -33,6 +33,10 @@ impl<'d> Build<'d> for Built<'d> {
         self.record.is_none_or(|r| r.is_empty())
     }
 
+    fn xref_id(&self) -> Option<super::XrefId> {
+        self.record?.xref()
+    }
+
     fn build(&self, out: &mut Flat<'d>) {
         if let Some(r) = self.record {
             r.to_flat(&self.cx, out);

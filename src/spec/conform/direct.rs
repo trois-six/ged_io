@@ -33,7 +33,7 @@ use super::{
     bump, encoded_len, extension_tags, insert_records, Aliases, Body, Conformer, Family,
     FieldOrder, Named, Rec, RecRef, RepairKind, StructId, DATASET,
 };
-use crate::model::Store;
+use crate::model::{Store, XrefId};
 use crate::spec::validate::{xref_error, MAX_RECORD_BYTES};
 use crate::tree::{Flat, FlatRef, Node, Stream, Structure, Xref};
 use crate::writer::{
@@ -82,21 +82,34 @@ impl<'n> IdTypes<'n> {
         self.made.get(xref).map(|&ty| Named(ty))
     }
 
+    /// [`IdTypes::get`] of `xref`, whose id in the store is `id`.
+    #[inline]
+    pub(crate) fn get_id(&self, id: XrefId, xref: &str) -> Option<Named> {
+        match self.types.get(id.index()).copied() {
+            Some(NO_RECORD) | None if self.made.is_empty() => None,
+            Some(NO_RECORD) | None => self.made.get(xref).map(|&ty| Named(ty)),
+            Some(EXTENSION) => Some(Named(None)),
+            Some(ty) => Some(Named(Some(ty))),
+        }
+    }
+
     /// Whether a record has `xref`.
     pub(crate) fn knows(&self, xref: &str) -> bool {
         self.get(xref).is_some()
     }
 
-    /// Gives `xref` to a record of type `ty` unless a record has it:
-    /// whether it did.
-    fn take(&mut self, xref: &str, ty: Option<StructId>) -> bool {
-        if self.knows(xref) {
+    /// Gives `xref` (whose id in the store is `id`, when known) to a record
+    /// of type `ty` unless a record has it: whether it did.
+    fn take(&mut self, xref: &str, id: Option<XrefId>, ty: Option<StructId>) -> bool {
+        let id = id.or_else(|| self.store.find_xref(xref));
+        let known = match id {
+            Some(id) => self.get_id(id, xref),
+            None => self.made.get(xref).map(|&ty| Named(ty)),
+        };
+        if known.is_some() {
             return false;
         }
-        let slot = self
-            .store
-            .find_xref(xref)
-            .and_then(|id| self.types.get_mut(id.index()));
+        let slot = id.and_then(|id| self.types.get_mut(id.index()));
         match slot {
             Some(slot) => *slot = ty.unwrap_or(EXTENSION),
             None => {
@@ -427,7 +440,7 @@ impl<'n> Conformer<'n> {
                 continue;
             };
             let ty = self.record_type_of(r.tag(), r.standard_tag());
-            if xref_error(x, self.rules).is_some() || !ids.take(x, ty) {
+            if xref_error(x, self.rules).is_some() || !ids.take(x, r.id, ty) {
                 renamed.push(i);
             }
         }
@@ -445,7 +458,7 @@ impl<'n> Conformer<'n> {
                 n += 1;
                 new = numbered_xref(self.rules, &candidate, n);
             }
-            ids.take(&new, ty);
+            ids.take(&new, None, ty);
             if xref_error(&old, self.rules).is_some() && !self.renamed.contains_key(old.as_str()) {
                 self.renamed
                     .insert(old.as_str().into(), new.as_str().into());
@@ -483,7 +496,7 @@ impl<'n> Conformer<'n> {
             let x = (1..usize::MAX)
                 .map(|n| format!("@U{n}@"))
                 .find(|x| !ids.knows(x))?;
-            ids.take(&x, subm_ty);
+            ids.take(&x, None, subm_ty);
             *stub = Some(stub_submitter(x.clone()));
             Some(x)
         };

@@ -238,6 +238,9 @@ pub(crate) struct Rec<'n, N> {
     /// search), and the tag's index among the standard tags.
     tag: &'n str,
     xref: Option<&'n str>,
+    /// The identifier's id in the store of the typed dataset the record
+    /// is of, when it writes itself.
+    id: Option<crate::model::XrefId>,
     standard: Option<u16>,
     /// The generation of what the record depends on ([`Conformer::state`])
     /// under which it was found to need no repair; 0 when it was not.
@@ -275,6 +278,10 @@ pub(crate) trait Build<'n> {
     fn xref(&self) -> Option<&'n str>;
     /// Whether it has neither payload nor substructure.
     fn is_empty(&self) -> bool;
+    /// The identifier's id in the store of its dataset.
+    fn xref_id(&self) -> Option<crate::model::XrefId> {
+        None
+    }
     /// Writes the record, and its substructures, into `out`.
     fn build(&self, out: &mut Flat<'n>);
     /// The record as an owned structure, for a record the writer copies
@@ -337,7 +344,9 @@ impl<'n, N: Node<'n>> Rec<'n, N> {
         }
         let tag = record.tag();
         let standard = crate::tree::node::standard_index(tag);
-        Self::of(tag, record.xref(), standard, Body::Built(record))
+        let mut r = Self::of(tag, record.xref(), standard, Body::Built(record));
+        r.id = record.xref_id();
+        r
     }
 
     /// An owned record.
@@ -350,6 +359,7 @@ impl<'n, N: Node<'n>> Rec<'n, N> {
             body,
             tag,
             xref,
+            id: None,
             standard,
             clean: 0,
             rtype: DATASET,
@@ -605,7 +615,7 @@ impl Typing {
                 }
                 _ => true,
             },
-            FlatPayload::Pointer(_) => false,
+            FlatPayload::Pointer(..) => false,
         }
     }
 
@@ -628,7 +638,7 @@ impl Typing {
             return None;
         }
         let raw = match payload {
-            FlatPayload::Pointer(_) => return Some(false),
+            FlatPayload::Pointer(..) => return Some(false),
             FlatPayload::Text(t) => t,
             FlatPayload::None => "",
         };

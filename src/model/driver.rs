@@ -383,7 +383,7 @@ impl<'a> WriteCx<'a> {
 
     /// [`WriteCx::pointer`], borrowed.
     pub(crate) fn pointer_flat(&self, id: XrefId) -> FlatPayload<'a> {
-        FlatPayload::Pointer(Cow::Borrowed(self.store.xref(id)))
+        FlatPayload::Pointer(Cow::Borrowed(self.store.xref(id)), Some(id))
     }
 
     /// [`WriteCx::str`] of static characters, borrowed.
