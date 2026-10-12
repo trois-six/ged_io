@@ -18,6 +18,8 @@
 
 mod clean;
 mod direct;
+#[cfg(test)]
+pub(crate) use direct::ID_PASSES;
 pub(crate) mod streamed;
 
 pub(crate) use direct::{take_head, Direct, IdTypes, Place};

@@ -97,7 +97,7 @@ const KINDS: [RecordKind; 9] = [
 const FREE: u32 = 0xF;
 
 impl RecordKind {
-    const fn index(self) -> usize {
+    pub(crate) const fn index(self) -> usize {
         self as usize
     }
 
@@ -564,6 +564,8 @@ enum Lent {
 
 /// The bits of a [`Place`] that hold the position.
 const POS_BITS: u32 = 28;
+/// Where a [`Place`]'s kind bits start.
+pub(crate) const PLACE_KIND_SHIFT: u32 = POS_BITS;
 /// A [`Place`]'s position part for a record too far in its list to say
 /// where: it is searched for.
 const FAR: u32 = (1 << POS_BITS) - 1;
@@ -1385,6 +1387,24 @@ impl Dataset {
             return self.records().any(|r| r.xref() == Some(id));
         }
         self.index.def(id) != 0
+    }
+
+    /// Whether the identifiers of the records are unique and valid in the
+    /// grammar of `rules`, and no record is lent: the writer then renames
+    /// none, and the index tells the record of each identifier. Constant
+    /// time.
+    pub(crate) fn xrefs_conform(&self, rules: &crate::version::VersionRules) -> bool {
+        let i = usize::from(matches!(rules.xref, crate::version::XrefGrammar::V7));
+        self.index.lent.is_none()
+            && self.index.more.is_empty()
+            && self.index.invalid.get(i) == Some(&0)
+    }
+
+    /// By identifier id, where the record that has it is: its kind
+    /// ([`RecordKind`] order) from bit [`PLACE_KIND_SHIFT`] on; 0 when no
+    /// record has it.
+    pub(crate) fn places(&self) -> &[u32] {
+        &self.index.defs
     }
 
     // ---- References -----------------------------------------------------

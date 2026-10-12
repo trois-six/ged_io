@@ -34,13 +34,20 @@ use super::{
     FieldOrder, Named, Rec, RecRef, RepairKind, StructId, DATASET,
 };
 use crate::convert::Watch;
-use crate::model::{Store, XrefId};
+use crate::model::{Dataset, RecordKind, Store, XrefId};
 use crate::spec::validate::{xref_error, MAX_RECORD_BYTES};
 use crate::tree::{Flat, FlatPayload, FlatRef, Node, Stream, Structure, Xref};
 use crate::writer::{
     complete_head, needs_submitter, new_xref, numbered_xref, stub_submitter, LineSink,
 };
 use crate::GedcomVersion;
+
+#[cfg(test)]
+thread_local! {
+    /// The direct writes of this thread that looked at every record's
+    /// identifier, the dataset's index not telling them valid and unique.
+    pub(crate) static ID_PASSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// [`IdTypes::types`] of an identifier no record has.
 const NO_RECORD: StructId = StructId::MAX;
@@ -52,17 +59,158 @@ const EXTENSION: StructId = StructId::MAX - 1;
 pub(crate) struct IdTypes<'n> {
     store: &'n Store,
     /// By id: the record type, [`EXTENSION`] or [`NO_RECORD`].
-    types: Vec<StructId>,
+    types: Types<'n>,
     /// The identifiers the pass gave records (renamed ones, a stub
     /// submitter), which the store may not have.
     made: HashMap<Box<str>, Option<StructId>>,
+}
+
+/// The types of the records identifiers name, by id.
+enum Types<'n> {
+    /// Found record by record ([`Conformer::rename`]).
+    Owned(Vec<StructId>),
+    /// Told by the index of the dataset the records are, whose
+    /// identifiers are valid and unique
+    /// ([`Dataset::xrefs_conform`]): nothing is built but `more`.
+    Dataset {
+        /// By id, where the record that has it is ([`Dataset::places`]).
+        places: &'n [u32],
+        /// By a place's kind bits, the type of its records; [`MORE`] for
+        /// extension records.
+        by_kind: [StructId; 16],
+        /// The types of the extension records' identifiers, and of the
+        /// identifiers given to records the dataset does not have (a stub
+        /// submitter): few.
+        more: Vec<(u32, StructId)>,
+    },
+}
+
+/// [`Types::Dataset`]'s `by_kind` for extension records: their types are
+/// in `more`.
+const MORE: StructId = StructId::MAX - 2;
+
+/// By version (5.5.1, 7.0, 7.1), the types of the typed records, in
+/// [`RecordKind`] order: the same for every write.
+static KIND_TYPES: [std::sync::OnceLock<[StructId; 8]>; 3] = [
+    std::sync::OnceLock::new(),
+    std::sync::OnceLock::new(),
+    std::sync::OnceLock::new(),
+];
+
+impl Types<'_> {
+    #[inline]
+    fn get(&self, id: XrefId) -> Option<StructId> {
+        match self {
+            Types::Owned(types) => types.get(id.index()).copied(),
+            Types::Dataset {
+                places,
+                by_kind,
+                more,
+            } => {
+                let place = places.get(id.index()).copied().unwrap_or(0);
+                let looked = |missing| {
+                    let index = u32::try_from(id.index()).ok();
+                    more.iter()
+                        .find(|(i, _)| Some(*i) == index)
+                        .map_or(missing, |&(_, ty)| ty)
+                };
+                Some(if place == 0 {
+                    if more.is_empty() {
+                        NO_RECORD
+                    } else {
+                        looked(NO_RECORD)
+                    }
+                } else {
+                    let kind = (place >> crate::model::PLACE_KIND_SHIFT) as usize & 15;
+                    match by_kind.get(kind).copied().unwrap_or(NO_RECORD) {
+                        MORE => looked(EXTENSION),
+                        ty => ty,
+                    }
+                })
+            }
+        }
+    }
+
+    /// Sets the type of `id`; whether the table has it.
+    fn set(&mut self, id: XrefId, ty: StructId) -> bool {
+        match self {
+            Types::Owned(types) => match types.get_mut(id.index()) {
+                Some(slot) => {
+                    *slot = ty;
+                    true
+                }
+                None => false,
+            },
+            Types::Dataset { more, .. } => {
+                let Ok(index) = u32::try_from(id.index()) else {
+                    return false;
+                };
+                more.retain(|(i, _)| *i != index);
+                if ty != NO_RECORD {
+                    more.push((index, ty));
+                }
+                true
+            }
+        }
+    }
 }
 
 impl<'n> IdTypes<'n> {
     fn new(store: &'n Store) -> Self {
         Self {
             store,
-            types: vec![NO_RECORD; store.xref_count()],
+            types: Types::Owned(vec![NO_RECORD; store.xref_count()]),
+            made: HashMap::new(),
+        }
+    }
+
+    /// The identifiers of `data`, whose records the pass checks one for
+    /// one and whose identifiers are valid and unique: the record types
+    /// come from its index as asked for, `type_of` giving the type of a
+    /// record tag.
+    fn of_dataset(
+        data: &'n Dataset,
+        version: GedcomVersion,
+        type_of: impl Fn(&str) -> Option<StructId>,
+    ) -> Self {
+        let cache = match version {
+            GedcomVersion::V5_5_1 => KIND_TYPES.first(),
+            GedcomVersion::V7_0 => KIND_TYPES.get(1),
+            _ => KIND_TYPES.get(2),
+        };
+        let typed = |note: &str| {
+            ["SUBM", "SUBN", "INDI", "FAM", note, "SOUR", "REPO", "OBJE"]
+                .map(|tag| type_of(tag).unwrap_or(EXTENSION))
+        };
+        let note = if version.is_v7() { "SNOTE" } else { "NOTE" };
+        let kind_types = match cache {
+            Some(cache) => *cache.get_or_init(|| typed(note)),
+            None => typed(note),
+        };
+        let mut by_kind = [NO_RECORD; 16];
+        for (slot, ty) in by_kind.iter_mut().zip(kind_types) {
+            *slot = ty;
+        }
+        if let Some(slot) = by_kind.get_mut(RecordKind::Other.index()) {
+            *slot = MORE;
+        }
+        // Extension records (and records that did not fit their type) are
+        // few: their types are found now.
+        let more = data
+            .extra()
+            .iter()
+            .filter_map(|n| {
+                let index = u32::try_from(n.xref?.index()).ok()?;
+                Some((index, type_of(data.store().tag(n.tag)).unwrap_or(EXTENSION)))
+            })
+            .collect();
+        Self {
+            store: data.store(),
+            types: Types::Dataset {
+                places: data.places(),
+                by_kind,
+                more,
+            },
             made: HashMap::new(),
         }
     }
@@ -71,7 +219,7 @@ impl<'n> IdTypes<'n> {
     #[inline]
     pub(crate) fn get(&self, xref: &str) -> Option<Named> {
         if let Some(id) = self.store.find_xref(xref) {
-            match self.types.get(id.index()).copied() {
+            match self.types.get(id) {
                 Some(NO_RECORD) | None => {}
                 Some(EXTENSION) => return Some(Named(None)),
                 Some(ty) => return Some(Named(Some(ty))),
@@ -86,7 +234,7 @@ impl<'n> IdTypes<'n> {
     /// [`IdTypes::get`] of `xref`, whose id in the store is `id`.
     #[inline]
     pub(crate) fn get_id(&self, id: XrefId, xref: &str) -> Option<Named> {
-        match self.types.get(id.index()).copied() {
+        match self.types.get(id) {
             Some(NO_RECORD) | None if self.made.is_empty() => None,
             Some(NO_RECORD) | None => self.made.get(xref).map(|&ty| Named(ty)),
             Some(EXTENSION) => Some(Named(None)),
@@ -110,12 +258,9 @@ impl<'n> IdTypes<'n> {
         if known.is_some() {
             return false;
         }
-        let slot = id.and_then(|id| self.types.get_mut(id.index()));
-        match slot {
-            Some(slot) => *slot = ty.unwrap_or(EXTENSION),
-            None => {
-                self.made.insert(xref.into(), ty);
-            }
+        let set = id.is_some_and(|id| self.types.set(id, ty.unwrap_or(EXTENSION)));
+        if !set {
+            self.made.insert(xref.into(), ty);
         }
         true
     }
@@ -124,9 +269,7 @@ impl<'n> IdTypes<'n> {
     fn forget(&mut self, xref: &str) {
         match self.store.find_xref(xref) {
             Some(id) => {
-                if let Some(slot) = self.types.get_mut(id.index()) {
-                    *slot = NO_RECORD;
-                }
+                self.types.set(id, NO_RECORD);
             }
             None => {
                 self.made.remove(xref);
@@ -212,18 +355,30 @@ impl<'n> Direct<'n> {
     /// need it: none may be declared. A typed header that needs neither
     /// repair nor stub submitter is written so, completed
     /// ([`Direct::head_lines`]).
+    ///
+    /// With `whole`, the dataset `records` are the records of one for one
+    /// (the header aside): when its identifiers are valid and unique, its
+    /// index tells the record of each, and no table of them is built.
     pub(crate) fn prepare<N: Node<'n>>(
         records: &mut Vec<Rec<'n, N>>,
         version: GedcomVersion,
         order: Option<&'static FieldOrder>,
         store: &'n Store,
         sink: Option<&LineSink<'_>>,
+        whole: Option<&'n Dataset>,
     ) -> Option<Self> {
         let mut c = Conformer::new(version);
         c.order = order;
         well_formed(records)?;
-        let mut ids = IdTypes::new(store);
-        c.rename(records, &mut ids);
+        let mut ids = if let Some(data) = whole.filter(|d| d.xrefs_conform(c.rules)) {
+            IdTypes::of_dataset(data, version, |tag| c.record_type(tag))
+        } else {
+            #[cfg(test)]
+            ID_PASSES.with(|n| n.set(n.get() + 1));
+            let mut ids = IdTypes::new(store);
+            c.rename(records, &mut ids);
+            ids
+        };
         let mut arena = Flat::default();
         arena.set_typing(Some(super::Typing::of(version)));
         let mut stub = None;
