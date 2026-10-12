@@ -289,6 +289,12 @@ pub(crate) trait Build<'n> {
     }
     /// Writes the record, and its substructures, into `out`.
     fn build(&self, out: &mut Flat<'n>);
+    /// The version a typed header declares (`GEDC.VERS`, empty for none),
+    /// as it writes it; `None` for another record, or a header that keeps
+    /// structures aside.
+    fn declared_version(&self) -> Option<Cow<'n, str>> {
+        None
+    }
     /// The record, when it is a typed header.
     fn typed_head(&self) -> Option<&'n crate::model::Header> {
         None
@@ -384,6 +390,14 @@ impl<'n, N: Node<'n>> Rec<'n, N> {
             rtype: DATASET,
             size: u32::MAX,
             built: None,
+        }
+    }
+
+    /// [`Build::declared_version`] of a record that writes itself.
+    pub(crate) fn declared_version(&self) -> Option<Cow<'n, str>> {
+        match &self.body {
+            Body::Built(b) => b.declared_version(),
+            Body::Given(_) | Body::Owned(_) => None,
         }
     }
 

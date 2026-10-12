@@ -171,9 +171,9 @@ fn main() {
     let size = if op != "read" { out_len } else { bytes.len() };
     let name = path.rsplit('/').next().unwrap_or(path);
     println!(
-        "{krate}\t{op}\t{name}\t{:.3} ms\t{:.3} ms\t{:.1} MB/s\t{:.1} MB\t{:.2}x",
-        median * 1e3,
-        min * 1e3,
+        "{krate}\t{op}\t{name}\t{:.2} µs\t{:.2} µs\t{:.1} MB/s\t{:.1} MB\t{:.2}x",
+        median * 1e6,
+        min * 1e6,
         size as f64 / 1e6 / median,
         peak_rss() as f64 / 1e6,
         peak_rss() as f64 / bytes.len() as f64,

@@ -233,6 +233,12 @@ impl<'s> ReadCx<'s> {
         match raw.kind {
             RawKind::None => Some(Text::default()),
             RawKind::Pointer => None,
+            // A date's validity is found once, as it is read.
+            RawKind::Text if raw.tag == const { DATE_TAG } => Some(Text::input_date(
+                self.input,
+                base + raw.payload.start as usize,
+                raw.payload.len as usize,
+            )),
             RawKind::Text => Some(Text::input(
                 self.input,
                 base + raw.payload.start as usize,
@@ -519,6 +525,12 @@ impl PayloadField for Option<XrefId> {
         self.map_or(FlatPayload::None, |id| cx.pointer_flat(id))
     }
 }
+
+/// The tag id of `DATE` ([`NodeRef::tag_id`]).
+const DATE_TAG: u32 = match crate::tree::standard_index_const("DATE") {
+    Some(i) => i as u32,
+    None => u32::MAX,
+};
 
 /// A tag that a structure keeps as a field (`@tag`): the structure stands
 /// for several tags (`BIRT`, `DEAT`, … of an event), read from its node
@@ -1599,7 +1611,7 @@ macro_rules! gedcom_struct {
             ) -> $crate::tree::Structure {
                 // A structure that keeps its tag writes it.
                 $(let tag = { let _ = tag; $crate::model::driver::TagField::tag(&self.$tfield) };)?
-                $(let tag = $tagfn(self, tag, cx);)?
+                $(let tag = $tagfn(self, $crate::model::driver::StdTag::of(tag), cx).name;)?
                 $(
                     if cx.convert {
                         if let $crate::model::driver::Converted::Into(converted) = $convfn(self, cx) {
@@ -1617,7 +1629,7 @@ macro_rules! gedcom_struct {
                 out: &mut $crate::tree::Flat<'s>,
             ) {
                 $(let tag = { let _ = tag; $crate::model::driver::TagField::std_tag(&self.$tfield) };)?
-                $(let tag = $crate::model::driver::StdTag::of($tagfn(self, tag.name, cx));)?
+                $(let tag = $tagfn(self, tag, cx);)?
                 let claim = None;
                 $(
                     let claim = if cx.convert {
