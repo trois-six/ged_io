@@ -25,7 +25,7 @@ reporting each repair.
 
 | Feature | Description |
 |---------|-------------|
-| **Three versions** | GEDCOM 5.5.1, 7.0 and 7.1, read and written; every structure of each has a type |
+| **Three versions** | GEDCOM 5.5.1, 7.0 (to its latest release, 7.0.18) and 7.1 (FamilySearch's draft), read and written; every structure of each has a type |
 | **Conversion** | 5.5.1 to 7.x and back, following the FamilySearch migration guide: multimedia and source records, roles, translations, languages, media types and file URIs, identifiers, dates and ages |
 | **Read & write** | A lossless, lenient reader, and a writer conformant by construction; data that does not fit a type is kept, in place, and written back |
 | **Streaming** | Read and write one record at a time, in any encoding and with any line terminators, memory bounded by the largest record |
@@ -317,8 +317,10 @@ the data holds:
 Before the lines, the structures are repaired for the target version
 (`ged_io::spec::conform`): an enumeration value outside its set, text
 where a pointer belongs, a date outside the grammar, a structure the
-version does not permit or permits once, a missing required substructure.
-Nothing is dropped: data with no standard form becomes an extension
+version does not permit or permits once, a missing required substructure,
+and in 7.x an `ALIA` to its own record or a pointer that closes a cycle of
+source, multimedia and shared note records (GEDCOM 7.0.17). Nothing is
+dropped: data with no standard form becomes an extension
 structure (`_TAG`), or 7.x `OTHER`/`@VOID@` with a `PHRASE`. Dates, ages and
 times are written in the target's grammar (`@#DJULIAN@` and `JULIAN`,
 `B.C.` and `BCE`, `INT … (…)` and `PHRASE`). Each repair is reported as a
@@ -505,7 +507,7 @@ fn main() -> Result<(), serde_json::Error> {
 ## Validation and Conformance Repair
 
 `ged_io::spec` holds the specifications as data (generated from the
-FamilySearch GEDCOM 7.0 and 7.1 tables and a 5.5.1 transcription checked
+FamilySearch GEDCOM 7.0.18 tables, the 7.1 draft's and a 5.5.1 transcription checked
 against the PDF; see `NOTICE`). It validates a file, a parsed tree or owned
 structures, and repairs a tree so that it validates:
 
@@ -679,7 +681,7 @@ them with the published 0.17.0.
 - [MIGRATION.md](MIGRATION.md) - GEDCOM 5.5.1 to 7.0 migration guide
 - [ROADMAP.md](ROADMAP.md) - Project roadmap and planned features
 - GEDCOM specifications (bundled in this repo):
-  - [GEDCOM 7.0 Specification (PDF)](docs/FamilySearchGEDCOMv7.pdf)
+  - [GEDCOM 7.0.18 Specification (PDF)](docs/FamilySearchGEDCOMv7.pdf), the latest 7.0 release
   - [GEDCOM 5.5.1 Specification (PDF)](docs/ged551.pdf)
 
 ---

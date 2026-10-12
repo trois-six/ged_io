@@ -93,6 +93,25 @@ keeps all data; writing is conformant to GEDCOM 5.5.1, 7.0 or 7.1.
   `conversion`, CLI `--keep-obsolete`) keeps what 7.x drops as declared
   extensions, restored in 5.5.1.
 - `GedzipError::ReservedName`.
+- GEDCOM 7.0.18, the latest 7.0 release (FamilySearch/GEDCOM v7.0.17 and
+  v7.0.18, February 2026): the 7.0 tables come from the release, and its
+  normative changes are implemented. The `URI`, `TagDef`, `Latitude` and
+  `Longitude` data types are validated by their grammars (`EXID.TYPE` an
+  RFC 3986 URI reference, relative ones included; `SCHMA.TAG` an extension
+  tag and a URI reference; at most two digits of latitude degrees, the
+  longitude ABNF as 7.0.18 corrected it); a file path is a WHATWG valid
+  URL string whose non-ASCII characters are URL code points. The pointer
+  rules between records are enforced: no `ALIA` to its own record, no
+  cycle of pointers between source and multimedia records or source and
+  shared note records (`DeviationKind::Cycle`, repaired as a plain
+  extension structure keeping its pointer: `RepairKind::Cycle`, by the
+  in-memory and the streaming writer alike). The repair writes a 7.x file
+  path that is no URL string percent-encoded (a local path as a `file`
+  URL) and a coordinate in its canonical form instead of making them
+  extensions. `GedzipWriter::add_media_file` takes a `FILE` payload and
+  stores the media under its decoded name, GEDZIP names not being
+  percent-escaped. GEDCOM 7.1 remains a draft target, generated from
+  FamilySearch's `v7.1` branch (`c451779`, its head).
 
 ### Changed
 

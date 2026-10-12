@@ -6,6 +6,22 @@
 - Version `5.5.5` is a cleanup and stricter version of the Version `5.5.1`
 - Version `7.0` is an upgrade of the Version `5.5.1`
 
+## The specifications in this directory
+
+- `FamilySearchGEDCOMv7.pdf`: The FamilySearch GEDCOM Specification 7.0.18
+  (17 February 2026), the latest 7.0 release, as FamilySearch publishes it:
+  the `gedcom.pdf` asset of the
+  [v7.0.18 release](https://github.com/FamilySearch/GEDCOM/releases/tag/v7.0.18)
+  (tag commit `2f0b863`, SHA-256
+  `ec4475db84781878086bb3882d751c685fea6fa3d3d68b1ed90f581ec7dd832a`),
+  Apache License 2.0, © 1984-2026 Intellectual Reserve, Inc. The crate's 7.0
+  tables come from the same release (`tools/spec-tables/gen.py`). 7.0.17
+  (10 February 2026) added the URI, tag definition, latitude and longitude data
+  types and clarified pointer cycles, file paths and GEDZIP names; 7.0.18
+  corrected its longitude ABNF. GEDCOM 7.1 is not released: the crate
+  follows FamilySearch's `v7.1` branch as a draft.
+- `ged551.pdf`: GEDCOM 5.5.1 (2019-11-15 release of the 1999 draft).
+
 ## GEDZip
 
 [GEDZip](https://gedcom.io/gedzip/) is a specification included in the Version `7.0`. It is used to transmit a gedcom file together with a set of external files and it's a ZIP file (following the ZIP specifications) containing the data.
