@@ -37,6 +37,13 @@ impl<'d> Build<'d> for Built<'d> {
         self.record?.xref()
     }
 
+    fn standard_tag(&self) -> Option<u16> {
+        match self.record {
+            Some(r) => r.standard_tag(self.cx.version),
+            None => const { crate::tree::standard_index_const("TRLR") },
+        }
+    }
+
     fn build(&self, out: &mut Flat<'d>) {
         if let Some(r) = self.record {
             r.to_flat(&self.cx, out);

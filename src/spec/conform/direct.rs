@@ -120,6 +120,33 @@ impl<'n> IdTypes<'n> {
     }
 }
 
+impl IdTypes<'_> {
+    /// Whether a pointer stays as it is, written in stream mode
+    /// ([`Conformer::clean_pointer`] and [`Conformer::resolves`] with no
+    /// renamed identifier): `@VOID@` in 7.x, in 5.5.1 a pointer to a
+    /// substructure or another file, or one naming a record of type `want`
+    /// (`None`: of any type). `id` is its id in the store, when known.
+    #[inline]
+    pub(crate) fn resolves(
+        &self,
+        p: &str,
+        id: Option<XrefId>,
+        want: Option<StructId>,
+        family: Family,
+    ) -> bool {
+        if (family == Family::V7 && p == "@VOID@")
+            || crate::spec::validate::is_external_pointer(p, family)
+        {
+            return true;
+        }
+        let named = match id {
+            Some(id) => self.get_id(id, p),
+            None => self.get(p),
+        };
+        named.is_some_and(|n| want.is_none() || n.0 == want)
+    }
+}
+
 /// Where [`Direct::record`] left a record: written in the pass's arena
 /// ([`Direct::root`]), or in the record itself (owned: the stub
 /// submitter, or a repaired record).
@@ -201,8 +228,11 @@ impl<'n> Direct<'n> {
     /// standard structures (7.x `HEAD.SCHMA`) need it: none may be
     /// declared.
     pub(crate) fn stream_into(&mut self, sink: &LineSink<'_>) {
-        if self.c.aliases.structs.is_empty() {
-            let stream = Stream::new(self.c.rules, sink.record_lines());
+        if self.c.streams() {
+            // Pointers are looked up as they are written, unless renamed
+            // identifiers make the check's walk follow them.
+            let targets = self.c.renamed.is_empty().then(|| Rc::clone(&self.ids));
+            let stream = Stream::new(self.c.rules, sink.record_lines(), targets);
             self.arena.set_stream(Some(Box::new(stream)));
         }
     }
@@ -543,6 +573,13 @@ impl<'n> Conformer<'n> {
         // Relocations in records would need tags no record uses.
         self.schma.clear();
         Some(relocated)
+    }
+
+    /// Whether records can be checked as they are written in stream mode:
+    /// no documented alias of a standard structure or value (7.x
+    /// `HEAD.SCHMA`), which the check's walk follows.
+    fn streams(&self) -> bool {
+        self.aliases.structs.is_empty() && self.aliases.words.is_empty()
     }
 
     /// (j) A 5.5.1 header over 32K: `None`, for the whole pass.

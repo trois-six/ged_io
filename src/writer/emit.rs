@@ -465,7 +465,7 @@ pub(crate) fn emit_typed(
     special: u8,
 ) -> Result<(), WriteError> {
     if level > rules.max_level || matches!(tag, "CONT" | "CONC") || (xref.is_some() && level > 0) {
-        return emit_known(rules, sink, level, xref, tag, true, payload, Some(special));
+        return emit_unusual(rules, sink, level, xref, tag, payload, special);
     }
     debug_assert!(rules.is_valid_tag(tag) && xref.is_none_or(|x| rules.is_valid_xref(x)));
     // Nearly every line: a level of one digit, no identifier, and a payload
@@ -500,6 +500,21 @@ pub(crate) fn emit_typed(
             return Ok(());
         }
     }
+    emit_typed_text(rules, sink, level, xref, tag, payload, special)
+}
+
+/// [`emit_typed`] of a line it does not write in one go: a level of two
+/// digits, an identifier, a text to escape, continue or wrap.
+#[inline(never)]
+fn emit_typed_text(
+    rules: &VersionRules,
+    sink: &mut LineSink<'_>,
+    level: usize,
+    xref: Option<&str>,
+    tag: &str,
+    payload: PayloadRef<'_>,
+    special: u8,
+) -> Result<(), WriteError> {
     sink.start(level, xref, tag);
     match payload {
         PayloadRef::None => sink.end_line(),
@@ -510,6 +525,22 @@ pub(crate) fn emit_typed(
         }
         PayloadRef::Text(text) => emit_text_special(rules, sink, level, text, special),
     }
+}
+
+/// [`emit_typed`] of a line the version's rules change: too deep, tagged
+/// `CONT` or `CONC`, or with an identifier below the record.
+#[cold]
+#[inline(never)]
+fn emit_unusual(
+    rules: &VersionRules,
+    sink: &mut LineSink<'_>,
+    level: usize,
+    xref: Option<&str>,
+    tag: &str,
+    payload: PayloadRef<'_>,
+    special: u8,
+) -> Result<(), WriteError> {
+    emit_known(rules, sink, level, xref, tag, true, payload, Some(special))
 }
 
 /// Reports a repair of the line being written: `output line n: what`.

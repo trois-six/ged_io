@@ -282,6 +282,10 @@ pub(crate) trait Build<'n> {
     fn xref_id(&self) -> Option<crate::model::XrefId> {
         None
     }
+    /// The index of the tag among the standard tags.
+    fn standard_tag(&self) -> Option<u16> {
+        crate::tree::node::standard_index(self.tag())
+    }
     /// Writes the record, and its substructures, into `out`.
     fn build(&self, out: &mut Flat<'n>);
     /// The record as an owned structure, for a record the writer copies
@@ -343,7 +347,7 @@ impl<'n, N: Node<'n>> Rec<'n, N> {
             return Self::owned(s);
         }
         let tag = record.tag();
-        let standard = crate::tree::node::standard_index(tag);
+        let standard = record.standard_tag();
         let mut r = Self::of(tag, record.xref(), standard, Body::Built(record));
         r.id = record.xref_id();
         r
@@ -671,6 +675,12 @@ impl Typing {
             raw,
             Some(special),
         ))
+    }
+
+    /// The record type a pointer of a structure of type `ty` names.
+    #[inline]
+    pub(crate) fn pointer_target(&self, ty: StructId) -> StructId {
+        self.schema.kind(ty).1
     }
 
     /// The required substructures of a type: the tag (an index in the
