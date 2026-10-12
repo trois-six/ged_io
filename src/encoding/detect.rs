@@ -84,12 +84,15 @@ fn sniff_with(window: &[u8], complete: bool, input: Option<&[u8]>) -> Sniff {
     let declared_encoding = declared.as_deref().and_then(GedcomEncoding::from_label);
     let fallback = declared_encoding.map_or(SingleByte::Cp1252, single_byte_for);
     let (mut multibyte, mut invalid) = utf8_evidence(window, complete);
-    if (multibyte, invalid) == (0, 0) && !complete {
-        // An ASCII window: in memory, the bytes from the first that is not
-        // ASCII on decide (a stream cannot see them).
-        if let Some(rest) = input.and_then(|i| i.get(i.iter().position(|b| !b.is_ascii())?..)) {
-            (multibyte, invalid) = utf8_evidence(rest, true);
-        }
+    if let (Some(input), (0, 0), false) = (input, (multibyte, invalid), complete) {
+        // An ASCII window (but for a sequence its end cuts): in memory, the
+        // bytes from the first that is not ASCII on decide (a stream cannot
+        // see them).
+        let start = window
+            .iter()
+            .position(|b| !b.is_ascii())
+            .unwrap_or(window.len());
+        (multibyte, invalid) = utf8_evidence(input.get(start..).unwrap_or_default(), true);
     }
 
     let (mode, encoding) = if multibyte > invalid {
