@@ -53,6 +53,13 @@ pub(super) fn line(
         (_, Some(text)) => {
             let mut parts = text.split('\n');
             if let Some(first) = parts.next().filter(|f| !f.is_empty()) {
+                if xref.is_some_and(|x| !is_closed(x)) {
+                    // An identifier without its closing `@` (`@`, `@a`)
+                    // would take the text up to an `@` in it, as an
+                    // identifier holding spaces: the text continues on a
+                    // `CONC` line, which joins it back.
+                    let _ = write!(out, "\n{} CONC", level + 1);
+                }
                 out.push(' ');
                 escape_into(first, escaping, out);
             }
@@ -61,6 +68,12 @@ pub(super) fn line(
         }
         _ => out.push('\n'),
     }
+}
+
+/// Whether an identifier ends with the `@` that closes it, so that the
+/// lexer ends it there whatever follows on its line.
+fn is_closed(xref: &str) -> bool {
+    xref.len() >= 2 && xref.ends_with('@')
 }
 
 /// Writes each part as a `CONT` line one level below `level`.
@@ -127,6 +140,28 @@ mod tests {
         assert_eq!(esc("a@b @c", Escaping::V551), "a@@b @@c");
         assert_eq!(esc("@#DJULIAN@ 1700", Escaping::V551), "@#DJULIAN@ 1700");
         assert_eq!(esc("@#open", Escaping::V551), "@@#open");
+    }
+
+    /// An identifier without its closing `@` keeps the text of its line
+    /// apart: written on the line, an `@` in it would close the identifier
+    /// (`1 @ n \t@` reads as the identifier `@ n \t@`, without a tag).
+    #[test]
+    fn an_unclosed_identifier_keeps_its_text_apart() {
+        for input in [
+            "0 HEAD\n1 GEDC\n2 VERS 7\n1\t@\tn\n1\tCONC\t\t@",
+            "0 HEAD\n1 @a NOTE\n2 CONC x @\n2 CONT y @",
+            "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n1 @ NOTE\n2 CONC a@ b",
+        ] {
+            let tree = crate::tree::Tree::parse(input);
+            let dump = tree.to_gedcom();
+            assert_eq!(
+                crate::tree::parse_tree(&dump).to_structures(),
+                tree.to_structures(),
+                "{input:?}\n{dump}"
+            );
+        }
+        let tree = crate::tree::Tree::parse("0 HEAD\n1 @ n\n1 CONC \t@\n");
+        assert_eq!(tree.to_gedcom(), "0 HEAD\n1 @ n\n2 CONC \t@@\n"); // 5.5.1 doubles `@`
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! The decoder and the lexer are total and consistent: for any bytes,
 //! decoding never panics and gives the same text in memory and streaming
 //! (whatever the buffer size), the lossless tree reads its own dump back
-//! unchanged, and streaming yields the tree's records, line numbers included.
+//! unchanged and dumps it again as it was, and streaming yields the tree's records, line numbers included.
 #![no_main]
 
 use std::io::{BufReader, Read};
@@ -34,7 +34,11 @@ fuzz_target!(|data: &[u8]| {
 
     let tree = Tree::parse(decoded.text);
     let records = tree.to_structures();
-    assert_eq!(parse_tree(&tree.to_gedcom()).to_structures(), records);
+    let dump = tree.to_gedcom();
+    let back = parse_tree(&dump);
+    assert_eq!(back.to_structures(), records);
+    // Dumping is idempotent: dump(parse(dump(x))) == dump(x).
+    assert_eq!(back.to_gedcom(), dump);
 
     let reader: Vec<Structure> = TreeReader::new(BufReader::with_capacity(capacity, bytes))
         .expect("reading a slice cannot fail")
