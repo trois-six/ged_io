@@ -84,9 +84,9 @@ fn streamed(data: &Dataset, version: GedcomVersion) -> String {
         ..WriterConfig::default()
     };
     let default = Header::default();
-    let header = data.header.as_ref().unwrap_or(&default);
+    let header = data.header().unwrap_or(&default);
     let mut w = GedcomStreamWriter::new(Vec::new(), config, header, data).expect("repairs");
-    for r in data.records().skip(usize::from(data.header.is_some())) {
+    for r in data.records().skip(usize::from(data.header().is_some())) {
         w.write_record(r, data).expect("repairs, never fails");
     }
     let (bytes, _) = w.finish().expect("writes");
@@ -130,7 +130,7 @@ fuzz_target!(|data: &[u8]| {
             // record when there is none, and the conformance repair moves
             // notes out of records over 32K.
             let bare_trailers = model
-                .extra
+                .extra()
                 .iter()
                 .filter(|n| {
                     model.store().tag(n.tag) == "TRLR"
@@ -139,13 +139,13 @@ fuzz_target!(|data: &[u8]| {
                 })
                 .count();
             let (written, read) = (back.record_count(), model.record_count() - bare_trailers);
-            let header = usize::from(model.header.is_none());
+            let header = usize::from(model.header().is_none());
             // Converted to the other version family, records are added
             // (multimedia and source records taken out of others) and 5.5.1
             // submissions left out.
             let converted = model.version().is_v7() != version.is_v7();
             let submissions = if converted {
-                model.submissions.len()
+                model.submissions().len()
             } else {
                 0
             };

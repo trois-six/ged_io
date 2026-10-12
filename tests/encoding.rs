@@ -27,7 +27,7 @@ fn read(bytes: impl Into<Vec<u8>>) -> Dataset {
 
 /// The first name of the `index`th individual, as written.
 fn name(data: &Dataset, index: usize) -> String {
-    data.individuals[index].names[0]
+    data.individuals()[index].names[0]
         .value
         .to_str(data)
         .into_owned()
@@ -35,7 +35,7 @@ fn name(data: &Dataset, index: usize) -> String {
 
 /// The text of the first note of the first individual.
 fn note(data: &Dataset) -> String {
-    match &data.individuals[0].notes[0].content {
+    match &data.individuals()[0].notes[0].content {
         NoteContent::Text(text) => text.to_str(data).into_owned(),
         NoteContent::Shared(_) => panic!("a shared note"),
     }
@@ -46,7 +46,7 @@ fn note(data: &Dataset) -> String {
 #[test]
 fn utf8_without_bom() {
     let data = read(file_with_name("Zoé /Exámple/", "UTF-8"));
-    assert_eq!(data.individuals.len(), 1);
+    assert_eq!(data.individuals().len(), 1);
     assert_eq!(name(&data, 0), "Zoé /Exámple/");
 }
 
@@ -55,7 +55,7 @@ fn utf8_with_bom() {
     let mut bytes = vec![0xEF, 0xBB, 0xBF];
     bytes.extend_from_slice(file_with_name("Jörg /Müstermann/", "UTF-8").as_bytes());
     let data = read(bytes);
-    assert_eq!(data.individuals.len(), 1);
+    assert_eq!(data.individuals().len(), 1);
     assert_eq!(name(&data, 0), "Jörg /Müstermann/");
 }
 
@@ -78,7 +78,7 @@ fn utf8_emoji_in_gedcom_7() {
                    1 NOTE Family reunion 🎉👨‍👩‍👧‍👦\n\
                    0 TRLR\n";
     let data = read(content);
-    assert_eq!(data.individuals.len(), 1);
+    assert_eq!(data.individuals().len(), 1);
     assert_eq!(note(&data), "Family reunion 🎉👨‍👩‍👧‍👦");
 }
 
@@ -98,7 +98,7 @@ fn iso8859_1_accented_letters() {
         file.extend_from_slice(bytes);
         file.extend_from_slice(b"\n0 TRLR\n");
         let data = read(file);
-        assert_eq!(data.individuals.len(), 1);
+        assert_eq!(data.individuals().len(), 1);
         assert_eq!(name(&data, 0), expected);
     }
 }
@@ -202,7 +202,7 @@ fn utf16_with_bom() {
     ] {
         let bytes = encode(&file_with_name(sample, "UNICODE"), encoding).unwrap();
         let data = read(bytes);
-        assert_eq!(data.individuals.len(), 1);
+        assert_eq!(data.individuals().len(), 1);
         assert_eq!(name(&data, 0), sample, "{encoding}");
     }
 }
@@ -280,7 +280,7 @@ fn unicode_char_is_utf16() {
     )
     .unwrap();
     let data = read(bytes);
-    assert_eq!(data.individuals.len(), 1);
+    assert_eq!(data.individuals().len(), 1);
     assert_eq!(name(&data, 0), "Ann /Example/");
 }
 
@@ -324,7 +324,7 @@ fn ansel_header_alone() {
     let data = GedcomBuilder::new()
         .build_from_bytes_with_encoding(b"0 HEAD\n1 CHAR ANSEL\n0 TRLR\n", GedcomEncoding::Ansel)
         .unwrap();
-    assert!(data.header.is_some());
+    assert!(data.header().is_some());
 }
 
 #[test]
@@ -336,10 +336,10 @@ fn ansel_combining_marks_are_composed() {
     bytes.extend_from_slice(&[0xE2, b'a']);
     bytes.extend_from_slice(b"mple/\n0 TRLR\n");
     let data = read(bytes);
-    assert_eq!(data.individuals.len(), 1);
+    assert_eq!(data.individuals().len(), 1);
     assert_eq!(name(&data, 0), "Zoé /Exámple/");
     assert_eq!(
-        data.individuals[0].full_name(&data).as_deref(),
+        data.individuals()[0].full_name(&data).as_deref(),
         Some("Zoé Exámple")
     );
 }
@@ -397,18 +397,18 @@ fn complete_iso8859_1_file() {
                          2 PLAC Ex\xE1mpleville, Ex\xE1mplia\n\
                          0 TRLR\n";
     let data = read(bytes);
-    assert_eq!(data.individuals.len(), 2);
-    assert_eq!(data.families.len(), 1);
+    assert_eq!(data.individuals().len(), 2);
+    assert_eq!(data.families().len(), 1);
     assert!(data.dangling_references().is_empty());
 
     assert_eq!(name(&data, 0), "Zoé /Exámple/");
-    let birth = data.individuals[0].birth().unwrap();
+    let birth = data.individuals()[0].birth().unwrap();
     assert_eq!(
         birth.place.as_ref().unwrap().name.to_str(&data),
         "Sampléton, Exámplia"
     );
     assert_eq!(name(&data, 1), "Jörg /Müstermann/");
-    let marriage = &data.families[0].events[0];
+    let marriage = &data.families()[0].events[0];
     assert_eq!(
         marriage.place.as_ref().unwrap().name.to_str(&data),
         "Exámpleville, Exámplia"
@@ -439,12 +439,12 @@ fn fixtures_read_from_bytes() {
         "{encoding:?}"
     );
     let data = read(bytes);
-    assert_eq!(data.individuals.len(), 3);
-    assert_eq!(data.families.len(), 1);
+    assert_eq!(data.individuals().len(), 3);
+    assert_eq!(data.families().len(), 1);
 
     let data = read(std::fs::read(dir.join("washington.ged")).unwrap());
-    assert_eq!(data.individuals.len(), 538);
-    assert_eq!(data.families.len(), 278);
+    assert_eq!(data.individuals().len(), 538);
+    assert_eq!(data.families().len(), 278);
 }
 
 // The encoder

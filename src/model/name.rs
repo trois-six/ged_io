@@ -72,6 +72,8 @@ impl super::relocate::Relocate for NamePiece {
     }
 }
 
+impl super::pointers::Pointers for NamePiece {}
+
 #[cfg(feature = "serde")]
 impl super::serde::SerializeIn for NamePiece {
     fn serialize_in<S: ::serde::Serializer>(&self, store: &Store, s: S) -> Result<S::Ok, S::Error> {
@@ -134,7 +136,7 @@ gedcom_struct! {
     /// use ged_io::model::{Dataset, NameType};
     ///
     /// let data = Dataset::parse("0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 NAME Ann /Example/\n2 TYPE BIRTH\n2 GIVN Ann\n2 GIVN Marie\n0 TRLR\n");
-    /// let name = &data.individuals[0].names[0];
+    /// let name = &data.individuals()[0].names[0];
     /// assert_eq!(name.surname_in_value(&data).as_deref(), Some("Example"));
     /// assert_eq!(name.givens().count(), 2);
     /// assert_eq!(name.surnames().count(), 0); // none is invented

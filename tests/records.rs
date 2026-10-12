@@ -6,8 +6,8 @@
 //! value is fictitious.
 
 use ged_io::model::{
-    Certainty, CitationSource, EnumList, EventKind, Medium, NoteContent, OrdinanceKind,
-    OrdinanceStatus, Restriction, Role, Sex, Text, XrefId,
+    Certainty, CitationSource, EnumList, EventKind, Individual, Medium, NoteContent, OrdinanceKind,
+    OrdinanceStatus, Restriction, Role, Sex, Source, Text, XrefId,
 };
 use ged_io::tree::Structure;
 use ged_io::{Dataset, GedcomStreamParser, GedcomVersion, GedcomWriter};
@@ -115,7 +115,7 @@ fn header_only_dataset_round_trips() {
         let out = writer.write_to_string(&data).unwrap();
         // Every line, the trailer included, ends with its terminator.
         assert!(out.ends_with("0 TRLR\n"), "{out}");
-        assert!(Dataset::parse(out).header.is_some());
+        assert!(Dataset::parse(out).header().is_some());
     }
 }
 
@@ -124,13 +124,13 @@ fn every_record_survives_a_round_trip() {
     let data = Dataset::parse(v551(
         "0 @I1@ INDI\n1 NAME Al /Example/\n1 SEX M\n1 BIRT\n2 DATE 1 JAN 1900\n0 @I2@ INDI\n1 NAME Ann /Example/\n1 SEX F\n0 @I3@ INDI\n1 NAME Cal /Example/\n0 @F1@ FAM\n1 HUSB @I1@\n1 WIFE @I2@\n1 CHIL @I3@\n1 MARR\n2 DATE 1 JUN 1925\n0 @F2@ FAM\n1 HUSB @I2@\n0 @S1@ SOUR\n1 TITL Birth register\n0 @R1@ REPO\n1 NAME Sample Archive\n0 @N1@ NOTE A shared note\n0 @M1@ OBJE\n1 FILE photo.jpg\n2 FORM jpg\n",
     ));
-    assert_eq!(data.individuals.len(), 3);
-    assert_eq!(data.families.len(), 2);
-    assert_eq!(data.sources.len(), 1);
-    assert_eq!(data.repositories.len(), 1);
-    assert_eq!(data.notes.len(), 1);
-    assert_eq!(data.multimedia.len(), 1);
-    assert_eq!(data.submitters.len(), 1);
+    assert_eq!(data.individuals().len(), 3);
+    assert_eq!(data.families().len(), 2);
+    assert_eq!(data.sources().len(), 1);
+    assert_eq!(data.repositories().len(), 1);
+    assert_eq!(data.notes().len(), 1);
+    assert_eq!(data.multimedia().len(), 1);
+    assert_eq!(data.submitters().len(), 1);
 
     round_trip(&data, V551);
     // 7.0 gives the file the media type of its format.
@@ -151,22 +151,22 @@ fn records_without_xref_get_distinct_ones() {
         "0 @I1@ INDI\n1 NAME Ann /Example/\n0 @A@ INDI\n1 NAME Bea /Example/\n0 @B@ INDI\n1 NAME Cal /Example/\n0 @C@ SOUR\n1 TITL Register\n",
     ));
     // As records built in code have them: no xref.
-    data.individuals[1].xref = None;
-    data.individuals[2].xref = None;
-    data.sources[0].xref = None;
+    data.get_mut_at::<Individual>(1).unwrap().xref = None;
+    data.get_mut_at::<Individual>(2).unwrap().xref = None;
+    data.get_mut_at::<Source>(0).unwrap().xref = None;
 
     let out = write_stable(&data, V551);
     let back = Dataset::parse(out.as_str());
     let xrefs: Vec<_> = back
-        .individuals
+        .individuals()
         .iter()
         .map(|i| xref(&back, i.xref).unwrap().to_string())
         .collect();
     // The existing xref is kept, the others are new and distinct.
     assert_eq!(xrefs, ["@I1@", "@I2@", "@I3@"], "{out}");
-    assert_eq!(xref(&back, back.sources[0].xref), Some("@S1@"));
+    assert_eq!(xref(&back, back.sources()[0].xref), Some("@S1@"));
     // The caller's data is left as it was.
-    assert!(data.individuals[1].xref.is_none());
+    assert!(data.individuals()[1].xref.is_none());
 }
 
 // =============================================================================
@@ -178,7 +178,7 @@ fn individual_record_round_trips() {
     let data = Dataset::parse(v551(
         "0 @I1@ INDI\n1 NAME Ann /Example/\n1 SEX F\n1 BIRT\n2 DATE 15 MAR 1950\n2 PLAC Sampleton, Sample County\n1 DEAT\n2 DATE 20 JUN 2020\n2 PLAC Otherville\n1 OCCU Weaver\n0 @I2@ INDI\n1 SEX M\n",
     ));
-    let ann = &data.individuals[0];
+    let ann = &data.individuals()[0];
     assert_eq!(s(&data, &ann.names[0].value), "Ann /Example/");
     assert_eq!(ann.sex, Some(Sex::Female));
     let birth = ann.birth().unwrap();
@@ -193,7 +193,7 @@ fn individual_record_round_trips() {
     );
     let occupation = ann.events_of(EventKind::Occupation).next().unwrap();
     assert_eq!(s(&data, &occupation.value), "Weaver");
-    assert!(data.individuals[1].names.is_empty());
+    assert!(data.individuals()[1].names.is_empty());
 
     for version in [V551, V70] {
         let out = round_trip(&data, version);
@@ -208,7 +208,7 @@ fn family_record_round_trips() {
     let data = Dataset::parse(v551(
         "0 @I1@ INDI\n1 NAME Al /Example/\n1 FAMS @F1@\n1 FAMS @F2@\n0 @I2@ INDI\n1 NAME Ann /Example/\n1 FAMS @F1@\n0 @I3@ INDI\n1 NAME Bea /Example/\n1 FAMC @F1@\n0 @I4@ INDI\n1 NAME Cal /Example/\n1 FAMC @F1@\n0 @F1@ FAM\n1 HUSB @I1@\n1 WIFE @I2@\n1 CHIL @I3@\n1 CHIL @I4@\n1 MARR\n2 DATE 1 JUN 2000\n2 PLAC Sampleton\n0 @F2@ FAM\n1 HUSB @I1@\n",
     ));
-    let family = &data.families[0];
+    let family = &data.families()[0];
     assert_eq!(xref(&data, family.husband_id()), Some("@I1@"));
     assert_eq!(xref(&data, family.wife_id()), Some("@I2@"));
     let children: Vec<_> = data
@@ -217,7 +217,7 @@ fn family_record_round_trips() {
         .collect();
     assert_eq!(children, ["Bea Example", "Cal Example"]);
     assert_eq!(family.events[0].kind, EventKind::Marriage);
-    assert!(data.families[1].children.is_empty());
+    assert!(data.families()[1].children.is_empty());
     assert_eq!(data.families_as_spouse("@I1@").count(), 2);
 
     for version in [V551, V70] {
@@ -235,7 +235,7 @@ fn individual_and_family_identifiers_round_trip() {
     let data = Dataset::parse(v551(
         "0 @U1@ SUBM\n1 NAME Other Submitter\n0 @I1@ INDI\n1 RESN confidential\n1 NAME Ann /Example/\n1 ALIA @I2@\n1 ANCI @U1@\n1 DESI @U1@\n1 AFN 1A2B-3C4\n1 REFN IND-1\n2 TYPE card\n1 RIN 101\n0 @I2@ INDI\n1 NAME Annie /Example/\n0 @F1@ FAM\n1 RESN locked\n1 WIFE @I1@\n1 NCHI 3\n1 REFN FAM-1\n2 TYPE box\n1 RIN 201\n",
     ));
-    let ann = data.individuals[0].detail();
+    let ann = data.individuals()[0].detail();
     assert_eq!(
         ann.restriction,
         Some(EnumList(vec![Restriction::Confidential]))
@@ -250,7 +250,7 @@ fn individual_and_family_identifiers_round_trip() {
     assert_eq!(s(&data, &ann.refns[0].value), "IND-1");
     assert_eq!(opt(&data, ann.refns[0].kind.as_ref()), Some("card".into()));
     assert_eq!(opt(&data, ann.record_id.as_ref()), Some("101".into()));
-    let family = &data.families[0];
+    let family = &data.families()[0];
     assert_eq!(
         family.detail().restriction,
         Some(EnumList(vec![Restriction::Locked]))
@@ -316,10 +316,13 @@ fn record_submitter_pointers_round_trip() {
             .collect()
     };
     assert_eq!(
-        submitters(&data.individuals[0].detail().submitters),
+        submitters(&data.individuals()[0].detail().submitters),
         ["@U0@", "@U1@"]
     );
-    assert_eq!(submitters(&data.families[0].detail().submitters), ["@U1@"]);
+    assert_eq!(
+        submitters(&data.families()[0].detail().submitters),
+        ["@U1@"]
+    );
 
     for version in [V551, V70] {
         let out = round_trip(&data, version);
@@ -333,7 +336,7 @@ fn record_uid_and_exid_per_version() {
     let data = Dataset::parse(v70(
         "0 @I1@ INDI\n1 UID 0d7a3c9e-0000-4000-8000-000000000003\n1 EXID 42\n2 TYPE https://example.org/people\n0 @F1@ FAM\n1 UID 0d7a3c9e-0000-4000-8000-000000000004\n0 @S1@ SOUR\n1 TITL A source\n1 UID 0d7a3c9e-0000-4000-8000-000000000001\n1 EXID 123\n2 TYPE https://example.org/sources\n0 @U1@ SUBM\n1 NAME Sample Submitter\n1 UID 0d7a3c9e-0000-4000-8000-000000000002\n",
     ));
-    let ann = data.individuals[0].detail();
+    let ann = data.individuals()[0].detail();
     assert_eq!(
         s(&data, &ann.uids[0]),
         "0d7a3c9e-0000-4000-8000-000000000003"
@@ -343,9 +346,9 @@ fn record_uid_and_exid_per_version() {
         opt(&data, ann.exids[0].kind.as_ref()),
         Some("https://example.org/people".into())
     );
-    assert_eq!(data.families[0].detail().uids.len(), 1);
-    assert_eq!(s(&data, &data.sources[0].exids[0].value), "123");
-    assert_eq!(data.submitters[0].uids.len(), 1);
+    assert_eq!(data.families()[0].detail().uids.len(), 1);
+    assert_eq!(s(&data, &data.sources()[0].exids[0].value), "123");
+    assert_eq!(data.submitters()[0].uids.len(), 1);
 
     let out = round_trip(&data, V70);
     for expected in [
@@ -376,7 +379,7 @@ fn association_role_per_version() {
     let data = Dataset::parse(v70(
         "0 @I1@ INDI\n1 ASSO @I2@\n2 ROLE GODP\n1 ASSO @I3@\n2 ROLE OTHER\n3 PHRASE Best man\n2 SOUR @S1@\n3 PAGE Folio 3\n1 ASSO @VOID@\n2 PHRASE Unnamed neighbour\n2 ROLE NGHBR\n0 @I2@ INDI\n0 @I3@ INDI\n0 @S1@ SOUR\n1 TITL Register\n",
     ));
-    let assoc = &data.individuals[0].detail().associations;
+    let assoc = &data.individuals()[0].detail().associations;
     assert_eq!(assoc[0].role.as_ref().unwrap().value, Role::Godparent);
     let best_man = assoc[1].role.as_ref().unwrap();
     assert_eq!(best_man.value, Role::Other);
@@ -419,7 +422,7 @@ fn association_relation_per_version() {
     let data = Dataset::parse(v551(
         "0 @I1@ INDI\n1 ASSO @I2@\n2 RELA Godfather\n0 @I2@ INDI\n",
     ));
-    let assoc = &data.individuals[0].detail().associations[0];
+    let assoc = &data.individuals()[0].detail().associations[0];
     assert_eq!(xref(&data, assoc.individual), Some("@I2@"));
     assert_eq!(
         opt(&data, assoc.relation.as_ref()),
@@ -440,13 +443,13 @@ fn event_address_contacts_and_associations_round_trip() {
     let data = Dataset::parse(v551(
         "0 @I1@ INDI\n1 NAME Ann /Example/\n1 BIRT\n2 DATE 1 JAN 1900\n2 ADDR 1 Example Road\n3 CITY Sampleton\n2 PHON +00 000 001\n2 EMAIL clinic@@example.org\n1 OCCU Weaver\n2 ADDR 2 Example Road\n2 PHON +00 000 002\n2 WWW https://mill.example.org\n2 ASSO @I2@\n3 RELA Employer\n0 @I2@ INDI\n1 NAME Bea /Example/\n",
     ));
-    let birth = data.individuals[0].events[0].detail();
+    let birth = data.individuals()[0].events[0].detail();
     let address = birth.address.as_ref().unwrap();
     assert_eq!(s(&data, &address.value), "1 Example Road");
     assert_eq!(opt(&data, address.city.as_ref()), Some("Sampleton".into()));
     assert_eq!(s(&data, &birth.phones[0]), "+00 000 001");
     assert_eq!(s(&data, &birth.emails[0]), "clinic@example.org");
-    let occupation = data.individuals[0].events[1].detail();
+    let occupation = data.individuals()[0].events[1].detail();
     assert_eq!(
         s(&data, &occupation.websites[0]),
         "https://mill.example.org"
@@ -485,14 +488,14 @@ fn every_note_of_a_structure_is_kept() {
     let data = Dataset::parse(v551(
         "0 @U1@ SUBM\n1 NAME Other Submitter\n1 NOTE Submitter note one\n1 NOTE Submitter note two\n0 @I1@ INDI\n1 NAME Ann /Example/\n2 NOTE Name note one\n2 NOTE Name note two\n1 BIRT\n2 DATE 1 JAN 1900\n2 NOTE Event note one\n2 NOTE Event note two\n1 OCCU Weaver\n2 NOTE Attribute note one\n2 NOTE Attribute note two\n1 FAMC @F1@\n2 NOTE Link note one\n2 NOTE Link note two\n1 ASSO @I2@\n2 RELA Godmother\n2 NOTE Association note one\n2 NOTE Association note two\n1 NOTE Person note one\n1 NOTE Person note two\n0 @I2@ INDI\n1 NAME Bea /Example/\n0 @F1@ FAM\n1 CHIL @I1@\n0 @M1@ OBJE\n1 FILE photo.jpg\n2 FORM jpg\n1 NOTE Media note one\n1 NOTE Media note two\n",
     ));
-    let ann = &data.individuals[0];
+    let ann = &data.individuals()[0];
     assert_eq!(ann.notes.len(), 2);
     assert_eq!(ann.names[0].detail().notes.len(), 2);
     assert_eq!(ann.events[0].detail().notes.len(), 2);
     assert_eq!(ann.events[1].detail().notes.len(), 2);
     assert_eq!(ann.child_of[0].detail().notes.len(), 2);
     assert_eq!(ann.detail().associations[0].notes.len(), 2);
-    assert_eq!(data.multimedia[0].notes.len(), 2);
+    assert_eq!(data.multimedia()[0].notes.len(), 2);
     let submitter = data.find_submitter("@U1@").unwrap();
     assert_eq!(submitter.notes.len(), 2);
 
@@ -527,7 +530,7 @@ fn shared_note_pointers_per_version() {
 
     for source in [v7_source, v551_source] {
         let data = Dataset::parse(source);
-        for note in [&data.families[0].notes[0], &data.sources[0].notes[0]] {
+        for note in [&data.families()[0].notes[0], &data.sources()[0].notes[0]] {
             let NoteContent::Shared(id) = note.content else {
                 panic!("not a pointer: {note:?}");
             };
@@ -554,7 +557,7 @@ fn inline_note_with_at_signs_is_not_a_pointer() {
         let data = Dataset::parse(v551(&format!(
             "0 @F1@ FAM\n1 NOTE Married at {note} farm\n"
         )));
-        let NoteContent::Text(text) = &data.families[0].notes[0].content else {
+        let NoteContent::Text(text) = &data.families()[0].notes[0].content else {
             panic!("read as a pointer");
         };
         assert_eq!(s(&data, text), "Married at @Sampleton@ farm");
@@ -573,7 +576,7 @@ fn stream_parser_reads_a_5_5_1_note_record() {
         .unwrap()
         .collect::<Result<Dataset, _>>()
         .unwrap();
-    let NoteContent::Shared(id) = data.families[0].notes[0].content else {
+    let NoteContent::Shared(id) = data.families()[0].notes[0].content else {
         panic!("not a pointer");
     };
     assert_eq!(s(&data, &data.find_note(id).unwrap().text), "Shared text");
@@ -584,7 +587,7 @@ fn multi_line_shared_note_record_round_trips() {
     let data = Dataset::parse(v551(
         "0 @N1@ NOTE First line\n1 CONT Second line\n0 @I1@ INDI\n1 NOTE @N1@\n",
     ));
-    assert_eq!(s(&data, &data.notes[0].text), "First line\nSecond line");
+    assert_eq!(s(&data, &data.notes()[0].text), "First line\nSecond line");
 
     for version in [V551, V70] {
         let out = round_trip(&data, version);
@@ -597,8 +600,8 @@ fn multi_line_shared_note_record_round_trips() {
         }
         assert_has(&out, " First line\n1 CONT Second line\n");
         let back = Dataset::parse(out);
-        assert_eq!(s(&back, &back.notes[0].text), "First line\nSecond line");
-        assert_eq!(xref(&back, back.notes[0].xref), Some("@N1@"));
+        assert_eq!(s(&back, &back.notes()[0].text), "First line\nSecond line");
+        assert_eq!(xref(&back, back.notes()[0].xref), Some("@N1@"));
     }
 }
 
@@ -611,7 +614,7 @@ fn source_record_round_trips() {
     let data = Dataset::parse(v551(
         "0 @S1@ SOUR\n1 DATA\n2 EVEN BIRT, DEAT\n3 DATE FROM 1850 TO 1900\n3 PLAC Sampleton\n2 EVEN MARR\n2 AGNC Sample Registry Office\n2 NOTE About the recorded data\n1 AUTH Sample Clerk\n1 TITL Parish register of Sampleton\n1 ABBR Sampleton PR\n1 PUBL Sample Press, 1901\n1 TEXT First line of the transcript\n2 CONT second line\n1 REPO @R1@\n1 REFN SRC-1\n2 TYPE shelf\n1 RIN 42\n1 NOTE About the source\n1 OBJE @M1@\n1 CHAN\n2 DATE 1 JAN 2020\n0 @R1@ REPO\n1 NAME Sample Archive\n0 @M1@ OBJE\n1 FILE register.jpg\n2 FORM jpg\n",
     ));
-    let source = &data.sources[0];
+    let source = &data.sources()[0];
     assert_eq!(
         opt(&data, source.title.as_ref()),
         Some("Parish register of Sampleton".into())
@@ -685,7 +688,7 @@ fn source_citation_substructures_round_trip() {
     let data = Dataset::parse(v551(
         "0 @I1@ INDI\n1 NAME Ann /Example/\n1 BIRT\n2 DATE 1 JAN 1900\n2 SOUR @S1@\n3 PAGE Folio 12\n3 EVEN BIRT\n4 ROLE CHIL\n3 DATA\n4 DATE 2 JAN 1900\n4 TEXT First excerpt\n4 TEXT Second excerpt\n3 OBJE @M1@\n3 NOTE Citation note one\n3 NOTE Citation note two\n3 QUAY 3\n1 SOUR Parish register of Sampleton,\n2 CONT baptisms 1890-1910\n2 TEXT Quoted line\n2 NOTE Free-text citation note\n0 @S1@ SOUR\n1 TITL Parish register\n0 @M1@ OBJE\n1 FILE register.jpg\n2 FORM jpg\n",
     ));
-    let ann = &data.individuals[0];
+    let ann = &data.individuals()[0];
     let cited = &ann.events[0].citations[0];
     assert!(matches!(cited.source, CitationSource::Pointer(id) if data.store().xref(id) == "@S1@"));
     assert_eq!(opt(&data, cited.page.as_ref()), Some("Folio 12".into()));
@@ -738,15 +741,17 @@ fn citation_with_free_text_description_round_trips() {
     let data = Dataset::parse(v551(
         "0 @I1@ INDI\n1 NAME Ann /Example/\n1 BIRT\n2 DATE 1 JAN 1900\n2 SOUR https://example.com/records/123\n",
     ));
-    let citation = &data.individuals[0].events[0].citations[0];
+    let citation = &data.individuals()[0].events[0].citations[0];
     assert!(matches!(&citation.source,
         CitationSource::Description(t) if t.eq_str(&data, "https://example.com/records/123")));
 
     let out = round_trip(&data, V551);
     assert_has(&out, "2 SOUR https://example.com/records/123\n");
     let back = Dataset::parse(out);
-    assert!(matches!(&back.individuals[0].events[0].citations[0].source,
-        CitationSource::Description(t) if t.eq_str(&back, "https://example.com/records/123")));
+    assert!(
+        matches!(&back.individuals()[0].events[0].citations[0].source,
+        CitationSource::Description(t) if t.eq_str(&back, "https://example.com/records/123"))
+    );
 }
 
 #[test]
@@ -755,7 +760,7 @@ fn repository_citation_call_numbers_round_trip() {
         "0 @S1@ SOUR\n1 TITL Parish register\n1 REPO @R1@\n2 NOTE Shelved in the reading room\n2 CALN 111\n3 MEDI Book\n2 CALN 222\n3 MEDI Film\n2 CALN 333\n1 REPO @R2@\n2 MEDI manuscript\n0 @R1@ REPO\n1 NAME Sample Archive\n0 @R2@ REPO\n1 NAME Sample Library\n",
     ));
     let call_numbers = |data: &Dataset| -> Vec<(String, Option<Medium>)> {
-        data.sources[0].repositories[0]
+        data.sources()[0].repositories[0]
             .call_numbers
             .iter()
             .map(|c| {
@@ -773,8 +778,8 @@ fn repository_citation_call_numbers_round_trip() {
         ("333".to_string(), None),
     ];
     assert_eq!(call_numbers(&data), expected);
-    assert_eq!(data.sources[0].repositories[0].notes.len(), 1);
-    let second = &data.sources[0].repositories[1];
+    assert_eq!(data.sources()[0].repositories[0].notes.len(), 1);
+    let second = &data.sources()[0].repositories[1];
     assert_eq!(xref(&data, second.repository), Some("@R2@"));
     assert!(second.call_numbers.is_empty());
     assert_eq!(data.store().tag(second.extra[0].tag), "MEDI");
@@ -794,7 +799,7 @@ fn call_number_medium_per_version() {
     let data = Dataset::parse(v70(
         "0 @S1@ SOUR\n1 TITL Parish register\n1 REPO @R1@\n2 CALN 111\n3 MEDI OTHER\n4 PHRASE Parish register\n2 CALN 222\n3 MEDI Microfilm reel\n2 CALN 333\n3 MEDI BOOK\n0 @R1@ REPO\n1 NAME Sample Archive\n",
     ));
-    let call_numbers = &data.sources[0].repositories[0].call_numbers;
+    let call_numbers = &data.sources()[0].repositories[0].call_numbers;
     let medium = call_numbers[0].medium.as_ref().unwrap();
     assert_eq!(medium.value, Medium::Other);
     assert_eq!(
@@ -829,7 +834,7 @@ fn repository_record_round_trips() {
     let data = Dataset::parse(v551(
         "0 @R1@ REPO\n1 NAME Sample Archive\n1 ADDR 1 Example Road\n2 CITY Sampleton\n2 STAE Sample State\n2 CTRY Exampleland\n1 PHON +00 000 000\n1 PHON +00 000 001\n1 EMAIL archive@@example.org\n1 FAX +00 000 002\n1 WWW https://archive.example.org\n1 NOTE Closed on Mondays\n1 REFN ARCH-1\n2 TYPE catalogue\n1 RIN 12\n1 CHAN\n2 DATE 1 JAN 2020\n",
     ));
-    let repo = &data.repositories[0];
+    let repo = &data.repositories()[0];
     assert_eq!(
         opt(&data, repo.name.as_ref()),
         Some("Sample Archive".into())
@@ -927,7 +932,7 @@ fn multimedia_record_round_trips() {
     let data = Dataset::parse(v551(
         "0 @S1@ SOUR\n1 TITL Cemetery survey\n0 @M1@ OBJE\n1 FILE headstone.jpg\n2 FORM jpg\n3 TYPE tombstone\n2 TITL Headstone, front\n1 REFN MEDIA-0042\n2 TYPE Archive number\n1 RIN 12345\n1 NOTE Photographed on site.\n1 SOUR @S1@\n2 PAGE Plot 12\n1 CHAN\n2 DATE 1 JAN 2020\n",
     ));
-    let media = &data.multimedia[0];
+    let media = &data.multimedia()[0];
     let file = &media.files[0];
     assert_eq!(s(&data, &file.path), "headstone.jpg");
     assert_eq!(
@@ -972,7 +977,7 @@ fn multimedia_form_written_beside_its_file_is_kept() {
     let data = Dataset::parse(v551(
         "0 @M1@ OBJE\n1 FILE headstone.jpg\n1 FORM jpeg\n2 TYPE tombstone\n",
     ));
-    let media = &data.multimedia[0];
+    let media = &data.multimedia()[0];
     assert!(media.files[0].form.is_none());
     assert_eq!(data.store().tag(media.extra[0].tag), "FORM");
 
@@ -992,7 +997,7 @@ fn multimedia_link_files_round_trip() {
     let data = Dataset::parse(v551(
         "0 @I1@ INDI\n1 NAME Ann /Example/\n1 OBJE\n2 FILE photo.jpg\n3 FORM jpg\n4 MEDI photo\n3 TITL Ann at the beach\n2 TITL Beach\n",
     ));
-    let link = &data.individuals[0].detail().multimedia[0];
+    let link = &data.individuals()[0].detail().multimedia[0];
     assert_eq!(link.object, None);
     assert_eq!(opt(&data, link.title.as_ref()), Some("Beach".into()));
     let file = &link.files[0];
@@ -1023,7 +1028,7 @@ fn multimedia_link_pointer_round_trips() {
     let data = Dataset::parse(v551(
         "0 @I1@ INDI\n1 NAME Ann /Example/\n1 OBJE @M1@\n0 @M1@ OBJE\n1 FILE headstone.jpg\n2 FORM jpg\n3 TYPE tombstone\n",
     ));
-    let link = &data.individuals[0].detail().multimedia[0];
+    let link = &data.individuals()[0].detail().multimedia[0];
     assert_eq!(xref(&data, link.object), Some("@M1@"));
     assert!(link.files.is_empty());
 
@@ -1043,7 +1048,7 @@ fn file_value_with_an_at_sign_is_not_a_pointer() {
         let data = Dataset::parse(v551(&format!(
             "0 @I1@ INDI\n1 NAME Ann /Example/\n1 OBJE\n2 FILE {file}\n3 FORM jpg\n"
         )));
-        let link = &data.individuals[0].detail().multimedia[0];
+        let link = &data.individuals()[0].detail().multimedia[0];
         assert_eq!(link.object, None);
         assert_eq!(s(&data, &link.files[0].path), "photo@2x.jpg");
 
@@ -1059,7 +1064,7 @@ fn multimedia_crop_round_trips() {
     let data = Dataset::parse(v70(
         "0 @I1@ INDI\n1 OBJE @M1@\n2 CROP\n3 TOP 10\n3 LEFT 20\n3 HEIGHT 50\n3 WIDTH 25\n2 TITL Group photo, detail\n0 @M1@ OBJE\n1 FILE group-photo.jpg\n2 FORM image/jpeg\n2 CROP\n3 TOP 10\n3 WIDTH 25.5\n",
     ));
-    let link = &data.individuals[0].detail().multimedia[0];
+    let link = &data.individuals()[0].detail().multimedia[0];
     let crop = link.crop.as_ref().unwrap();
     assert_eq!(
         (crop.top, crop.left, crop.height, crop.width),
@@ -1083,17 +1088,17 @@ fn lds_ordinance_place_round_trips_in_5_5_1() {
     let data = Dataset::parse(v551(
         "0 @I1@ INDI\n1 NAME Ann /Example/\n1 BAPL\n2 DATE 15 MAR 1990\n2 TEMP SLAKE\n2 PLAC Sampleton\n2 STAT COMPLETED\n3 DATE 1 JAN 2000\n1 SLGC\n2 PLAC Otherville\n2 FAMC @F1@\n1 FAMC @F1@\n0 @F1@ FAM\n1 CHIL @I1@\n1 SLGS\n2 DATE 2 APR 1991\n2 PLAC Sampleton\n",
     ));
-    let ordinances = &data.individuals[0].detail().ordinances;
+    let ordinances = &data.individuals()[0].detail().ordinances;
     let place = |i: usize| s(&data, &ordinances[i].place.as_ref().unwrap().name);
     assert_eq!(ordinances[0].kind, OrdinanceKind::Baptism);
     assert_eq!(place(0), "Sampleton");
     assert_eq!(place(1), "Otherville");
     assert_eq!(xref(&data, ordinances[1].family), Some("@F1@"));
-    let sealing = &data.families[0].detail().ordinances[0];
+    let sealing = &data.families()[0].detail().ordinances[0];
     assert_eq!(sealing.kind, OrdinanceKind::SpouseSealing);
     assert_eq!(s(&data, &sealing.place.as_ref().unwrap().name), "Sampleton");
     // The place does not end up anywhere else.
-    assert!(data.individuals[0].extra.is_empty());
+    assert!(data.individuals()[0].extra.is_empty());
     assert!(ordinances[0].extra.is_empty());
 
     for version in [V551, V70] {
@@ -1112,7 +1117,7 @@ fn lds_ordinance_place_structure_round_trips_in_7_0() {
     let data = Dataset::parse(v70(
         "0 @I1@ INDI\n1 NAME Ann /Example/\n1 INIL\n2 DATE 15 MAR 1990\n2 TEMP SLAKE\n2 PLAC Sampleton, Sample County\n3 FORM City, County\n3 MAP\n4 LATI N10.5\n4 LONG W20.25\n2 STAT COMPLETED\n3 DATE 1 JAN 2000\n",
     ));
-    let ordinance = &data.individuals[0].detail().ordinances[0];
+    let ordinance = &data.individuals()[0].detail().ordinances[0];
     assert_eq!(ordinance.kind, OrdinanceKind::Initiatory);
     let place = ordinance.place.as_ref().unwrap();
     assert_eq!(s(&data, &place.name), "Sampleton, Sample County");
@@ -1141,7 +1146,7 @@ fn lds_status_date_round_trips_in_5_5_1() {
     let data = Dataset::parse(v551(
         "0 @I1@ INDI\n1 NAME Ann /Example/\n1 BAPL\n2 DATE 15 MAR 1990\n2 TEMP SLAKE\n2 STAT COMPLETED\n3 DATE 1 JAN 2000\n1 FAMC @F1@\n0 @F1@ FAM\n1 CHIL @I1@\n1 SLGS\n2 STAT CANCELED\n3 DATE 2 APR 2001\n2 DATE 2 APR 1991\n",
     ));
-    let baptism = &data.individuals[0].detail().ordinances[0];
+    let baptism = &data.individuals()[0].detail().ordinances[0];
     assert_eq!(
         s(&data, &baptism.date.as_ref().unwrap().value),
         "15 MAR 1990"
@@ -1150,7 +1155,7 @@ fn lds_status_date_round_trips_in_5_5_1() {
     assert_eq!(status.value, OrdinanceStatus::Completed);
     assert_eq!(s(&data, &status.date.as_ref().unwrap().value), "1 JAN 2000");
 
-    let sealing = &data.families[0].detail().ordinances[0];
+    let sealing = &data.families()[0].detail().ordinances[0];
     assert_eq!(
         s(&data, &sealing.date.as_ref().unwrap().value),
         "2 APR 1991"
@@ -1173,7 +1178,7 @@ fn lds_status_date_and_time_round_trip_in_7_0() {
     let data = Dataset::parse(v70(
         "0 @I1@ INDI\n1 NAME Ann /Example/\n1 INIL\n2 DATE 15 MAR 1990\n2 TEMP SLAKE\n2 STAT COMPLETED\n3 DATE 1 JAN 2000\n4 TIME 10:15:00\n",
     ));
-    let initiatory = &data.individuals[0].detail().ordinances[0];
+    let initiatory = &data.individuals()[0].detail().ordinances[0];
     assert_eq!(
         s(&data, &initiatory.date.as_ref().unwrap().value),
         "15 MAR 1990"
@@ -1197,7 +1202,11 @@ fn lds_status_date_goes_with_its_status() {
     let mut data = Dataset::parse(v551(
         "0 @I1@ INDI\n1 NAME Ann /Example/\n1 ENDL\n2 DATE 15 MAR 1990\n2 STAT COMPLETED\n3 DATE 1 JAN 2000\n",
     ));
-    data.individuals[0].detail_mut().ordinances[0].status = None;
+    data.get_mut_at::<Individual>(0)
+        .unwrap()
+        .detail_mut()
+        .ordinances[0]
+        .status = None;
 
     let out = round_trip(&data, V551);
     assert_has(&out, "1 ENDL\n2 DATE 15 MAR 1990\n");
@@ -1213,7 +1222,7 @@ fn place_notes_and_citations_round_trip() {
     let data = Dataset::parse(v551(
         "0 @I1@ INDI\n1 NAME Ann /Example/\n1 BIRT\n2 PLAC Sampleton\n3 MAP\n4 LATI N1.5\n4 LONG E2.5\n3 NOTE Then a hamlet of Otherville\n3 SOUR @S1@\n4 PAGE Gazetteer, p. 7\n1 RESI\n2 PLAC Otherville\n3 NOTE Moved here in 1920\n0 @S1@ SOUR\n1 TITL Sample gazetteer\n",
     ));
-    let place = data.individuals[0].events[0].place.as_ref().unwrap();
+    let place = data.individuals()[0].events[0].place.as_ref().unwrap();
     assert_eq!(place.detail().notes.len(), 1);
     // A SOUR under PLAC is not one of its fields: it is kept in place, and
     // written as an extension.
@@ -1232,7 +1241,7 @@ fn place_exid_per_version() {
     let data = Dataset::parse(v70(
         "0 @I1@ INDI\n1 BIRT\n2 PLAC Sampleton\n3 EXID 4242\n4 TYPE https://example.org/places\n",
     ));
-    let place = data.individuals[0].events[0].place.as_ref().unwrap();
+    let place = data.individuals()[0].events[0].place.as_ref().unwrap();
     assert_eq!(s(&data, &place.detail().exids[0].value), "4242");
 
     let out = round_trip(&data, V70);

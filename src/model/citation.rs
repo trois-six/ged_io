@@ -58,6 +58,27 @@ impl super::relocate::Relocate for CitationSource {
     }
 }
 
+impl super::pointers::Pointers for CitationSource {
+    fn own(&self) -> Option<XrefId> {
+        match self {
+            CitationSource::Pointer(id) => Some(*id),
+            CitationSource::Description(_) => None,
+        }
+    }
+
+    fn each(&self, f: &mut dyn FnMut(XrefId)) {
+        if let CitationSource::Pointer(id) = self {
+            f(*id);
+        }
+    }
+
+    fn map(&mut self, f: &mut dyn FnMut(XrefId) -> XrefId) {
+        if let CitationSource::Pointer(id) = self {
+            *id = f(*id);
+        }
+    }
+}
+
 #[cfg(feature = "serde")]
 impl super::serde::SerializeIn for CitationSource {
     fn serialize_in<S: ::serde::Serializer>(

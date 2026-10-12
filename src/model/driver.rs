@@ -1686,6 +1686,53 @@ macro_rules! gedcom_struct {
             }
         }
 
+        // The identifier (`$xfield`) names the structure: it is no pointer.
+        impl $crate::model::pointers::Pointers for $name {
+            fn own(&self) -> Option<$crate::model::XrefId> {
+                None $(.or($crate::model::pointers::Pointers::own(&self.$pfield)))?
+            }
+
+            #[allow(unused_variables)]
+            fn each(&self, f: &mut dyn FnMut($crate::model::XrefId)) {
+                $($crate::model::pointers::Pointers::each(&self.$pfield, f);)?
+                $($crate::model::pointers::Pointers::each(&self.$field, f);)*
+                $(
+                    if let Some(d) = &self.detail {
+                        let d: &$dname = d;
+                        $($crate::model::pointers::Pointers::each(&d.$gfield, f);)*
+                    }
+                )?
+                $crate::model::pointers::Pointers::each(&self.extra, f);
+            }
+
+            #[allow(unused_variables)]
+            fn map(&mut self, f: &mut dyn FnMut($crate::model::XrefId) -> $crate::model::XrefId) {
+                $($crate::model::pointers::Pointers::map(&mut self.$pfield, f);)?
+                $($crate::model::pointers::Pointers::map(&mut self.$field, f);)*
+                $(
+                    if let Some(d) = &mut self.detail {
+                        let d: &mut $dname = d;
+                        $($crate::model::pointers::Pointers::map(&mut d.$gfield, f);)*
+                    }
+                )?
+                $crate::model::pointers::Pointers::map(&mut self.extra, f);
+            }
+
+            // The payload is the structure's own pointer: what holds the
+            // structure cuts it.
+            #[allow(unused_variables)]
+            fn retain(&mut self, cut: &mut $crate::model::pointers::Cut<'_>) {
+                $($crate::model::pointers::Pointers::retain(&mut self.$field, cut);)*
+                $(
+                    if let Some(d) = &mut self.detail {
+                        let d: &mut $dname = d;
+                        $($crate::model::pointers::Pointers::retain(&mut d.$gfield, cut);)*
+                    }
+                )?
+                $crate::model::pointers::Pointers::retain(&mut self.extra, cut);
+            }
+        }
+
         #[cfg(feature = "serde")]
         impl $crate::model::serde::SerializeIn for $name {
             fn serialize_in<S: ::serde::Serializer>(

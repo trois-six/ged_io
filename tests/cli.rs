@@ -170,9 +170,9 @@ fn write_7_0_reads_back_and_validates() {
         .build_from_str(written.as_str())
         .unwrap_or_else(|e| panic!("{e}\n{written}"));
     assert_eq!(data.version(), GedcomVersion::V7_0);
-    assert_eq!(data.individuals.len(), 3);
-    assert_eq!(data.families.len(), 1);
-    assert_eq!(data.notes.len(), 1);
+    assert_eq!(data.individuals().len(), 3);
+    assert_eq!(data.families().len(), 1);
+    assert_eq!(data.notes().len(), 1);
 
     let rewritten = TempFile::new(written.as_bytes());
     let output = run(&[

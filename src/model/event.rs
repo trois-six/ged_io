@@ -28,7 +28,7 @@ gedcom_struct! {
     /// use ged_io::model::{Dataset, EventKind};
     ///
     /// let data = Dataset::parse("0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 BIRT\n2 DATE 1 JAN 1900\n2 AGE 0y\n1 OCCU Miller\n0 TRLR\n");
-    /// let indi = &data.individuals[0];
+    /// let indi = &data.individuals()[0];
     /// let birth = &indi.events[0];
     /// assert_eq!(birth.kind, EventKind::Birth);
     /// assert_eq!(birth.date.as_ref().unwrap().value.to_str(&data), "1 JAN 1900");

@@ -26,9 +26,9 @@ fn ged_files(dir: &Path, out: &mut Vec<PathBuf>) {
 /// in-memory writer writes them.
 fn streamed(data: &Dataset, config: WriterConfig) -> (String, WriteReport) {
     let default = Header::default();
-    let header = data.header.as_ref().unwrap_or(&default);
+    let header = data.header().unwrap_or(&default);
     let mut w = GedcomStreamWriter::new(Vec::new(), config, header, data).unwrap();
-    for r in data.records().skip(usize::from(data.header.is_some())) {
+    for r in data.records().skip(usize::from(data.header().is_some())) {
         w.write_record(r, data).unwrap();
     }
     let (bytes, report) = w.finish().unwrap();
@@ -187,7 +187,7 @@ fn strict_streaming_fails_on_the_first_repair() {
         on_nonconformant: RepairPolicy::Error,
         ..WriterConfig::default()
     };
-    let header = data.header.as_ref().unwrap();
+    let header = data.header().unwrap();
     let mut w = GedcomStreamWriter::new(Vec::new(), config, header, &data).unwrap();
     let mut records = data.records().skip(1);
     w.write_record(records.next().unwrap(), &data).unwrap();

@@ -74,7 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let data = GedcomBuilder::new().build_from_reader(std::fs::File::open("family.ged")?)?;
 
     println!("GEDCOM {}", data.version());
-    for person in &data.individuals {
+    for person in data.individuals() {
         let name = person.full_name(&data).unwrap_or_default();
         let born = person
             .birth()
@@ -146,7 +146,7 @@ let data = Dataset::parse(
     "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 NAME Ann /Example/\n1 SEX f\n\
      1 FAMC @F1@\n2 PEDI stepchild\n1 _HOBBY Weaving\n0 @F1@ FAM\n0 TRLR\n",
 );
-let ann = &data.individuals[0];
+let ann = &data.individuals()[0];
 assert_eq!(ann.sex, Some(Sex::Female)); // 5.5.1 values ignore case
 let pedigree = &ann.child_of[0].detail().pedigree.as_ref().unwrap().value;
 assert!(matches!(pedigree, Pedigree::Unknown(t) if t.to_str(&data) == "stepchild"));
@@ -298,7 +298,7 @@ assert!(out.contains("0 @M1@ OBJE\n1 FILE photo.jpg\n2 FORM image/jpeg\n"));
 
 // Or as a dataset of the other version.
 let v7 = convert_dataset(&data, GedcomVersion::V7_0, &ConversionOptions::default());
-assert_eq!(v7.multimedia.len(), 1);
+assert_eq!(v7.multimedia().len(), 1);
 ```
 
 ---

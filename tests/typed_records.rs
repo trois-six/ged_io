@@ -52,7 +52,7 @@ fn header_5() {
     let data = Dataset::parse(
         "0 HEAD\n1 SOUR EXAMPLE_APP\n2 VERS 2.1\n2 NAME Example App\n2 CORP Example Corp\n3 ADDR 1 Sample Road\n4 CITY Sampleton\n3 PHON 555-0100\n3 PHON 555-0101\n3 EMAIL a@@example.com\n3 FAX 555-0102\n3 WWW https://example.com\n2 DATA Example Data\n3 DATE 1 JAN 2000\n3 COPR Example copyright\n1 DEST OTHER_APP\n1 DATE 2 FEB 2001\n2 TIME 10:20:30\n1 SUBM @U1@\n1 SUBN @B1@\n1 FILE sample.ged\n1 COPR Copyright note\n1 GEDC\n2 VERS 5.5.1\n2 FORM LINEAGE-LINKED\n1 CHAR UTF-8\n1 LANG English\n1 PLAC\n2 FORM City, County, Country\n1 NOTE A header note\n0 @U1@ SUBM\n1 NAME Example Submitter\n0 @B1@ SUBN\n1 FAMF family.ged\n0 TRLR\n",
     );
-    let head = data.header.as_ref().unwrap();
+    let head = data.header().unwrap();
     let source = head.source.as_ref().unwrap();
     assert_eq!(text(&data, &source.product), "EXAMPLE_APP");
     let corp = source.corporation.as_ref().unwrap();
@@ -90,14 +90,14 @@ fn header_form_is_lenient() {
     let data = Dataset::parse(
         "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n2 FORM Lineage-Linked\n2 FORM NOT LINEAGE-LINKED\n1 CHAR ANSEL\n1 CHAR UTF-8\n0 TRLR\n",
     );
-    let head = data.header.as_ref().unwrap();
+    let head = data.header().unwrap();
     let gedc = head.gedcom.as_ref().unwrap();
     assert_eq!(gedc.form, Some(GedcomForm::LineageLinked));
     assert_eq!(gedc.extra.len(), 1, "the second FORM");
     assert_eq!(head.extra.len(), 1, "the second CHAR");
     let data = Dataset::parse("0 HEAD\n1 GEDC\n2 VERS 5.5.1\n2 FORM EVENT_ORIENTED\n0 TRLR\n");
     let form = data
-        .header
+        .header()
         .as_ref()
         .unwrap()
         .gedcom
@@ -115,7 +115,7 @@ fn header_7() {
     let data = Dataset::parse(
         "0 HEAD\n1 GEDC\n2 VERS 7.1\n1 SCHMA\n2 TAG _LOC https://example.com/loc\n1 TITL A sample\n2 LANG en\n2 TRAN Un exemple\n3 LANG fr\n1 DESC Fictitious\n1 NOTE First\n1 NOTE Second\n0 TRLR\n",
     );
-    let head = data.header.as_ref().unwrap();
+    let head = data.header().unwrap();
     assert_eq!(head.schema.as_ref().unwrap().tags.len(), 1);
     let title = head.title.as_ref().unwrap();
     assert_eq!(text(&data, &title.translations[0].text), "Un exemple");
@@ -402,11 +402,11 @@ fn sources() {
     let data = Dataset::parse(v7(
         "0 @S1@ SOUR\n1 TITL Parish register\n1 AUTH Sample parish\n1 ABBR Register\n1 PUBL Unpublished\n1 DATA\n2 EVEN BIRT, DEAT\n3 DATE FROM 1800 TO 1850\n3 PLAC Sampleton\n4 FORM City\n4 MAP\n5 LATI N1.5\n5 LONG E2.5\n2 AGNC Sample parish\n2 NOTE Some pages missing\n1 TEXT Transcribed\n2 MIME text/plain\n1 REPO @R1@\n2 CALN 12\n1 OBJE @O1@\n1 CREA\n2 DATE 1 JAN 2020\n0 @R1@ REPO\n1 NAME Sample archive\n1 PHON 555-0100\n1 PHON 555-0101\n0 @O1@ OBJE\n1 FILE a.jpg\n2 FORM image/jpeg\n",
     ));
-    let source = &data.sources[0];
+    let source = &data.sources()[0];
     let recorded = &source.data.as_ref().unwrap().events[0];
     // 5.5.1 may name no event (found by the `model` fuzz target).
     let empty = Dataset::parse(v551("0 @S1@ SOUR\n1 DATA\n2 EVEN\n"));
-    assert!(empty.sources[0].data.as_ref().unwrap().events[0]
+    assert!(empty.sources()[0].data.as_ref().unwrap().events[0]
         .kinds
         .0
         .is_empty());
@@ -414,7 +414,7 @@ fn sources() {
     assert_eq!(recorded.kinds.0, [EventKind::Birth, EventKind::Death]);
     let place = recorded.place.as_ref().unwrap();
     assert!(place.detail().map.is_some());
-    assert_eq!(data.repositories[0].phones.len(), 2);
+    assert_eq!(data.repositories()[0].phones.len(), 2);
     let out = write(&data);
     assert_has(&out, "1 DATA\n2 EVEN BIRT, DEAT\n3 DATE FROM 1800 TO 1850\n3 PLAC Sampleton\n4 FORM City\n4 MAP\n5 LATI N1.5\n5 LONG E2.5\n2 AGNC Sample parish\n2 NOTE Some pages missing\n");
     assert_has(&out, "1 TEXT Transcribed\n2 MIME text/plain\n");
@@ -430,7 +430,7 @@ fn multimedia_records() {
     let data = Dataset::parse(v551(
         "0 @O1@ OBJE\n1 FILE a.jpg\n2 FORM jpg\n3 TYPE photo\n2 TITL First\n1 FILE b.tif\n2 FORM tif\n1 SOUR @S1@\n2 PAGE 1\n1 SOUR @S1@\n2 PAGE 2\n1 REFN M-1\n0 @I1@ INDI\n1 OBJE\n2 FILE c.jpg\n3 FORM jpg\n4 MEDI photo\n0 @S1@ SOUR\n1 TITL Album\n",
     ));
-    let obje = &data.multimedia[0];
+    let obje = &data.multimedia()[0];
     assert_eq!(obje.files.len(), 2);
     assert_eq!(obje.citations.len(), 2);
     assert!(obje.files[0].form.as_ref().unwrap().medium_type.is_some());
@@ -447,8 +447,8 @@ fn submitters_and_submissions() {
     let data = Dataset::parse(
         "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n2 FORM LINEAGE-LINKED\n1 CHAR UTF-8\n1 SOUR EXAMPLE\n1 SUBM @U1@\n1 SUBN @B1@\n0 @U1@ SUBM\n1 NAME Example Submitter\n1 LANG English\n1 LANG French\n1 LANG German\n1 EMAIL a@@example.com\n1 RFN 7\n0 @B1@ SUBN\n1 SUBM @U1@\n1 FAMF family.ged\n1 TEMP SLAKE\n1 ANCE 2\n1 DESC 3\n1 ORDI yes\n1 NOTE A submission note\n1 RIN 9\n1 CHAN\n2 DATE 1 JAN 2000\n0 TRLR\n",
     );
-    assert_eq!(data.submitters[0].languages.len(), 3);
-    let subn = &data.submissions[0];
+    assert_eq!(data.submitters()[0].languages.len(), 3);
+    let subn = &data.submissions()[0];
     assert!(subn.ordinance_process.is_some());
     let out = write(&data);
     assert_has(&out, "1 LANG English\n1 LANG French\n1 LANG German\n");
@@ -463,7 +463,7 @@ fn shared_notes() {
     let data = Dataset::parse(v7(
         "0 @N1@ SNOTE A shared note\n2 CONT continued\n1 MIME text/plain\n1 LANG en\n1 TRAN Une note\n2 LANG fr\n1 SOUR @S1@\n1 CHAN\n2 DATE 1 JAN 2000\n1 CREA\n2 DATE 1 JAN 1999\n0 @S1@ SOUR\n1 TITL Register\n",
     ));
-    let note = &data.notes[0];
+    let note = &data.notes()[0];
     assert!(note.text.eq_str(&data, "A shared note\ncontinued"));
     assert!(note.change.is_some() && note.creation.is_some());
     let out = write(&data);
@@ -474,7 +474,7 @@ fn shared_notes() {
     let data = Dataset::parse(v551(
         "0 @N1@ NOTE Shared\n1 REFN 7\n1 CHAN\n2 DATE 1 JAN 2000\n",
     ));
-    assert_eq!(data.notes[0].refns.len(), 1);
+    assert_eq!(data.notes()[0].refns.len(), 1);
     assert_has(
         &write(&data),
         "0 @N1@ NOTE Shared\n1 REFN 7\n1 CHAN\n2 DATE 1 JAN 2000\n",
@@ -491,9 +491,13 @@ fn other_records() {
     );
     // The record after TRLR is read; so is the one with a payload, kept
     // aside.
-    assert_eq!(data.individuals.len(), 2);
-    assert_eq!(data.extra.len(), 3);
-    let tags: Vec<&str> = data.extra.iter().map(|n| data.store().tag(n.tag)).collect();
+    assert_eq!(data.individuals().len(), 2);
+    assert_eq!(data.extra().len(), 3);
+    let tags: Vec<&str> = data
+        .extra()
+        .iter()
+        .map(|n| data.store().tag(n.tag))
+        .collect();
     assert_eq!(tags, ["_LOC", "FOO", "TRLR"]);
     assert!(matches!(data.find("@L1@"), Some(RecordRef::Other(_))));
     let out = write(&data);
@@ -507,13 +511,13 @@ fn other_records() {
 #[test]
 fn sex() {
     let data = Dataset::parse(v551("0 @I1@ INDI\n1 SEX f\n0 @I2@ INDI\n1 SEX N\n"));
-    assert_eq!(data.individuals[0].sex, Some(Sex::Female));
-    assert!(matches!(&data.individuals[1].sex, Some(Sex::Unknown(t)) if t.to_str(&data) == "N"));
+    assert_eq!(data.individuals()[0].sex, Some(Sex::Female));
+    assert!(matches!(&data.individuals()[1].sex, Some(Sex::Unknown(t)) if t.to_str(&data) == "N"));
     let out = write(&data);
     assert_has(&out, "1 SEX F\n");
     assert!(!out.contains("FACT"), "{out}");
     let data = Dataset::parse(v7("0 @I1@ INDI\n1 SEX X\n"));
-    assert_eq!(data.individuals[0].sex, Some(Sex::Nonbinary));
+    assert_eq!(data.individuals()[0].sex, Some(Sex::Nonbinary));
 }
 
 /// Records are built by programs with struct literals and constructors
@@ -525,13 +529,14 @@ fn building_records() {
     let id = data.store_mut().intern_xref("@I9@").unwrap();
     let mut birth = Event::new(EventKind::Birth);
     birth.detail_mut().classification = Some("Home birth".into());
-    data.individuals.push(Individual {
+    data.add(Individual {
         xref: Some(id),
         names: vec![Name::new("Ann /Example/")],
         sex: Some(Sex::Female),
         events: vec![birth],
         ..Individual::default()
-    });
+    })
+    .unwrap();
     let out = write(&data);
     assert_has(
         &out,
@@ -548,7 +553,7 @@ fn same_tag_order_is_kept() {
     let data = Dataset::parse(v551(
         "0 @U2@ SUBM\n1 NAME Second Submitter\n1 LANG English\n2 _SCRIPT Latin\n1 LANG French\n1 LANG German\n0 @I1@ INDI\n1 SOUR @S1@\n2 PAGE 1\n2 PAGE 2\n2 PAGE 3\n0 @S1@ SOUR\n1 TITL Register\n",
     ));
-    let subm = &data.submitters[0];
+    let subm = &data.submitters()[0];
     assert!(subm.languages.is_empty());
     assert_eq!(subm.extra.len(), 3);
     // A leaf with an extension stays whole; a repeated singleton is

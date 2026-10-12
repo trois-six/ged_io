@@ -86,21 +86,32 @@ impl RecordSink for Dataset {
         self.header.is_some()
     }
 
+    /// Each record placed is noted in the dataset's index while it is at
+    /// hand ([`Dataset::define_read`]).
     fn typed(&mut self, record: Typed) {
+        use super::RecordKind as K;
+        macro_rules! place {
+            ($kind:ident, $list:ident, $r:expr) => {{
+                let id = $r.xref;
+                self.define_read(K::$kind, self.$list.len(), id);
+                self.$list.push($r);
+            }};
+        }
         match record {
             Typed::Header(r) => self.header = Some(r),
-            Typed::Individual(r) => self.individuals.push(r),
-            Typed::Family(r) => self.families.push(r),
-            Typed::Source(r) => self.sources.push(r),
-            Typed::Repository(r) => self.repositories.push(r),
-            Typed::Multimedia(r) => self.multimedia.push(r),
-            Typed::Submitter(r) => self.submitters.push(r),
-            Typed::Submission(r) => self.submissions.push(r),
-            Typed::Note(r) => self.notes.push(r),
+            Typed::Individual(r) => place!(Individual, individuals, r),
+            Typed::Family(r) => place!(Family, families, r),
+            Typed::Source(r) => place!(Source, sources, r),
+            Typed::Repository(r) => place!(Repository, repositories, r),
+            Typed::Multimedia(r) => place!(Multimedia, multimedia, r),
+            Typed::Submitter(r) => place!(Submitter, submitters, r),
+            Typed::Submission(r) => place!(Submission, submissions, r),
+            Typed::Note(r) => place!(Note, notes, r),
         }
     }
 
     fn other(&mut self, node: Node) {
+        self.define_read(super::RecordKind::Other, self.extra.len(), node.xref);
         self.extra.push(node);
     }
 }
@@ -165,6 +176,7 @@ pub(crate) fn read_segmented(text: String, limit: usize) -> Dataset {
     store.shrink();
     data.store = store;
     data.shrink();
+    data.index_read();
     data
 }
 

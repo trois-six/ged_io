@@ -227,6 +227,8 @@ macro_rules! gedcom_enum {
             }
         }
 
+        impl $crate::model::pointers::Pointers for $name {}
+
         #[cfg(feature = "serde")]
         impl $crate::model::serde::SerializeIn for $name {
             fn serialize_in<S: ::serde::Serializer>(
@@ -993,6 +995,24 @@ impl<E: super::relocate::Relocate> super::relocate::Relocate for Phrased<E> {
         self.value.relocate(r);
         self.phrase.relocate(r);
         self.extra.relocate(r);
+    }
+}
+
+/// Enumeration values hold no pointer.
+impl<E> super::pointers::Pointers for EnumList<E> {}
+
+/// A value with its phrase: the pointers of its extensions.
+impl<E> super::pointers::Pointers for Phrased<E> {
+    fn each(&self, f: &mut dyn FnMut(super::XrefId)) {
+        self.extra.each(f);
+    }
+
+    fn map(&mut self, f: &mut dyn FnMut(super::XrefId) -> super::XrefId) {
+        self.extra.map(f);
+    }
+
+    fn retain(&mut self, cut: &mut super::pointers::Cut<'_>) {
+        self.extra.retain(cut);
     }
 }
 

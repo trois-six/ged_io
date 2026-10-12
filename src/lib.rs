@@ -27,7 +27,7 @@ let data = Dataset::parse(
     "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 NAME Ann /Example/\n1 BIRT\n\
      2 DATE ABT @#DJULIAN@ 1700\n0 TRLR\n",
 );
-let ann = &data.individuals[0];
+let ann = &data.individuals()[0];
 assert_eq!(ann.full_name(&data).as_deref(), Some("Ann Example"));
 let birth = ann.birth().and_then(|b| b.date.as_ref()).unwrap();
 assert_eq!(birth.value.to_str(&data), "ABT @#DJULIAN@ 1700");

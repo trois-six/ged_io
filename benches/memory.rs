@@ -74,7 +74,7 @@ fn bench_lookups(c: &mut Criterion) {
     let mut group = c.benchmark_group("lookups");
     let data = Dataset::parse(common::generated(20_000));
     let xrefs: Vec<String> = data
-        .individuals
+        .individuals()
         .iter()
         .step_by(400)
         .filter_map(|i| i.xref)

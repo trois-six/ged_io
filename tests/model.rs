@@ -15,7 +15,7 @@ fn indi<'a>(data: &'a Dataset, xref: &str) -> &'a Individual {
 
 fn source<'a>(data: &'a Dataset, xref: &str) -> &'a Source {
     let id = data.store().find_xref(xref).expect("xref");
-    data.sources
+    data.sources()
         .iter()
         .find(|s| s.xref == Some(id))
         .expect("source")
@@ -444,7 +444,7 @@ fn payloads_that_do_not_fit_are_kept_aside() {
     assert_eq!(asso.extra[0].tag, ged_io::model::TagId::ASIDE);
     assert!(person.notes[0].extra[0].xref.is_some());
     assert_eq!(
-        data.families[0].events.len(),
+        data.families()[0].events.len(),
         1,
         "a record with a payload is typed"
     );
@@ -484,7 +484,7 @@ fn building_a_note() {
     let mut note = Note::text("Written by a program");
     note.detail_mut().language = Some("en".into());
     assert_eq!(note.detail().language.as_ref().unwrap().to_str(&data), "en");
-    data.individuals[0].notes.push(note);
+    data.get_mut_at::<Individual>(0).unwrap().notes.push(note);
     assert!(write(&data).contains("1 NOTE Written by a program\n2 LANG en\n"));
     let id = data.store_mut().intern_xref("@N9@").unwrap();
     assert_eq!(data.store().xref(id), "@N9@");

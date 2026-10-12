@@ -223,7 +223,7 @@ fn run(command_line: &[String]) -> Result<ExitCode, CliError> {
             })
         };
         let mut text = String::new();
-        for individual in &data.individuals {
+        for individual in data.individuals() {
             let (given, surname) = name_parts(&data, individual);
             if wanted(&args.lastname, surname) && wanted(&args.firstname, given) {
                 text.push_str(&describe(&data, individual));
@@ -271,15 +271,15 @@ fn summary(data: &Dataset) -> String {
         .unwrap_or_default();
     let _ = writeln!(text, "GEDCOM {}{declared}", data.version());
     for (name, count) in [
-        ("individuals", data.individuals.len()),
-        ("families", data.families.len()),
-        ("sources", data.sources.len()),
-        ("repositories", data.repositories.len()),
-        ("multimedia objects", data.multimedia.len()),
-        ("shared notes", data.notes.len()),
-        ("submitters", data.submitters.len()),
-        ("submissions", data.submissions.len()),
-        ("other records", data.extra.len()),
+        ("individuals", data.individuals().len()),
+        ("families", data.families().len()),
+        ("sources", data.sources().len()),
+        ("repositories", data.repositories().len()),
+        ("multimedia objects", data.multimedia().len()),
+        ("shared notes", data.notes().len()),
+        ("submitters", data.submitters().len()),
+        ("submissions", data.submissions().len()),
+        ("other records", data.extra().len()),
     ] {
         let _ = writeln!(text, "  {name}: {count}");
     }

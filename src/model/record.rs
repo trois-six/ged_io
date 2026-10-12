@@ -36,7 +36,7 @@ gedcom_struct! {
     /// use ged_io::model::{Dataset, Sex};
     ///
     /// let data = Dataset::parse("0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 NAME Ann /Example/\n1 SEX f\n1 FAMC @F1@\n1 FAMC @F1@\n2 PEDI adopted\n1 REFN 7\n0 @F1@ FAM\n0 TRLR\n");
-    /// let ann = &data.individuals[0];
+    /// let ann = &data.individuals()[0];
     /// assert_eq!(ann.sex, Some(Sex::Female)); // 5.5.1 controlled values ignore case
     /// assert_eq!(ann.child_of.len(), 2);
     /// assert_eq!(ann.detail().refns[0].value.to_str(&data), "7");

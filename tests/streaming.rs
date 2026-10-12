@@ -260,9 +260,9 @@ fn a_filtered_stream_collects_into_a_smaller_dataset() {
         .map(Result::unwrap)
         .filter(|r| matches!(r.record(), RecordRef::Header(_) | RecordRef::Individual(_)))
         .collect();
-    assert!(data.header.is_some());
-    assert_eq!(data.individuals.len(), 1);
-    assert!(data.families.is_empty() && data.notes.is_empty() && data.extra.is_empty());
+    assert!(data.header().is_some());
+    assert_eq!(data.individuals().len(), 1);
+    assert!(data.families().is_empty() && data.notes().is_empty() && data.extra().is_empty());
     assert_eq!(data.declared_version(), Some("5.5.1"));
     // The individual's pointer to the family left out now dangles.
     let dangling = data.dangling_references();
@@ -276,12 +276,16 @@ fn extending_a_dataset_keeps_a_second_header_aside() {
     let other =
         "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n1 LANG English\n0 @I2@ INDI\n1 NAME Ann /Sample/\n0 TRLR\n";
     data.extend(stream(other.as_bytes()));
-    assert_eq!(data.individuals.len(), 2);
+    assert_eq!(data.individuals().len(), 2);
     let ann = data.find_individual("@I2@").unwrap();
     assert_eq!(ann.full_name(&data).as_deref(), Some("Ann Sample"));
     // The first header stays the header; the second is an untyped record.
-    assert!(data.header.as_ref().unwrap().language.is_none());
-    let tags: Vec<_> = data.extra.iter().map(|n| data.store().tag(n.tag)).collect();
+    assert!(data.header().unwrap().language.is_none());
+    let tags: Vec<_> = data
+        .extra()
+        .iter()
+        .map(|n| data.store().tag(n.tag))
+        .collect();
     assert_eq!(tags, ["_LOC", "HEAD"]);
 }
 

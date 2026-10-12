@@ -102,10 +102,10 @@ fn a_5_5_1_file_keeps_its_version_and_its_note_records() {
          0 @N1@ NOTE A note record\n0 TRLR",
     );
     assert_eq!(data.version(), GedcomVersion::V5_5_1);
-    assert_eq!(data.individuals.len(), 1);
-    assert_eq!(data.submitters.len(), 1);
+    assert_eq!(data.individuals().len(), 1);
+    assert_eq!(data.submitters().len(), 1);
     // A 5.5.1 NOTE record is a shared note, written SNOTE in 7.0.
-    assert_eq!(text(&data, &data.notes[0].text), "A note record");
+    assert_eq!(text(&data, &data.notes()[0].text), "A note record");
     assert!(write(&data).contains("0 @N1@ NOTE A note record\n"));
     assert!(write_as(&data, GedcomVersion::V7_0).contains("0 @N1@ SNOTE A note record\n"));
 }
@@ -121,7 +121,7 @@ fn the_header_keeps_its_schema_and_source() {
          1 SCHMA\n2 TAG _CUSTOM https://example.com/custom\n2 TAG _OTHER https://example.com/other\n\
          0 TRLR",
     );
-    let header = data.header.as_ref().unwrap();
+    let header = data.header().unwrap();
     assert_eq!(header.declared_version(&data).as_deref(), Some("7.0"));
 
     let source = header.source.as_ref().unwrap();
@@ -158,7 +158,7 @@ fn the_7_1_header_has_a_title_and_a_description() {
         "0 HEAD\n1 GEDC\n2 VERS 7.1\n1 TITL The Example family\n2 LANG en\n\
          2 TRAN La famille Example\n3 LANG fr\n1 DESC Descendants of Ann Example\n0 TRLR\n",
     );
-    let header = data.header.as_ref().unwrap();
+    let header = data.header().unwrap();
     let title = header.title.as_ref().unwrap();
     assert_eq!(text(&data, &title.text), "The Example family");
     assert_eq!(text(&data, title.language.as_ref().unwrap()), "en");
@@ -183,7 +183,7 @@ fn shared_note_records() {
     let data = Dataset::parse(v7("0 @I1@ INDI\n1 NAME Ann /Example/\n\
          0 @N1@ SNOTE A shared note about the Example surname.\n\
          0 @N2@ SNOTE First line.\n1 CONT Second line.\n1 CONT Third line.\n"));
-    assert_eq!(data.notes.len(), 2);
+    assert_eq!(data.notes().len(), 2);
     // The header, one individual and two shared notes.
     assert_eq!(data.record_count(), 4);
 
@@ -229,7 +229,7 @@ fn snote_pointers_and_note_texts() {
     let data = Dataset::parse(v7(
         "0 @I1@ INDI\n1 SNOTE @N1@\n1 NOTE Own text\n2 MIME text/plain\n0 @N1@ SNOTE Shared\n",
     ));
-    let notes = &data.individuals[0].notes;
+    let notes = &data.individuals()[0].notes;
     let shared = data.store().find_xref("@N1@").unwrap();
     assert_eq!(notes[0].content, NoteContent::Shared(shared));
     assert!(matches!(&notes[1].content, NoteContent::Text(t) if t.eq_str(&data, "Own text")));
@@ -253,9 +253,9 @@ fn note_kinds_of_7_1() {
         "0 HEAD\n1 GEDC\n2 VERS 7.1\n0 @I1@ INDI\n1 NOTE To check\n2 KIND TODO\n\
          0 @N1@ SNOTE Collected\n1 KIND OTHER\n2 PHRASE Hearsay\n0 TRLR\n",
     );
-    let note = &data.individuals[0].notes[0];
+    let note = &data.individuals()[0].notes[0];
     assert_eq!(note.detail().kinds[0].value, NoteKind::Todo);
-    let kind = &data.notes[0].kinds[0];
+    let kind = &data.notes()[0].kinds[0];
     assert_eq!(kind.value, NoteKind::Other);
     assert_eq!(text(&data, kind.phrase.as_ref().unwrap()), "Hearsay");
     assert!(write(&data).contains("1 KIND OTHER\n2 PHRASE Hearsay\n"));
@@ -273,7 +273,7 @@ fn uid_exid_and_creation_dates() {
          1 CREA\n2 DATE 1 JAN 2020\n3 TIME 12:30:00Z\n\
          0 @S1@ SOUR\n1 UID 1e2f3a4b-5c6d-4e7f-8a9b-0c1d2e3f4a5c\n1 CREA\n2 DATE 2 FEB 2021\n",
     ));
-    let detail = data.individuals[0].detail();
+    let detail = data.individuals()[0].detail();
     assert_eq!(
         text(&data, &detail.uids[0]),
         "0d7c1d2a-3b4e-4f60-8a9b-0c1d2e3f4a5b"
@@ -308,7 +308,7 @@ fn individual_non_events() {
         "0 @I1@ INDI\n1 NAME Ann /Example/\n1 NO MARR\n2 DATE TO 1900\n3 PHRASE Before the war\n\
          2 NOTE Never married, per family records.\n",
     ));
-    let non_events = &data.individuals[0].detail().non_events;
+    let non_events = &data.individuals()[0].detail().non_events;
     assert_eq!(non_events.len(), 1);
     let no = &non_events[0];
     assert_eq!(no.kind, EventKind::Marriage);
@@ -316,7 +316,7 @@ fn individual_non_events() {
     assert_eq!(text(&data, &date.value), "TO 1900");
     assert_eq!(text(&data, date.phrase.as_ref().unwrap()), "Before the war");
     assert_eq!(no.notes.len(), 1);
-    assert!(data.individuals[0].events.is_empty());
+    assert!(data.individuals()[0].events.is_empty());
 
     assert!(write(&data).contains("1 NO MARR\n2 DATE TO 1900\n3 PHRASE Before the war\n"));
 }
@@ -327,7 +327,7 @@ fn family_non_events() {
         "0 @I1@ INDI\n0 @I2@ INDI\n0 @F1@ FAM\n1 HUSB @I1@\n1 WIFE @I2@\n\
          1 NO DIV\n2 NOTE The couple never divorced.\n",
     ));
-    let no = &data.families[0].detail().non_events[0];
+    let no = &data.families()[0].detail().non_events[0];
     assert_eq!(no.kind, EventKind::Divorce);
     assert_eq!(no.notes.len(), 1);
     assert!(write(&data).contains("1 NO DIV\n2 NOTE The couple never divorced.\n"));
@@ -338,7 +338,7 @@ fn sort_dates() {
     let data = Dataset::parse(v7(
         "0 @I1@ INDI\n1 BIRT\n2 DATE BEF 1820\n2 SDATE 1818\n3 TIME 06:00\n",
     ));
-    let birth = data.individuals[0].birth().unwrap();
+    let birth = data.individuals()[0].birth().unwrap();
     assert_eq!(text(&data, &birth.date.as_ref().unwrap().value), "BEF 1820");
     let sdate = birth.detail().sort_date.as_ref().unwrap();
     assert_eq!(text(&data, &sdate.value), "1818");
@@ -352,7 +352,12 @@ fn date_phrases() {
     let data = Dataset::parse(v7(
         "0 @I1@ INDI\n1 BIRT\n2 DATE 15 MAR 1820\n3 PHRASE The Ides of March, 1820\n",
     ));
-    let date = data.individuals[0].birth().unwrap().date.as_ref().unwrap();
+    let date = data.individuals()[0]
+        .birth()
+        .unwrap()
+        .date
+        .as_ref()
+        .unwrap();
     assert_eq!(text(&data, &date.value), "15 MAR 1820");
     assert_eq!(
         text(&data, date.detail().phrase.as_ref().unwrap()),
@@ -371,7 +376,7 @@ fn enumeration_phrases() {
         "0 @I1@ INDI\n1 FAMC @F1@\n2 PEDI OTHER\n3 PHRASE Guardianship\n\
          0 @F1@ FAM\n1 CHIL @I1@\n",
     ));
-    let pedigree = data.individuals[0].child_of[0]
+    let pedigree = data.individuals()[0].child_of[0]
         .detail()
         .pedigree
         .as_ref()
@@ -389,7 +394,7 @@ fn birth_kinds_of_7_1() {
     let data = Dataset::parse(
         "0 HEAD\n1 GEDC\n2 VERS 7.1\n0 @I1@ INDI\n1 BIRT\n2 KIND BORN_LIVE\n0 TRLR\n",
     );
-    let birth = data.individuals[0].birth().unwrap();
+    let birth = data.individuals()[0].birth().unwrap();
     assert_eq!(birth.detail().birth_kinds, [BirthKind::BornLive]);
     assert!(write(&data).contains("1 BIRT\n2 KIND BORN_LIVE\n"));
 }
@@ -405,13 +410,13 @@ fn void_pointers_point_to_nothing() {
          0 @F1@ FAM\n1 HUSB @VOID@\n2 PHRASE Unknown father\n1 WIFE @I1@\n",
     ));
     let void = data.store().find_xref("@VOID@").unwrap();
-    let indi = &data.individuals[0];
+    let indi = &data.individuals()[0];
     assert_eq!(indi.child_of[0].family, Some(void));
     let asso = &indi.detail().associations[0];
     assert_eq!(asso.individual, Some(void));
     assert_eq!(text(&data, asso.phrase.as_ref().unwrap()), "A neighbour");
 
-    let family = &data.families[0];
+    let family = &data.families()[0];
     assert_eq!(family.husband_id(), Some(void));
     assert_eq!(
         text(
@@ -448,7 +453,7 @@ fn name_and_file_translations() {
          0 @M1@ OBJE\n1 FILE media/portrait.jpg\n2 FORM image/jpeg\n\
          2 TRAN media/portrait-small.jpg\n3 FORM image/jpeg\n",
     ));
-    let name = data.individuals[0].name().unwrap();
+    let name = data.individuals()[0].name().unwrap();
     let tran = &name.detail().translations[0];
     assert_eq!(text(&data, &tran.value), "Анна /Пример/");
     assert!(tran.language.as_ref().unwrap().eq_str(&data, "ru"));
@@ -477,7 +482,7 @@ fn crop_of_a_multimedia_link() {
          2 TITL Portrait\n\
          0 @M1@ OBJE\n1 FILE photo.jpg\n2 FORM image/jpeg\n",
     ));
-    let link = &data.individuals[0].detail().multimedia[0];
+    let link = &data.individuals()[0].detail().multimedia[0];
     assert_eq!(link.object, data.store().find_xref("@M1@"));
     let crop = link.crop.as_ref().unwrap();
     assert_eq!(
@@ -497,7 +502,7 @@ fn crop_values_that_are_not_pixels_are_kept_aside() {
         "0 @I1@ INDI\n1 OBJE @M1@\n2 CROP\n3 TOP 10.5\n3 LEFT 3\n0 @M1@ OBJE\n1 FILE a.jpg\n\
          2 FORM image/jpeg\n2 CROP\n",
     ));
-    let crop = data.individuals[0].detail().multimedia[0]
+    let crop = data.individuals()[0].detail().multimedia[0]
         .crop
         .as_ref()
         .unwrap();
@@ -506,7 +511,7 @@ fn crop_values_that_are_not_pixels_are_kept_aside() {
     assert_eq!(crop.extra.len(), 1);
     assert_eq!(data.store().tag(crop.extra[0].tag), "TOP");
     // A CROP under a record's FILE has no field: it is kept where it was.
-    let file = &data.multimedia[0].files[0];
+    let file = &data.multimedia()[0].files[0];
     assert_eq!(data.store().tag(file.extra[0].tag), "CROP");
 }
 
@@ -522,7 +527,7 @@ fn individual_ordinances_of_5_5_1() {
          1 CONL\n2 DATE 16 MAR 1990\n2 TEMP SLAKE\n\
          1 ENDL\n2 DATE 17 MAR 1991\n2 TEMP SLAKE\n2 STAT COMPLETED\n0 TRLR",
     );
-    let ordinances = &data.individuals[0].detail().ordinances;
+    let ordinances = &data.individuals()[0].detail().ordinances;
     let kinds: Vec<_> = ordinances.iter().map(|o| o.kind).collect();
     assert_eq!(
         kinds,
@@ -552,7 +557,7 @@ fn initiatory_is_read_in_7_0() {
          1 CONL\n2 DATE 10 JAN 2000\n2 TEMP SLAKE\n\
          1 INIL\n2 DATE 15 FEB 2001\n2 TEMP SLAKE\n2 STAT COMPLETED\n3 DATE 16 FEB 2001\n\
          1 ENDL\n2 DATE 15 FEB 2001\n2 TEMP SLAKE\n"));
-    let ordinances = &data.individuals[0].detail().ordinances;
+    let ordinances = &data.individuals()[0].detail().ordinances;
     assert_eq!(ordinances.len(), 4);
     let inil = &ordinances[2];
     assert_eq!(inil.kind, OrdinanceKind::Initiatory);
@@ -578,7 +583,7 @@ fn sealings_of_children_and_spouses() {
          0 @F1@ FAM\n1 CHIL @I1@\n\
          1 SLGS\n2 DATE 25 DEC 1990\n2 TEMP SLAKE\n2 STAT COMPLETED\n3 DATE 26 DEC 1990\n",
     ));
-    let slgc = &data.individuals[0].detail().ordinances[0];
+    let slgc = &data.individuals()[0].detail().ordinances[0];
     assert_eq!(slgc.kind, OrdinanceKind::ChildSealing);
     assert_eq!(slgc.family, data.store().find_xref("@F1@"));
     assert_eq!(
@@ -586,7 +591,7 @@ fn sealings_of_children_and_spouses() {
         OrdinanceStatus::Completed
     );
 
-    let slgs = &data.families[0].detail().ordinances[0];
+    let slgs = &data.families()[0].detail().ordinances[0];
     assert_eq!(slgs.kind, OrdinanceKind::SpouseSealing);
     assert_eq!(
         text(&data, &slgs.date.as_ref().unwrap().value),
@@ -612,7 +617,7 @@ fn ordinances_round_trip() {
 
     let reread = Dataset::parse(out);
     assert_eq!(reread.to_structures(), data.to_structures());
-    let kinds: Vec<_> = reread.individuals[0]
+    let kinds: Vec<_> = reread.individuals()[0]
         .detail()
         .ordinances
         .iter()
@@ -630,7 +635,7 @@ fn only_a_leading_at_sign_is_doubled_in_7_0() {
     let data = Dataset::parse(v7(
         "0 @I1@ INDI\n1 NOTE @@ref and ann@example.com\n1 NOTE a@@b\n",
     ));
-    let notes = &data.individuals[0].notes;
+    let notes = &data.individuals()[0].notes;
     assert!(
         matches!(&notes[0].content, NoteContent::Text(t) if t.eq_str(&data, "@ref and ann@example.com"))
     );
@@ -649,7 +654,7 @@ fn every_doubled_at_sign_is_one_in_5_5_1() {
     let data = Dataset::parse(
         "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 NOTE ann@@example.com\n0 TRLR\n",
     );
-    let note = &data.individuals[0].notes[0];
+    let note = &data.individuals()[0].notes[0];
     assert!(matches!(&note.content, NoteContent::Text(t) if t.eq_str(&data, "ann@example.com")));
     assert!(write_as(&data, GedcomVersion::V7_0).contains("1 NOTE ann@example.com\n"));
 }
@@ -665,7 +670,7 @@ fn structures_of_the_other_version_are_kept_and_strict_mode_refuses_them() {
                 1 SOUR SAMPLE\n1 SUBM @U1@\n0 @U1@ SUBM\n1 NAME Bea Sample\n\
                 0 @I1@ INDI\n1 NO MARR\n0 TRLR\n";
     let data = GedcomBuilder::new().build_from_str(text).unwrap();
-    assert_eq!(data.individuals[0].detail().non_events.len(), 1);
+    assert_eq!(data.individuals()[0].detail().non_events.len(), 1);
     assert!(GedcomBuilder::new()
         .strict(true)
         .build_from_str(text)
