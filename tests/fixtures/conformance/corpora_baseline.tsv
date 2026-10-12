@@ -3,7 +3,7 @@ file	outcome	lost	rules
 # PANIC, REPARSE: the written output does not read back), number of input payloads and structures
 # missing from the written output, and the output-checker rules the output violates. Regenerate
 # with CORPORA_BASELINE_WRITE=1; every change must be an improvement.
-gedcom4j/sample/5.5.1 sample 1.ged	OK	59	payload-date,record-size
+gedcom4j/sample/5.5.1 sample 1.ged	OK	59	payload-date
 gedcom4j/sample/5.5.1 sample 2.ged	OK	0	payload-date
 gedcom4j/sample/5.5.1 sample 3.ged	OK	0	payload-date
 gedcom4j/sample/5.5.1 sample 4.ged	OK	0	payload-date

@@ -130,3 +130,5 @@ keeps all data; writing is conformant to GEDCOM 5.5.1, 7.0 or 7.1.
   January to March (`30 JAN 1648/49` is `30 JAN 1649`), keeps the year
   written otherwise and before the common era, and converts back to the
   5.5.1 date it came from.
+- A 5.5.1 note over 32K is split at line breaks into consecutive `NOTE`
+  records, so that every record it is moved out of fits.

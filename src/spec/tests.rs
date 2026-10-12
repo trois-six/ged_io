@@ -2,7 +2,7 @@
 //! table.
 
 use super::*;
-use crate::tree::parse_tree;
+use crate::tree::{parse_tree, Payload, Xref};
 use crate::value::Calendar;
 
 /// The calendars of the tables and of the date grammar agree: same
@@ -714,6 +714,61 @@ fn repair_j_record_size() {
         out.contains(&format!("0 @N1@ NOTE {}", &note[..200])),
         "{out}"
     );
+    // A note over 32K is split at line breaks into consecutive notes; a
+    // line over a part is cut between two characters that are not spaces.
+    // No text is lost.
+    let lines: Vec<String> = (0..400)
+        .map(|i| format!("Entry {i:03}: the register was searched again"))
+        .collect();
+    let long_line = "word ".repeat(9000);
+    let text = format!("{}\n{long_line}", lines.join("\n"));
+    let note = Structure {
+        payload: Payload::Text(text.as_str().into()),
+        ..Structure::new("NOTE")
+    };
+    let mut person = Structure {
+        xref: Some(Xref::new("@I1@")),
+        ..Structure::new("INDI")
+    };
+    person.substructures.push(note);
+    let mut records = parse_tree(&format!("{H551}0 TRLR\n")).to_structures();
+    records.insert(1, person);
+    let repairs = conform(&mut records, GedcomVersion::V5_5_1);
+    assert!(
+        repairs.iter().all(|r| r.kind == R::RecordSize),
+        "{repairs:?}"
+    );
+    assert!(validate(&records, GedcomVersion::V5_5_1).is_empty());
+    let person = records.iter().find(|r| r.tag == "INDI").unwrap();
+    let pointers: Vec<&str> = person
+        .substructures
+        .iter()
+        .filter_map(|s| s.pointer().map(|p| p.as_str()))
+        .collect();
+    assert!(pointers.len() >= 3, "{pointers:?}");
+    let parts: Vec<&Structure> = pointers
+        .iter()
+        .map(|p| {
+            records
+                .iter()
+                .find(|r| r.xref.as_deref() == Some(*p))
+                .unwrap()
+        })
+        .collect();
+    assert!(parts.iter().all(|p| p.substructures.is_empty()));
+    let texts: Vec<&str> = parts.iter().map(|p| p.text().unwrap()).collect();
+    // The parts join back, a line break where a part ended at one.
+    let mut joined = texts[0].to_string();
+    for t in &texts[1..] {
+        let sep = if joined.ends_with("again") { "\n" } else { "" };
+        joined.push_str(sep);
+        joined.push_str(t);
+    }
+    assert_eq!(joined, text);
+    assert!(texts
+        .iter()
+        .all(|t| !t.starts_with(' ') && !t.ends_with(' ') || t.ends_with("word ")));
+
     // A record nothing can shrink is left as it is.
     let mut body = String::from("0 @I1@ INDI\n");
     for _ in 0..3000 {

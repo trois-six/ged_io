@@ -101,7 +101,7 @@
 //! | g | 7.x structure with neither payload nor substructure (§1.2) | `Y` where `Y` is a payload of the type; otherwise left out, as it holds nothing | — |
 //! | h | Identifiers outside the grammar, duplicated, `@VOID@`, on a substructure, on `HEAD` or `TRLR`; banned characters | Renamed (`@i 1@` becomes `@I_1@`, made unique with `_2`, `_3`…; pointers follow a renamed invalid identifier, and a duplicate's pointers stay with the first record); left out | Same; 5.5.1 tabs become spaces |
 //! | i | `HEAD` missing, misplaced or repeated; `TRLR` missing, misplaced, repeated or not empty | `HEAD` first (another becomes a `_HEAD` record); one empty `TRLR` last (one with content becomes a `_TRLR` record) | Same |
-//! | j | A 5.5.1 record over 32K | — | Inline notes moved to `NOTE` records, longest first, until the record fits; a record that moving every note would not bring under the limit stays as it is (the limit is a recommendation, p. 10, and nothing else can move out losslessly) |
+//! | j | A 5.5.1 record over 32K | — | Inline notes moved to `NOTE` records, longest first, until the record fits; a note over 32K itself split at line breaks into consecutive `NOTE` records (its citations with the first); a record that moving every note would not bring under the limit stays as it is (the limit is a recommendation, p. 10, and nothing else can move out losslessly) |
 //!
 //! An extension tag the header documents with a standard URI (7.x §1.5.1)
 //! is that standard structure, wherever it is, and is repaired as one; an

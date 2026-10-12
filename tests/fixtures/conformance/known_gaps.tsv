@@ -32,7 +32,8 @@ id	check	cause	class	note
 # TS24 the writer invents NAME pieces absent from the input
 # TS25 conversion between 5.5.1 and 7.0 is incomplete (values, structures and records not converted)
 # TS26 reference validation reports @VOID@ as dangling
-# TS27 5.5.1 records over 32K are written whole instead of moving text to NOTE records
+# TS27 5.5.1 records over 32K made of structures, not text (the test files' `date-all`: individuals with 1,296 births):
+#      no note can move out of them, nor can a record be split; 5.5.1 only recommends the limit (p.10)
 # TS28 5.5.1 network pointers (`:`, `!`) are not kept as pointers
 # TS29 non-date escape sequences (`@#...@`) are not kept verbatim
 # TS30 ANSEL is not decoded to NFC across the full repertoire (stacked marks included)
@@ -52,7 +53,6 @@ id	check	cause	class	note
 #      keeps as an extension.
 # TS37 GEDCOM 5.5.1 has no time zone: a 7.x time in UTC (`11:11:11Z`) is written as its clock time.
 case/G5-LONG-LINE	keep	TS21	LOST	missing line `2 CONC AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA`; model lacks `AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA...
-case/G5-RECORD-32K	output:record-size	TS27	NONCONFORMANT	line 10: record-size: 39674 bytes
 case/G7-CONT-UNDER-PTR	roundtrip	TS16	LOST	text @F1@ (x1)
 case/G7-XREF-INVALID	roundtrip	TS23	LOST	the semantic reader takes the 7.0-invalid pointer @I#1@ as text; the writer renames it to @I_1@ with its record, as the case asks
 case/X-DUP-XREF-UNIQUE	lacks	TS23	PRESENT	output has `@I1@ INDI`
