@@ -1011,7 +1011,13 @@ fn armidale_test_files() {
         ("7/enum-ext.ged", Valid),
         ("7/filename-1.ged", Valid),
         ("7/lang-all.ged", Valid),
-        ("7/notes-1.ged", Valid),
+        (
+            "7/notes-1.ged",
+            Expect::Departure(
+                Box::new(Invalid(Some(22), &[K::Cycle])),
+                "a shared note citing the source that points to it is a cycle (3.2, SOURCE_RECORD; 7.0.17)",
+            ),
+        ),
         ("7/obje-1.ged", Valid),
         ("7/obsolete-1.ged", Valid),
         ("7/pedi-1.ged", Valid),
@@ -1068,7 +1074,16 @@ fn armidale_familysearch_files() {
     ] {
         let path = root.join(name);
         let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-        let found = validate_bytes(&bytes);
+        let mut found = validate_bytes(&bytes);
+        // FamilySearch's maximal file keeps a SOUR-SNOTE cycle, which 7.0
+        // prohibits (3.2, SOURCE_RECORD; 7.0.17): @N1@ cites @S1@, whose
+        // four pointers to @N1@ each close it (its SOUR-OBJE loops were
+        // taken out, GEDCOM.io #368 and #395).
+        if name == "maximal70.ged" {
+            let cycles = found.iter().filter(|d| d.kind == K::Cycle).count();
+            assert_eq!(cycles, 4, "{name}: {found:?}");
+            found.retain(|d| d.kind != K::Cycle);
+        }
         if !found.is_empty() {
             let found: Vec<String> = found.iter().map(ToString::to_string).collect();
             wrong.push(format!("{name}: {found:?}"));

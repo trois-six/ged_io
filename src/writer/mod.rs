@@ -211,6 +211,10 @@ pub enum RepairKind {
     EnumCase,
     /// (c) A pointer missing, misplaced, dangling or to the wrong record type.
     Pointer,
+    /// (c) A pointer 7.x prohibits between records (7.0.17): an `ALIA` to
+    /// its own record, or one that closes a cycle of pointers between
+    /// source, multimedia and shared note records.
+    Cycle,
     /// (d) A payload outside its type's grammar.
     Payload,
     /// (e) A structure not permitted where it is, or a malformed tag (also a

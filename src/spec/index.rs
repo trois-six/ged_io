@@ -21,6 +21,18 @@ use crate::tree::node::STANDARD_TAGS;
 pub(crate) const NOTE_TRAN: u8 = 1;
 /// [`Row::flags`]: a 7.x media type (`MIME`) of a text.
 pub(crate) const MIME: u8 = 2;
+/// [`Row::flags`]: the 7.x alias pointer (`ALIA`), which may not point to
+/// its own record (7.0.17).
+pub(crate) const ALIAS: u8 = 4;
+/// [`Row::flags`]: the 7.x source record, which with multimedia and shared
+/// note records may form no pointer cycle (7.0.17).
+pub(crate) const SOURCE: u8 = 8;
+/// [`Row::flags`]: a 7.x multimedia or shared note record, which with
+/// source records may form no pointer cycle (7.0.17).
+pub(crate) const LINKED: u8 = 16;
+/// [`Row::flags`]: the 7.x individual record, whose `ALIA` may not point
+/// to itself (7.0.17).
+pub(crate) const INDIVIDUAL: u8 = 32;
 
 /// [`Row::slots`] of a type without substructures.
 const NO_SLOTS: u16 = u16::MAX;
@@ -119,6 +131,47 @@ impl SchemaIndex {
     #[inline]
     pub(crate) fn is_mime(&self, ty: StructId) -> bool {
         self.flags(ty) & MIME != 0
+    }
+
+    /// Whether `ty` is the 7.x alias pointer `ALIA`.
+    #[inline]
+    pub(crate) fn is_alias(&self, ty: StructId) -> bool {
+        self.flags(ty) & ALIAS != 0
+    }
+
+    /// Whether `ty` is the 7.x individual record.
+    #[inline]
+    pub(crate) fn is_individual(&self, ty: StructId) -> bool {
+        self.flags(ty) & INDIVIDUAL != 0
+    }
+
+    /// Whether a record of type `rtype` has pointers the 7.x pointer rules
+    /// concern ([`crate::spec::graph`]): an individual (its `ALIA`), a
+    /// source, a multimedia or a shared note record.
+    #[inline]
+    pub(crate) fn is_graph_record(&self, rtype: StructId) -> bool {
+        self.flags(rtype) & (SOURCE | LINKED | INDIVIDUAL) != 0
+    }
+
+    /// Whether a structure of type `ty`, in a record of type `rtype`, has a
+    /// pointer the 7.x pointer rules concern: an `ALIA`, or a pointer of a
+    /// source record to a multimedia or shared note record, or of one of
+    /// those to a source record.
+    #[inline]
+    pub(crate) fn is_graph_pointer(&self, schema: &Schema, rtype: StructId, ty: StructId) -> bool {
+        if self.is_alias(ty) {
+            return true;
+        }
+        let from = self.flags(rtype) & (SOURCE | LINKED);
+        if from == 0 {
+            return false;
+        }
+        let (kind, target) = schema.kind(ty);
+        if !matches!(kind, Kind::Pointer | Kind::NullablePointer) {
+            return false;
+        }
+        let to = self.flags(target) & (SOURCE | LINKED);
+        from == SOURCE && to == LINKED || from == LINKED && to == SOURCE
     }
 
     #[inline]
@@ -234,6 +287,32 @@ const NO_CELL: Cell = Cell {
     max: 0,
 };
 
+/// The [`Row::flags`] of type `id` of `schema`: the 7.x types some rules
+/// name.
+const fn flags_of(schema: &Schema, id: usize) -> u8 {
+    if schema.version.as_bytes()[0] != b'7' {
+        return 0;
+    }
+    let named = [
+        ("NOTE-TRAN", NOTE_TRAN),
+        ("MIME", MIME),
+        ("ALIA", ALIAS),
+        ("record-SOUR", SOURCE),
+        ("record-OBJE", LINKED),
+        ("record-SNOTE", LINKED),
+        ("record-INDI", INDIVIDUAL),
+    ];
+    let mut flags = 0;
+    let mut i = 0;
+    while i < named.len() {
+        if name_is(schema, id, named[i].0) {
+            flags |= named[i].1;
+        }
+        i += 1;
+    }
+    flags
+}
+
 /// The rows, slots, cells and required cells of `s`: `R` types, `D` of
 /// them with substructures, `C` cells and `Q` required ones ([`counts`]).
 // Indices are below the table sizes, checked to fit; constants can only
@@ -254,14 +333,7 @@ const fn build<const R: usize, const S: usize, const C: usize, const Q: usize>(
         let d = schema.const_def(id);
         let mut row = NO_ROW;
         row.required = req as u16;
-        if schema.version.as_bytes()[0] == b'7' {
-            if name_is(schema, id, "NOTE-TRAN") {
-                row.flags |= NOTE_TRAN;
-            }
-            if name_is(schema, id, "MIME") {
-                row.flags |= MIME;
-            }
-        }
+        row.flags = flags_of(schema, id);
         let first_cell = next;
         row.first = next as u16;
         if d.nsubs > 0 {
@@ -422,6 +494,16 @@ mod tests {
                 assert_eq!(
                     index.is_mime(sup),
                     schema.version != "5.5.1" && name == "MIME"
+                );
+                let v7 = schema.version != "5.5.1";
+                assert_eq!(index.is_alias(sup), v7 && name == "ALIA");
+                assert_eq!(
+                    index.is_graph_record(sup),
+                    v7 && matches!(
+                        name,
+                        "record-INDI" | "record-SOUR" | "record-OBJE" | "record-SNOTE"
+                    ),
+                    "{name}"
                 );
             }
             assert!(index.cell(DATASET, 200).is_none());

@@ -188,11 +188,12 @@
 1 GEDC
 2 VERS 7.0
 0 @I1@ INDI
-1 ALIA @I1@
+1 ALIA @I2@
 1 FAMC @VOID@
+0 @I2@ INDI
 0 TRLR
 #want 1 FAMC @VOID@
-#want 1 ALIA @I1@
+#want 1 ALIA @I2@
 
 ### G7-DANGLING | L | dangling pointers parse (L), kept
 0 HEAD

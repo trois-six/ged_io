@@ -45,6 +45,7 @@
 //! | Enumeration values: 7.x exact or an extension value, 5.5.1 in any case (p. 21); open sets admit any value; 5.5.1 file formats are open, but a media type is no format ([accepted practice](#accepted-practice)) | `EnumValue` |
 //! | Pointers name a record of the type the structure points to | `PointerTarget` |
 //! | Pointers name a record of the file (7.x `@VOID@` and 5.5.1 substructure and network pointers aside) | `DanglingPointer` |
+//! | 7.x (7.0.17): an `ALIA` does not point to its own record; pointers between source and multimedia records, and between source and shared note records, form no cycle (the pointer that closes one, records taken in order) | `Cycle` |
 //! | `HEAD` first and once, `TRLR` last, once and empty, `GEDC.VERS` naming the version | `Header` |
 //! | No banned character in a payload: 7.x C0 controls but tab and line breaks, DEL, C1 controls, U+FFFE and U+FFFF; 5.5.1 no control character at all | `Character` |
 //!
@@ -93,6 +94,7 @@
 //! | c | A pointer where text belongs | The pointer as text | Same |
 //! | c | A pointer to a record of another type | `_TAG` with the pointer | Same |
 //! | c | A pointer of an extension to no record | The pointer as text | Same |
+//! | c | An `ALIA` to its own record; a pointer that closes a cycle between source, multimedia and shared note records (7.0.17; records in order, the pointer that closes the cycle) | `_TAG` with the pointer | — |
 //! | d | A date or an age outside the grammar | Empty payload and a `PHRASE` with the text, where the structure takes one it has not; otherwise `_TAG` | A date value becomes the date phrase `(text)`; otherwise `_TAG` |
 //! | d | An event (`Y` payload) with other text; text where no payload belongs | `Y` (nothing) and a `NOTE` with the text, where a `NOTE` is permitted; otherwise `_TAG` | Same |
 //! | d | A file path that is no valid URL string, a coordinate outside its grammar | 7.x: the file path percent-encoded as conversion writes a 5.5.1 file reference (a local path as a `file` URL), the coordinate in its canonical form (upper-case direction, no extra leading zero), where that is valid; otherwise `_TAG` | `_TAG` |
@@ -143,6 +145,7 @@
 //! ```
 
 pub(crate) mod conform;
+pub(crate) mod graph;
 pub(crate) mod index;
 mod lines;
 pub(crate) mod payload;
@@ -230,6 +233,10 @@ pub enum DeviationKind {
     Header,
     /// A character the version bans.
     Character,
+    /// A pointer 7.x prohibits between records: an `ALIA` to its own
+    /// record, or one that closes a cycle of pointers between source,
+    /// multimedia and shared note records (7.0.17).
+    Cycle,
 }
 
 /// A dataset [`validate`] reads: a parsed [`Tree`] or owned

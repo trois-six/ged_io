@@ -17,6 +17,7 @@
 //! identifier names, the renamed identifiers, the aliases) is unchanged.
 
 mod clean;
+mod cycles;
 mod direct;
 #[cfg(test)]
 pub(crate) use direct::ID_PASSES;
@@ -203,8 +204,9 @@ pub(crate) fn conform_records<'n, N: Node<'n>>(
             c.record_sizes(records);
         }
         // A pass that repaired nothing and added no record leaves nothing
-        // for another pass to find.
-        if c.repairs.len() == before && (pass > 0 || !c.added) {
+        // for another pass to find, but the pointer rules between records
+        // (7.x), whose repairs the next pass looks at.
+        if c.repairs.len() == before && (pass > 0 || !c.added) && !c.pointer_rules(records) {
             break;
         }
     }
@@ -719,6 +721,13 @@ impl Typing {
             raw,
             Some(special),
         ))
+    }
+
+    /// Whether a pointer of a structure of type `ty` in a record of type
+    /// `rtype` is one the 7.x pointer rules between records concern.
+    #[inline]
+    pub(crate) fn is_graph_pointer(&self, rtype: StructId, ty: StructId) -> bool {
+        self.v7 && self.tables.is_graph_pointer(self.schema, rtype, ty)
     }
 
     /// The record type a pointer of a structure of type `ty` names.

@@ -28,7 +28,7 @@ fn names(dir: &str) -> Vec<String> {
 }
 
 /// Files whose input is not conformant 5.5.1 (leniency cases), with the reason.
-const LENIENT: [(&str, &str); 9] = [
+const LENIENT: [(&str, &str); 10] = [
     ("5/age-invalid", "ages outside the grammar"),
     ("5/atsign", "single `@` in text"),
     ("5/char_ascii_2", "CHAR LATIN1 is not a 5.5.1 character set"),
@@ -40,6 +40,10 @@ const LENIENT: [(&str, &str); 9] = [
     (
         "5/xref-case",
         "a dangling pointer: xrefs are case-sensitive (`@test@` against `@TEST@`)",
+    ),
+    (
+        "7/notes-1",
+        "a source and a shared note citing it: a cycle 7.x prohibits (7.0.17)",
     ),
 ];
 

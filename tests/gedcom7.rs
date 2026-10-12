@@ -706,3 +706,71 @@ fn structures_5_5_1_lacks_are_written_to_it_as_extensions() {
         ]
     );
 }
+
+// ---------------------------------------------------------------------------
+// GEDCOM 7.0.17 and 7.0.18
+// ---------------------------------------------------------------------------
+
+/// A source and the image it shows citing each other, a shared note citing
+/// the source that points to it, and an individual its own alias: 7.0.17
+/// prohibits each. Reading keeps them (nothing follows pointers in a loop);
+/// the writer cuts the pointer that closes each cycle, in the order it
+/// writes the records, and the output reads back and writes as it is.
+#[test]
+fn pointer_cycles_7_0_17_are_read_and_cut_on_write() {
+    use ged_io::spec::{validate_text, DeviationKind};
+    let input = v7(
+        "0 @I1@ INDI\n1 ALIA @I1@\n1 ALIA @I2@\n0 @I2@ INDI\n1 ALIA @I1@\n\
+         0 @N1@ SNOTE Transcribed from the register\n1 SOUR @S1@\n\
+         0 @S1@ SOUR\n1 TITL Register\n1 SNOTE @N1@\n1 OBJE @O1@\n\
+         0 @O1@ OBJE\n1 FILE scan.jpg\n2 FORM image/jpeg\n1 SOUR @S1@\n2 PAGE 4\n",
+    );
+    let cycles: Vec<u32> = validate_text(&input)
+        .iter()
+        .filter(|d| d.kind == DeviationKind::Cycle)
+        .map(|d| d.line)
+        .collect();
+    assert_eq!(cycles, [5, 13, 18]);
+    let data = Dataset::parse(&input);
+    assert_eq!(data.individuals()[0].detail().aliases.len(), 2);
+    let index = ged_io::IndexedDataset::new(data.clone());
+    assert!(index.find_source("@S1@").is_some());
+
+    let (out, report) = GedcomWriter::new()
+        .write_to_string_with_report(&data)
+        .unwrap();
+    assert!(
+        out.contains("0 @I1@ INDI\n1 ALIA @I2@\n1 _ALIA @I1@\n"),
+        "{out}"
+    );
+    assert!(out.contains("0 @I2@ INDI\n1 ALIA @I1@\n"), "{out}");
+    // The typed model writes shared notes, then sources, then media: the
+    // source's pointers close both cycles.
+    assert!(
+        out.contains("0 @N1@ SNOTE Transcribed from the register\n1 SOUR @S1@\n"),
+        "{out}"
+    );
+    assert!(
+        out.contains("0 @S1@ SOUR\n1 TITL Register\n1 OBJE @O1@\n1 _SNOTE @N1@\n"),
+        "{out}"
+    );
+    assert!(
+        out.contains("0 @O1@ OBJE\n1 FILE scan.jpg\n2 FORM image/jpeg\n1 _SOUR @S1@\n2 PAGE 4\n"),
+        "{out}"
+    );
+    let kinds: Vec<_> = report.repairs.iter().map(|r| r.kind).collect();
+    assert_eq!(kinds, [RepairKind::Cycle; 3], "{:?}", report.repairs);
+    assert!(validate_text(&out).is_empty(), "{:?}", validate_text(&out));
+    let again = Dataset::parse(&out);
+    let (twice, report) = GedcomWriter::new()
+        .write_to_string_with_report(&again)
+        .unwrap();
+    assert_eq!(twice, out);
+    assert!(report.repairs.is_empty(), "{:?}", report.repairs);
+    // 5.5.1 has neither rule.
+    let out = write_as(&data, GedcomVersion::V5_5_1);
+    assert!(
+        out.contains("1 ALIA @I1@\n") && !out.contains("_ALIA"),
+        "{out}"
+    );
+}

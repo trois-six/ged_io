@@ -338,6 +338,53 @@ fn pointers() {
     );
 }
 
+/// The 7.0.17 rules on pointers between records: an `ALIA` to its own
+/// record; a cycle of source, multimedia and shared note pointers, found
+/// at the pointer that closes it (records in order).
+#[test]
+fn pointer_rules_between_records() {
+    // H70 is 3 lines: the first record is on line 4.
+    assert_eq!(v70("0 @I1@ INDI\n1 ALIA @I1@\n"), [(5, K::Cycle)]);
+    assert_eq!(
+        v70("0 @I1@ INDI\n1 ALIA @I2@\n0 @I2@ INDI\n1 ALIA @I1@\n"),
+        []
+    );
+    // A source citing an image whose source is that source.
+    let sour_obje =
+        "0 @S1@ SOUR\n1 OBJE @O1@\n0 @O1@ OBJE\n1 FILE a.jpg\n2 FORM image/jpeg\n1 SOUR @S1@\n";
+    assert_eq!(v70(sour_obje), [(9, K::Cycle)]);
+    // A source and a shared note citing it (a rule of 7.0 already).
+    let sour_snote = "0 @N1@ SNOTE Note\n1 SOUR @S1@\n0 @S1@ SOUR\n1 SNOTE @N1@\n";
+    assert_eq!(v70(sour_snote), [(7, K::Cycle)]);
+    // A longer cycle through both, and through deep pointers.
+    let long = "0 @S1@ SOUR\n1 REPO @VOID@\n2 SNOTE @N1@\n\
+                0 @N1@ SNOTE Note\n1 SOUR @S2@\n\
+                0 @S2@ SOUR\n1 OBJE @O1@\n\
+                0 @O1@ OBJE\n1 FILE a.jpg\n2 FORM image/jpeg\n1 NOTE n\n2 SOUR @S1@\n";
+    assert_eq!(v70(long), [(15, K::Cycle)]);
+    // Without the pointer back, no cycle; pointers between sources, or
+    // through an individual, are no part of the rule.
+    assert_eq!(
+        v70("0 @S1@ SOUR\n1 OBJE @O1@\n0 @O1@ OBJE\n1 FILE a.jpg\n2 FORM image/jpeg\n"),
+        []
+    );
+    assert_eq!(
+        v70("0 @S1@ SOUR\n1 NOTE n\n2 SOUR @S1@\n0 @I1@ INDI\n1 SOUR @S1@\n"),
+        []
+    );
+    // An extension pointer is no part of the rule.
+    assert_eq!(
+        v70("0 @S1@ SOUR\n1 OBJE @O1@\n0 @O1@ OBJE\n1 FILE a.jpg\n2 FORM image/jpeg\n1 _SOUR @S1@\n"),
+        []
+    );
+    // 5.5.1 has neither rule.
+    assert_eq!(v551("0 @I1@ INDI\n1 ALIA @I1@\n"), []);
+    assert_eq!(
+        v551("0 @S1@ SOUR\n1 OBJE @O1@\n0 @O1@ OBJE\n1 FILE a.jpg\n2 FORM jpg\n1 SOUR @S1@\n"),
+        []
+    );
+}
+
 #[test]
 fn header_and_trailer() {
     assert_eq!(found("0 TRLR\n"), [(1, K::Header)]);
@@ -495,6 +542,38 @@ fn repair_c_pointers() {
     let (k, out) = repair70("0 @I1@ INDI\n1 _LINK @X9@\n");
     assert_eq!(k, [R::Pointer]);
     assert!(out.contains("1 _LINK @@X9@\n"), "{out}");
+}
+
+/// (c) The 7.0.17 pointer rules between records: the pointer that breaks
+/// one becomes a plain extension structure, keeping its pointer.
+#[test]
+fn repair_c_pointer_rules() {
+    let (k, out) = repair70("0 @I1@ INDI\n1 ALIA @I1@\n2 PHRASE Self\n1 ALIA @I2@\n0 @I2@ INDI\n");
+    assert_eq!(k, [R::Cycle]);
+    assert!(
+        out.contains("1 _ALIA @I1@\n2 PHRASE Self\n1 ALIA @I2@\n"),
+        "{out}"
+    );
+    let (k, out) = repair70(
+        "0 @S1@ SOUR\n1 OBJE @O1@\n2 TITL Scan\n0 @O1@ OBJE\n1 FILE a.jpg\n2 FORM image/jpeg\n1 SOUR @S1@\n2 PAGE 4\n",
+    );
+    assert_eq!(k, [R::Cycle]);
+    assert!(
+        out.contains("0 @S1@ SOUR\n1 OBJE @O1@\n2 TITL Scan\n"),
+        "{out}"
+    );
+    assert!(out.contains("1 _SOUR @S1@\n2 PAGE 4\n"), "{out}");
+    let (k, out) = repair70("0 @N1@ SNOTE Note\n1 SOUR @S1@\n0 @S1@ SOUR\n1 SNOTE @N1@\n");
+    assert_eq!(k, [R::Cycle]);
+    assert!(out.contains("0 @S1@ SOUR\n1 _SNOTE @N1@\n"), "{out}");
+    // A tag the header documents as a standard structure is not taken.
+    let (k, out) = repair70(
+        "0 @S1@ SOUR\n1 OBJE @O1@\n0 @O1@ OBJE\n1 FILE a.jpg\n2 FORM image/jpeg\n1 SOUR @S1@\n2 _SOUR x\n",
+    );
+    assert_eq!(k, [R::Cycle]);
+    assert!(out.contains("1 _SOUR @S1@\n2 _SOUR x\n"), "{out}");
+    // 5.5.1 is as it was.
+    assert_eq!(repair551("0 @I1@ INDI\n1 ALIA @I1@\n").0, []);
 }
 
 #[test]
