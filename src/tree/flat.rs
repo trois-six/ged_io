@@ -129,8 +129,8 @@ pub(crate) struct Flat<'s> {
 struct Open {
     /// Its type.
     ty: StructId,
-    /// Its tag.
-    tag: &'static str,
+    /// The index of its tag among the standard tags.
+    standard: u16,
     /// Where the occurrences of the tags of its typed substructures start
     /// in [`Stream::counts`].
     counts: u32,
@@ -804,7 +804,7 @@ impl<'s> Flat<'s> {
         }
         st.open.push(Open {
             ty,
-            tag,
+            standard: standard.unwrap_or(u16::MAX),
             counts: u32::try_from(st.counts.len()).unwrap_or(u32::MAX),
             children: false,
             empty,
@@ -1086,7 +1086,11 @@ fn size_bound(
 #[inline(never)]
 fn watched(watch: &Watch, open: &[Open], tag: &str, payload: &FlatPayload<'_>) -> bool {
     let n = open.len();
-    let tag_at = |i: Option<usize>| i.and_then(|i| open.get(i)).map_or("", |o| o.tag);
+    let tag_at = |i: Option<usize>| {
+        i.and_then(|i| open.get(i))
+            .and_then(|o| super::STANDARD_TAGS.get(usize::from(o.standard)))
+            .map_or("", |t| t)
+    };
     let (parent, grand) = (tag_at(n.checked_sub(1)), tag_at(n.checked_sub(2)));
     watch.typed(tag, payload_ref(payload), parent, grand, n > 0)
 }

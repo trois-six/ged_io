@@ -374,8 +374,29 @@ pub(crate) struct XrefTable {
     names: String,
     /// For each id, the end of its text in `names`.
     ends: Vec<u32>,
+    /// For each id, the grammars its text is a valid identifier of
+    /// ([`VALID_V551`], [`VALID_V7`]), found once, for the writers that
+    /// look again at each identifier they write.
+    valid: Vec<u8>,
     /// `0`: empty; otherwise the hash (high half) and the id (low half).
     slots: Vec<u64>,
+}
+
+/// [`XrefTable::valid`]: a valid 5.5.1 identifier.
+const VALID_V551: u8 = 1;
+/// [`XrefTable::valid`]: a valid 7.x identifier.
+const VALID_V7: u8 = 2;
+
+/// The grammars `text` is a valid identifier of, as bits.
+fn validity(text: &str) -> u8 {
+    let mut bits = 0;
+    if crate::version::V551.is_valid_xref(text) {
+        bits |= VALID_V551;
+    }
+    if crate::version::V70.is_valid_xref(text) {
+        bits |= VALID_V7;
+    }
+    bits
 }
 
 fn hash(text: &str) -> u32 {
@@ -440,6 +461,7 @@ impl XrefTable {
         let end = u32::try_from(self.names.len() + text.len()).ok()?;
         self.names.push_str(text);
         self.ends.push(end);
+        self.valid.push(validity(text));
         if let Some(slot) = self.slots.get_mut(at) {
             *slot = (u64::from(hash) << 32) | u64::from(id.0.get());
         }
@@ -469,10 +491,14 @@ impl XrefTable {
     pub(crate) fn shrink(&mut self) {
         self.names.shrink_to_fit();
         self.ends.shrink_to_fit();
+        self.valid.shrink_to_fit();
     }
 
     fn heap_size(&self) -> usize {
-        self.names.capacity() + self.ends.capacity() * 4 + self.slots.capacity() * 8
+        self.names.capacity()
+            + self.ends.capacity() * 4
+            + self.valid.capacity()
+            + self.slots.capacity() * 8
     }
 }
 
@@ -547,6 +573,19 @@ impl Store {
     #[must_use]
     pub fn xref(&self, id: XrefId) -> &str {
         self.xrefs.name(id.index()).unwrap_or("")
+    }
+
+    /// Whether identifier `id` is valid in the grammar of `rules`
+    /// ([`VersionRules::is_valid_xref`](crate::version::VersionRules::is_valid_xref)).
+    pub(crate) fn is_valid_xref(&self, id: XrefId, rules: &crate::version::VersionRules) -> bool {
+        let bit = match rules.xref {
+            crate::version::XrefGrammar::V7 => VALID_V7,
+            crate::version::XrefGrammar::V551 { .. } => VALID_V551,
+        };
+        self.xrefs
+            .valid
+            .get(id.index())
+            .is_some_and(|v| v & bit != 0)
     }
 
     /// The id of an identifier, if the dataset has it.
