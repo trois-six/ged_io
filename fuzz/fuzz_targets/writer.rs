@@ -104,9 +104,19 @@ fuzz_target!(|data: &[u8]| {
                 .count();
             let (written, read) = (back.record_count(), model.record_count() - bare_trailers);
             let header = usize::from(model.header.is_none());
+            // Converted to the other version family, records are added
+            // (multimedia and source records taken out of others) and 5.5.1
+            // submissions left out.
+            let converted = model.version().is_v7() != version.is_v7();
+            let submissions = if converted {
+                model.submissions.len()
+            } else {
+                0
+            };
             assert!(
                 written == read + header
-                    || (version.rules().max_line_length().is_some() && written > read),
+                    || (version.rules().max_line_length().is_some() && written > read)
+                    || (converted && written + submissions >= read),
                 "{version}: {written} records read back for {read}\n{out}"
             );
             // Writing is idempotent: write(read(write(x))) == write(x).
@@ -148,11 +158,17 @@ fuzz_target!(|data: &[u8]| {
             .expect("repairs, never fails");
         let out = String::from_utf8(bytes).expect("UTF-8");
         check_lines(&out, version);
-        let written = records(&out) - 2; // HEAD and TRLR
-                                         // 5.5.1 adds a submitter record when there is none, and the
-                                         // conformance repair moves notes out of records over 32K.
+        // But for HEAD and TRLR. 5.5.1 adds a submitter record when there is
+        // none, and the conformance repair moves notes out of records over
+        // 32K; converted to the other version family, records are added and
+        // 5.5.1 submissions left out.
+        let written = records(&out) - 2;
+        let converted = tree.version().is_v7() != version.is_v7();
+        let submissions = tree.records().filter(|r| r.tag() == "SUBN").count();
         assert!(
-            written == kept || (version.rules().max_line_length().is_some() && written > kept),
+            written == kept
+                || (version.rules().max_line_length().is_some() && written > kept)
+                || (converted && written + submissions >= kept),
             "{written} records written for {kept}"
         );
         assert_eq!(parse_tree(&out).records().count(), records(&out));

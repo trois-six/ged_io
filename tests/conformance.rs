@@ -32,3 +32,6 @@ mod features;
 
 #[path = "conformance/corpora.rs"]
 mod corpora;
+
+#[path = "conformance/convert.rs"]
+mod convert;

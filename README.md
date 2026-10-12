@@ -26,6 +26,7 @@ reporting each repair.
 | Feature | Description |
 |---------|-------------|
 | **Three versions** | GEDCOM 5.5.1, 7.0 and 7.1, read and written; every structure of each has a type |
+| **Conversion** | 5.5.1 to 7.x and back, following the FamilySearch migration guide: multimedia and source records, roles, translations, languages, media types and file URIs, identifiers, dates and ages |
 | **Read & write** | A lossless, lenient reader, and a writer conformant by construction; data that does not fit a type is kept, in place, and written back |
 | **Streaming parser** | One record at a time, in any encoding and with any line terminators, memory bounded by the largest record |
 | **Indexed lookups** | Records by identifier and families from individuals in constant time |
@@ -253,6 +254,53 @@ instead. `.output_encoding(OutputEncoding::Ansel)` (or `Utf16Le`,
 `Ascii`) writes 5.5.1 bytes in another encoding, with a matching `CHAR`;
 `.line_ending(…)`, `.max_line_length(…)` and `.bom(…)` set the rest.
 
+### Conversion between 5.5.1 and 7.x
+
+Written in a version of the other family, a dataset is converted first
+(`ged_io::convert`), as the FamilySearch migration guide says and, where it
+leaves a choice, as the gedcom7code conversions do:
+
+| 5.5.1 | 7.x |
+|---|---|
+| `NOTE` record, `NOTE @N1@` | `SNOTE` record, `SNOTE @N1@` |
+| Multimedia link holding its files | A new `OBJE` record; the link points to it and keeps its title |
+| Source citation in words (`SOUR text`) | A new `SOUR` record with the text as its `NOTE`; the citation's `TEXT`s under `DATA` |
+| `ASSO.RELA Godfather` | `ASSO.ROLE GODP` + `PHRASE Godfather`; a word no role names is `OTHER` + `PHRASE` |
+| `FONE`/`ROMN` with `TYPE` | `TRAN` with `LANG` (`kana` is `ja-Hrkt`, `romaji` `ja-Latn`, …) |
+| `LANG English` | `LANG en` (an unknown name `und` + its phrase) |
+| `FILE C:\photos\a b.jpg`, `FORM jpg`, `FORM.TYPE photo` | `FILE file:///C:/photos/a%20b.jpg`, `FORM image/jpeg`, `FORM.MEDI PHOTO` |
+| `RIN`, `AFN`, `RFN system:id`, `_FSFTID` | `EXID` with its registered `TYPE` |
+| `@#DJULIAN@` in text, `30 JAN 1648/49`, `AGE STILLBORN` | `JULIAN`, `30 JAN 1649` + `PHRASE`, `AGE 0y` + `PHRASE` (and a death at that age) |
+| `SUBN`, `HEAD.FILE`, `HEAD.CHAR`, `GEDC.FORM`; a record named `@VOID@` | Left out; renamed, with its pointers |
+| Extension tags of known meaning (`_LOC`, `_GOV`, …) | Declared in `HEAD.SCHMA` |
+
+Converting to 5.5.1 reverses each of these where 5.5.1 can say it; what it
+has no place for is kept as extension structures. With
+`.conversion(ConversionOptions::default().keep_obsolete(true))`, the 5.5.1
+structures 7.x drops are kept as extensions `HEAD.SCHMA` declares with their
+5.5.1 URIs, and restored when converting back, so that 5.5.1 data survives a
+round trip through 7.x.
+
+```rust
+use ged_io::convert::{convert_dataset, ConversionOptions};
+use ged_io::{Dataset, GedcomVersion, GedcomWriter};
+
+let data = Dataset::parse(
+    "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 OBJE\n2 FILE photo.jpg\n3 FORM jpg\n\
+     2 TITL Portrait\n0 TRLR\n",
+);
+let out = GedcomWriter::new()
+    .gedcom_version(GedcomVersion::V7_0)
+    .write_to_string(&data)
+    .unwrap();
+assert!(out.contains("1 OBJE @M1@\n2 TITL Portrait\n"));
+assert!(out.contains("0 @M1@ OBJE\n1 FILE photo.jpg\n2 FORM image/jpeg\n"));
+
+// Or as a dataset of the other version.
+let v7 = convert_dataset(&data, GedcomVersion::V7_0, &ConversionOptions::default());
+assert_eq!(v7.multimedia.len(), 1);
+```
+
 ---
 
 ## Streaming
@@ -441,8 +489,10 @@ Validation: strict - errors: 2, warnings: 0
 error: line 14: SEX "male": not a value of enumset-SEX
 error: line 27: FAMC @F9@: no record has this identifier
 
-# Rewrite any file as conformant GEDCOM 7.0 (repairs on standard error)
+# Rewrite any file as conformant GEDCOM 7.0 (repairs on standard error),
+# converting a 5.5.1 file; --keep-obsolete keeps what 7.0 drops as extensions
 ged-io --write 7.0 family.ged > family70.ged
+ged-io --write 7.0 --keep-obsolete family.ged > family70.ged
 ```
 
 `ged-io --help` lists every option. Exit codes: 0 success, 1 I/O error,

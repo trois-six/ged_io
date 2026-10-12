@@ -209,6 +209,22 @@ pub(crate) fn conform_records<'n, N: Node<'n>>(
     }
 }
 
+/// Puts an owned record of a typed model, rewritten outside the pass (a
+/// record converted to another version: `crate::convert`), in the order
+/// the model writes it in `version` ([`FieldOrder`]), as the pass puts the
+/// records it repairs.
+pub(crate) fn model_order(
+    record: &mut Structure,
+    version: GedcomVersion,
+    order: &'static FieldOrder,
+) {
+    let mut c = Conformer::new(version);
+    c.order = Some(order);
+    if let Some(ty) = c.record_of_standard(record.tag.as_str(), record.tag.standard_index()) {
+        c.model_order(record, ty);
+    }
+}
+
 /// A record of a dataset being repaired: as it was given (a node of a
 /// parsed tree, a borrowed structure, a record that writes itself), as long
 /// as the repair leaves it so, or an owned copy, which the repair changes.
@@ -2288,7 +2304,7 @@ impl<'n> Conformer<'n> {
 /// (`model::Dataset::records`): the header, submitters, submissions,
 /// individuals, families, shared notes, sources, repositories, multimedia
 /// objects, other records, the trailer.
-fn record_rank(tag: &str) -> u8 {
+pub(crate) fn record_rank(tag: &str) -> u8 {
     match tag {
         "HEAD" => 0,
         "SUBM" => 1,

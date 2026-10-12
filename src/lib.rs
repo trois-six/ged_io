@@ -9,7 +9,8 @@ Reads and writes GEDCOM, the genealogical data format, in versions 5.5.1,
   opt-in strict mode refuses input that does not follow its specification
   ([`GedcomBuilder::strict`]).
 - **Writing is conformant.** [`GedcomWriter`] writes a dataset in its
-  version or another, repairing what the target does not permit
+  version or another, converting it between 5.5.1 and 7.x as the migration
+  guide says ([`convert`]), repairing what the target does not permit
   ([`spec::conform`]) and emitting every line by the target's line rules.
 - **Streaming and indexing.** [`GedcomStreamParser`] reads one record at a
   time in bounded memory; [`IndexedDataset`] finds records and families in
@@ -53,6 +54,7 @@ assert!(out.contains("2 DATE ABT JULIAN 1700\n"));
 #![deny(missing_docs)]
 
 pub mod builder;
+pub mod convert;
 pub mod encoding;
 pub mod error;
 #[cfg(feature = "gedzip")]

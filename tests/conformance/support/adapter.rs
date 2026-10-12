@@ -117,6 +117,31 @@ pub fn write_with(m: &Model, target: Target, eol: Option<&str>) -> Result<String
     })
 }
 
+/// Writes the model for `target`, keeping the 5.5.1 structures 7.x drops
+/// as declared extensions when converting (`keep_obsolete`).
+pub fn write_keeping(m: &Model, target: Target) -> Result<String, String> {
+    guard(|| {
+        writer(target, None)
+            .conversion(ged_io::convert::ConversionOptions::default().keep_obsolete(true))
+            .write_to_string(m)
+            .map_err(|e| e.to_string())
+    })
+}
+
+/// Converts the lossless tree of `text` (not the typed model) to `target`
+/// and writes it.
+pub fn write_tree(text: &str, target: Target) -> Result<String, String> {
+    guard(|| {
+        let tree = ged_io::tree::Tree::parse(text);
+        let mut out = Vec::new();
+        writer(target, None)
+            .bom(ged_io::Bom::Never)
+            .write_tree(&mut out, &tree)
+            .map_err(|e| e.to_string())?;
+        String::from_utf8(out).map_err(|e| e.to_string())
+    })
+}
+
 /// Writes the model as GEDCOM 5.5.1 bytes in ANSEL (`CHAR ANSEL`).
 pub fn write_ansel(m: &Model) -> Result<Vec<u8>, String> {
     guard(|| {

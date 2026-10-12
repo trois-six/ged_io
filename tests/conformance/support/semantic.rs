@@ -24,6 +24,8 @@
 //!    no weeks), and a number alone counts years, as the test-files convert
 //!    it.
 //! 10. Times compare with zero-padded fields: `2:5` equals `02:05`.
+//! 11. File paths compare their percent-encodings without case (RFC 3986
+//!     §6.2.2.1): `%3a` equals `%3A`.
 //!
 //! Conversion mode (5.5.1 against its 7.0 conversion) also treats a NOTE
 //! record referenced once, an inline NOTE and a single-use SNOTE as equal, and
@@ -375,7 +377,28 @@ pub fn normalise_value(tag: &str, s: &str, v: Version) -> String {
     if tag == "TIME" {
         s = normalise_time(&s);
     }
+    if tag == "FILE" {
+        s = normalise_percent(&s);
+    }
     s
+}
+
+/// Rule 11: the hexadecimal digits of percent-encodings in upper case.
+fn normalise_percent(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        out.push(c);
+        if c == '%' {
+            for _ in 0..2 {
+                match chars.next_if(char::is_ascii_hexdigit) {
+                    Some(h) => out.push(h.to_ascii_uppercase()),
+                    None => break,
+                }
+            }
+        }
+    }
+    out
 }
 
 /// The keywords, calendars, months and epochs of dates, which compare
@@ -907,6 +930,9 @@ mod tests {
         assert_eq!(age("79"), age("79y"));
         assert_eq!(age("< 8"), age("<8y"));
         assert_ne!(age("1y"), age("1m"));
+        let file = |s: &str| normalise_value("FILE", s, Version::V70);
+        assert_eq!(file("https%3a/x%5b"), file("https%3A/x%5B"));
+        assert_ne!(file("a%3a"), file("a:"));
         let time = |s: &str| normalise_value("TIME", s, Version::V70);
         assert_eq!(time("2:5"), time("02:05"));
         assert_eq!(time("2:50:00.00z"), time("02:50:00.00Z"));

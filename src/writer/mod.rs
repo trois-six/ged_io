@@ -56,6 +56,7 @@ use std::borrow::Cow;
 use std::fmt;
 use std::io;
 
+use crate::convert::{ConversionOptions, Plan};
 use crate::model::Dataset;
 use crate::spec::conform::{conform_records, with_node, Build, FieldOrder, Rec, RecRef};
 use crate::tree::{Flat, FlatRef, Node, PayloadRef, Structure, Tree};
@@ -313,6 +314,9 @@ pub struct WriterConfig {
     pub output_encoding: OutputEncoding,
     /// What to do with data that does not fit the target version.
     pub on_nonconformant: RepairPolicy,
+    /// How data is converted when the target version is of the other
+    /// family than the data's (5.5.1 and 7.x, [`crate::convert`]).
+    pub conversion: ConversionOptions,
 }
 
 impl Default for WriterConfig {
@@ -324,6 +328,7 @@ impl Default for WriterConfig {
             bom: Bom::Auto,
             output_encoding: OutputEncoding::Utf8,
             on_nonconformant: RepairPolicy::Repair,
+            conversion: ConversionOptions::default(),
         }
     }
 }
@@ -409,6 +414,14 @@ impl GedcomWriter {
         self
     }
 
+    /// Sets how data is converted to a version of the other family
+    /// ([`crate::convert`]).
+    #[must_use]
+    pub fn conversion(mut self, options: ConversionOptions) -> Self {
+        self.config.conversion = options;
+        self
+    }
+
     /// The configuration.
     #[must_use]
     pub fn config(&self) -> &WriterConfig {
@@ -481,7 +494,26 @@ impl GedcomWriter {
         writer: W,
         data: &Dataset,
     ) -> Result<WriteReport, WriteError> {
-        self.write_built(writer, &data.built(self), crate::model::field_order)
+        let built = data.built(self);
+        match self.plan_for(data, &built) {
+            Some(plan) => {
+                self.write_built(writer, &plan.entries(&built), crate::model::field_order)
+            }
+            None => self.write_built(writer, &built, crate::model::field_order),
+        }
+    }
+
+    /// The conversion of `data`, whose records are `built`, to the target
+    /// version, when it is of the other version family.
+    fn plan_for<'d, B: Build<'d>>(&self, data: &'d Dataset, built: &[B]) -> Option<Plan> {
+        let to = self.config.version?;
+        Plan::of_dataset(
+            data,
+            built,
+            to,
+            self.config.conversion,
+            Some(crate::model::field_order(to)),
+        )
     }
 
     /// Writes `data` as text: UTF-8 (whatever the output encoding), labelled
@@ -506,11 +538,14 @@ impl GedcomWriter {
         &self,
         data: &Dataset,
     ) -> Result<(String, WriteReport), WriteError> {
-        self.write_built_to_string(
-            &data.built(self),
-            crate::model::field_order,
-            data.store().input_len(),
-        )
+        let built = data.built(self);
+        let size = data.store().input_len();
+        match self.plan_for(data, &built) {
+            Some(plan) => {
+                self.write_built_to_string(&plan.entries(&built), crate::model::field_order, size)
+            }
+            None => self.write_built_to_string(&built, crate::model::field_order, size),
+        }
     }
 
     /// Writes a lossless [`Tree`] to `writer` in the target version (the
@@ -531,8 +566,11 @@ impl GedcomWriter {
         tree: &Tree,
     ) -> Result<WriteReport, WriteError> {
         let rules = self.rules_for(tree.declared_version());
-        let mut records = Vec::with_capacity(tree.records().count());
-        records.extend(tree.records().map(Rec::given));
+        let given: Vec<_> = tree.records().collect();
+        let records = match self.plan_nodes(&given, tree.version(), rules, None) {
+            Some(plan) => plan.recs(&given),
+            None => given.into_iter().map(Rec::given).collect(),
+        };
         self.write_conformed(&mut writer, rules, records, None)
     }
 
@@ -549,11 +587,32 @@ impl GedcomWriter {
         records: &[Structure],
     ) -> Result<WriteReport, WriteError> {
         let rules = self.rules_for_records(records);
-        self.write_conformed(
-            &mut writer,
-            rules,
-            records.iter().map(Rec::given).collect(),
-            None,
+        let given: Vec<&Structure> = records.iter().collect();
+        let recs = match self.plan_nodes(&given, declared_version(records), rules, None) {
+            Some(plan) => plan.recs(&given),
+            None => given.into_iter().map(Rec::given).collect(),
+        };
+        self.write_conformed(&mut writer, rules, recs, None)
+    }
+
+    /// The conversion of records given as nodes, in version `from`, to the
+    /// version of `rules`, when it is of the other version family.
+    fn plan_nodes<'n, N: Node<'n>>(
+        &self,
+        records: &[N],
+        from: GedcomVersion,
+        rules: &VersionRules,
+        order: Option<&'static FieldOrder>,
+    ) -> Option<Plan> {
+        // Owned structures of a typed model hold its values converted.
+        let values = order.is_none();
+        Plan::of_nodes(
+            records,
+            from,
+            rules.version,
+            self.config.conversion,
+            values,
+            order,
         )
     }
 
@@ -565,11 +624,17 @@ impl GedcomWriter {
         &self,
         mut writer: W,
         records: &[Structure],
+        from: GedcomVersion,
         order: fn(GedcomVersion) -> &'static FieldOrder,
     ) -> Result<WriteReport, WriteError> {
         let rules = self.rules_for_records(records);
-        let records = records.iter().map(Rec::given).collect();
-        self.write_conformed(&mut writer, rules, records, Some(order(rules.version)))
+        let order = order(rules.version);
+        let given: Vec<&Structure> = records.iter().collect();
+        let records = match self.plan_nodes(&given, from, rules, Some(order)) {
+            Some(plan) => plan.recs(&given),
+            None => given.into_iter().map(Rec::given).collect(),
+        };
+        self.write_conformed(&mut writer, rules, records, Some(order))
     }
 
     /// The version owned records are written in: the configured one, else
@@ -699,6 +764,19 @@ impl GedcomWriter {
             repairs: sink.repairs,
         })
     }
+}
+
+/// The version owned records declare (`HEAD.GEDC.VERS`), 5.5.1 when they
+/// declare none.
+fn declared_version(records: &[Structure]) -> GedcomVersion {
+    records
+        .iter()
+        .find(|r| r.tag == "HEAD")
+        .and_then(|h| h.first("GEDC"))
+        .and_then(|g| g.first("VERS"))
+        .and_then(Structure::text)
+        .map(GedcomVersion::from_version_str)
+        .unwrap_or_default()
 }
 
 /// Whether a record is the trailer the writer replaces by its own: an

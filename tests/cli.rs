@@ -185,6 +185,31 @@ fn write_7_0_reads_back_and_validates() {
     assert!(stdout(&output).contains("Validation: strict - errors: 0, warnings: 0"));
 }
 
+/// A 5.5.1 file written as 7.0 is converted; its submission goes, unless
+/// kept as a declared extension.
+#[test]
+fn write_converts_and_keeps_obsolete_structures_on_request() {
+    let file = TempFile::new(
+        "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n1 SUBN @B1@\n0 @I1@ INDI\n1 ASSO @I2@\n2 RELA witness\n\
+         0 @I2@ INDI\n0 @B1@ SUBN\n1 FAMF Example\n0 TRLR\n",
+    );
+    let output = run(&["--write", "7.0", file.path()]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let written = stdout(&output);
+    assert!(written.contains("1 ASSO @I2@\n2 ROLE WITN\n"), "{written}");
+    assert!(
+        !written.contains("SUBN") && !written.contains("FAMF"),
+        "{written}"
+    );
+    let output = run(&["--write", "7.0", "--keep-obsolete", file.path()]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let written = stdout(&output);
+    assert!(
+        written.contains("0 @B1@ _SUBMISSION\n1 FAMF Example\n"),
+        "{written}"
+    );
+}
+
 #[test]
 fn write_lists_the_repairs_on_standard_error() {
     let file = TempFile::new(FAMILY.replace("1 SEX F\n1 FAMC", "1 SEX female\n1 FAMC"));
@@ -277,6 +302,10 @@ fn usage_errors_exit_with_code_3() {
         ),
         (vec!["--write", "6.0", path], "unknown version: 6.0"),
         (vec!["--write"], "--write expects a version"),
+        (
+            vec!["--keep-obsolete", path],
+            "--keep-obsolete requires --write",
+        ),
         (vec!["--frobnicate", path], "unknown option: --frobnicate"),
         (vec![], "missing file"),
         (vec![path, path], "expected one file"),
