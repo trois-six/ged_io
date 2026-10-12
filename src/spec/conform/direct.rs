@@ -378,6 +378,11 @@ impl<'n> Direct<'n> {
         let mut c = Conformer::new(version);
         c.order = order;
         well_formed(records)?;
+        // The records the header documents as aliases of standard ones (7.x
+        // `HEAD.SCHMA`) are records of those types, as the whole pass finds.
+        let head = records.first()?.get(&c.arena);
+        let mut scratch = Flat::default();
+        c.aliases = super::with_node!(head, scratch, |h| Aliases::of(Some(h), c.schema));
         let mut ids = if let Some(data) = whole.filter(|d| d.xrefs_conform(c.rules)) {
             IdTypes::of_dataset(data, version, |tag| c.record_type(tag))
         } else {
@@ -421,9 +426,6 @@ impl<'n> Direct<'n> {
             if let Some(x) = stub.and_then(|s| s.xref) {
                 ids.forget(x.as_str());
             }
-            let head = records.first()?.get(&c.arena);
-            let mut scratch = Flat::default();
-            c.aliases = super::with_node!(head, scratch, |h| Aliases::of(Some(h), c.schema));
             // The extension tags of the header as given, which a relocation
             // does not take.
             let head_tags = (c.family == Family::V7)
@@ -964,7 +966,19 @@ impl<'n> Conformer<'n> {
         let relocated: Vec<String> = self.schma.iter().map(|(t, _)| t.clone()).collect();
         self.declare(records);
         let head = records.first_mut()?.make_owned(&self.arena);
-        self.aliases = Aliases::of(Some(&*head), self.schema);
+        let aliases = Aliases::of(Some(&*head), self.schema);
+        // The identifiers were typed with the aliases as given: a repair
+        // that drops one (a `SCHMA` with a payload made `_SCHMA`) needs
+        // the whole pass, which types them again.
+        if self
+            .aliases
+            .structs
+            .iter()
+            .any(|(tag, ty)| aliases.structs.get(tag) != Some(ty))
+        {
+            return None;
+        }
+        self.aliases = aliases;
         complete_head(head, self.rules, "UTF-8", None);
         self.model_order_to(head, ty, 2);
         let mut walk = Walk::default();

@@ -700,6 +700,37 @@ fn values_are_converted_as_written() {
     }
 }
 
+/// A record the header documents as an alias of a standard record
+/// (`_USER` for `record-SUBM`, 7.x `HEAD.SCHMA`) is a record of that type,
+/// whichever way the writer goes: the pointers to it stay standard (or
+/// documented aliases), written natively as converted from a file with no
+/// version, which a second write once wrote as extensions (fuzz
+/// `entry_points`).
+#[test]
+fn pointers_to_a_documented_alias_record_stay_standard() {
+    let schma = "1 SCHMA\n2 TAG _USER https://gedcom.io/terms/v7/record-SUBM\n2 TAG _CREATOR https://gedcom.io/terms/v7/SUBM\n";
+    let input = format!("0 HEAD\n{schma}0 @U1@ _USER\n1 _CREATOR @U1@\n1 GEDC\n");
+    for version in VERSIONS {
+        let out = write(&read(&input), version);
+        assert_eq!(write(&read(&out), version), out, "{version}");
+    }
+    let input = format!(
+        "0 HEAD\n1 GEDC\n2 VERS 7.0\n{schma}0 @U1@ _USER\n1 NAME Example Submitter\n0 @I1@ INDI\n1 SUBM @U1@\n1 _CREATOR @U1@\n0 TRLR\n"
+    );
+    let out = write(&read(&input), GedcomVersion::V7_0);
+    assert!(out.contains("1 SUBM @U1@\n1 _CREATOR @U1@\n"), "{out}");
+    // A header whose `SCHMA` the repair makes an extension (it has a
+    // payload here: a line without a level continues it) declares no
+    // alias: the pointer is to an extension record (fuzz `model`).
+    let input = "0 HEAD\n1 SCHMA\n2$TA://example.com/calendar\n2 TAG _USER https://gedcom.io/terms/v7/record-SUBM\n1 SUBM @U1@\n0 @U1@ _USER";
+    for version in VERSIONS {
+        let out = write(&read(input), version);
+        let left = ged_io::spec::validate_text(&out);
+        assert!(left.is_empty(), "{version}: {left:?}\n{out}");
+        assert_eq!(write(&read(&out), version), out, "{version}");
+    }
+}
+
 /// A pointer field (or a note) holding a pointer and banned characters is
 /// written as the pointer, as it is written without them: written as text,
 /// it would read back as that pointer (fuzz `writer`).
