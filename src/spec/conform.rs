@@ -1961,6 +1961,35 @@ impl<'n> Conformer<'n> {
                     return Fate::Keep;
                 }
             }
+            // 7.x file paths are valid URL strings (§2.12, 7.0.17): a path
+            // that is not one is written as conversion writes a 5.5.1 file
+            // reference, percent-encoded (a local path as a `file` URL).
+            Kind::FilePath if self.family == Family::V7 => {
+                if let Some(fixed) = crate::convert::text::file_uri(raw)
+                    .filter(|f| payload::check(kind, None, f, self.family).is_none())
+                {
+                    self.repair(
+                        line,
+                        RepairKind::Payload,
+                        format!("{here} {raw:?}: {why}; written as {fixed}"),
+                    );
+                    s.payload = Payload::Text(fixed.into());
+                    return Fate::Keep;
+                }
+            }
+            // 7.x coordinates (§2.15, §2.16, 7.0.17): the canonical form of
+            // the same degrees, when it is valid.
+            Kind::Lat | Kind::Long if self.family == Family::V7 => {
+                if let Some(fixed) = payload::canonical_coordinate(kind, raw, self.family) {
+                    self.repair(
+                        line,
+                        RepairKind::Payload,
+                        format!("{here} {raw:?}: {why}; written as {fixed}"),
+                    );
+                    s.payload = Payload::Text(fixed.into());
+                    return Fate::Keep;
+                }
+            }
             // An event with text: `Y` and a note; text where none belongs:
             // a note.
             Kind::Y | Kind::None if self.takes(ty, "NOTE").is_some() => {

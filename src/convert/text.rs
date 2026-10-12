@@ -33,11 +33,12 @@ pub(super) fn without_escapes(text: &str) -> Option<String> {
     Some(out)
 }
 
-/// The bytes a 7.x file reference writes as themselves; any other is
-/// percent-encoded. Non-ASCII characters are kept, as a WHATWG URL string
-/// admits them (§2.12).
+/// The characters a 7.x file reference writes as themselves; any other is
+/// percent-encoded. Non-ASCII URL code points are kept, as a WHATWG valid
+/// URL string admits them (§2.12, 7.0.17); `:`, `?`, `@` and `#`, which a
+/// local path would read as a scheme, a query or a fragment, are not.
 fn is_path_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || "-._~!$&'()*+,;=/".contains(c) || !c.is_ascii()
+    !matches!(c, ':' | '?' | '@' | '#') && crate::spec::payload::is_url_code_point(c)
 }
 
 /// Appends `c`, percent-encoded unless it is a path character.
@@ -70,13 +71,14 @@ fn is_url(s: &str) -> bool {
 }
 
 /// A 5.5.1 file reference (any text naming a file) as a 7.x file path, a
-/// URI reference (§2.12): a URL stays as it is; a Windows drive path
+/// valid URL string (§2.12): a URL stays as it is; a Windows drive path
 /// (`C:\x`) becomes `file:///C:/x`, a network path (`\\host\x`)
 /// `file://host/x`, an absolute path (`/x`) `file:///x`; backslashes
-/// become slashes; characters a URI does not permit, `%` not starting an
-/// encoding, and `:` (which would start a scheme), are percent-encoded.
+/// become slashes; characters a URL string does not permit, `%` not
+/// starting an encoding, and `:` (which would start a scheme), are
+/// percent-encoded.
 /// `None` when the reference is a valid one already.
-pub(super) fn file_uri(path: &str) -> Option<String> {
+pub(crate) fn file_uri(path: &str) -> Option<String> {
     if path.is_empty() || is_url(path) {
         return None;
     }
@@ -309,6 +311,10 @@ mod tests {
             ),
             ("100%25 done", "100%25%20done"),
             ("50% off", "50%25%20off"),
+            // Non-ASCII URL code points stay as they are (7.0.17); a
+            // noncharacter is no URL code point.
+            ("photos/\u{e9}t\u{e9} 1.jpg", "photos/\u{e9}t\u{e9}%201.jpg"),
+            ("a\u{fdd0}.jpg", "a%EF%B7%90.jpg"),
         ];
         for (from, to) in cases {
             assert_eq!(file_uri(from).as_deref(), Some(to), "{from}");

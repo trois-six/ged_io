@@ -24,8 +24,11 @@
 //!    no weeks), and a number alone counts years, as the test-files convert
 //!    it.
 //! 10. Times compare with zero-padded fields: `2:5` equals `02:05`.
-//! 11. File paths compare their percent-encodings without case (RFC 3986
-//!     §6.2.2.1): `%3a` equals `%3A`.
+//! 11. File paths compare as the path they name: a 7.x `FILE` is a
+//!     percent-encoded URL string and its GEDZIP entry name, like a 5.5.1
+//!     file reference, is not (7.0.17), so percent-encodings are decoded
+//!     (`%3a`, `%3A` and `:` are equal), backslashes are slashes, and a
+//!     `file` URL is its path (`file:///C:/a` is `C:/a`).
 //!
 //! Conversion mode (5.5.1 against its 7.0 conversion) also treats a NOTE
 //! record referenced once, an inline NOTE and a single-use SNOTE as equal, and
@@ -378,27 +381,42 @@ pub fn normalise_value(tag: &str, s: &str, v: Version) -> String {
         s = normalise_time(&s);
     }
     if tag == "FILE" {
-        s = normalise_percent(&s);
+        s = normalise_file(&s);
     }
     s
 }
 
-/// Rule 11: the hexadecimal digits of percent-encodings in upper case.
-fn normalise_percent(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        out.push(c);
-        if c == '%' {
-            for _ in 0..2 {
-                match chars.next_if(char::is_ascii_hexdigit) {
-                    Some(h) => out.push(h.to_ascii_uppercase()),
-                    None => break,
-                }
-            }
+/// Rule 11: a file reference as the path it names.
+fn normalise_file(s: &str) -> String {
+    let s = s.replace('\\', "/");
+    let lower = s.to_ascii_lowercase();
+    let s = if let Some(rest) = lower.strip_prefix("file:///").map(|_| &s[8..]) {
+        let b = rest.as_bytes();
+        let drive = b.first().is_some_and(u8::is_ascii_alphabetic) && b.get(1) == Some(&b':');
+        if drive {
+            rest.to_string()
+        } else {
+            format!("/{rest}")
+        }
+    } else if lower.starts_with("file://") {
+        format!("//{}", &s[7..])
+    } else {
+        s
+    };
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while let Some(&c) = b.get(i) {
+        let hex = |at: usize| b.get(at).and_then(|&h| char::from(h).to_digit(16));
+        if let (b'%', Some(hi), Some(lo)) = (c, hex(i + 1), hex(i + 2)) {
+            out.push(u8::try_from(hi * 16 + lo).unwrap_or(b'%'));
+            i += 3;
+        } else {
+            out.push(c);
+            i += 1;
         }
     }
-    out
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// The keywords, calendars, months and epochs of dates, which compare
@@ -932,7 +950,14 @@ mod tests {
         assert_ne!(age("1y"), age("1m"));
         let file = |s: &str| normalise_value("FILE", s, Version::V70);
         assert_eq!(file("https%3a/x%5b"), file("https%3A/x%5B"));
-        assert_ne!(file("a%3a"), file("a:"));
+        assert_eq!(file("a%3a"), file("a:"));
+        assert_eq!(
+            file("C:\\photos\\a b.jpg"),
+            file("file:///C:/photos/a%20b.jpg")
+        );
+        assert_eq!(file("/srv/a.jpg"), file("file:///srv/a.jpg"));
+        assert_eq!(file("\\\\host\\a.jpg"), file("file://host/a.jpg"));
+        assert_ne!(file("a.jpg"), file("b.jpg"));
         let time = |s: &str| normalise_value("TIME", s, Version::V70);
         assert_eq!(time("2:5"), time("02:05"));
         assert_eq!(time("2:50:00.00z"), time("02:50:00.00Z"));

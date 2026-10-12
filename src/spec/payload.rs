@@ -202,10 +202,12 @@ pub(crate) fn check(
         Kind::Lang => (!is_language_tag(text)).then(|| "not a BCP 47 language tag".into()),
         Kind::MediaType => (!is_media_type(text)).then(|| "not a media type".into()),
         Kind::FilePath => file_path(text, family),
-        Kind::Uri => (!is_absolute_uri(text)).then(|| "not an absolute URI".into()),
-        Kind::Lat => (!is_coordinate(text, ['N', 'S'], 90)).then(|| "not a latitude".into()),
-        Kind::Long => (!is_coordinate(text, ['E', 'W'], 180)).then(|| "not a longitude".into()),
-        Kind::TagDef => (!is_tag_def(text)).then(|| "not an extension tag and its URI".into()),
+        Kind::Uri => (!is_uri_reference(text)).then(|| "not a URI reference".into()),
+        Kind::Lat => (!is_latitude(text, family)).then(|| "not a latitude".into()),
+        Kind::Long => (!is_longitude(text, family)).then(|| "not a longitude".into()),
+        Kind::TagDef => {
+            (!is_tag_def(text)).then(|| "not an extension tag and a URI reference".into())
+        }
         Kind::Enum => set.and_then(|s| enum_value(s, text, family)),
         Kind::ListEnum => set.and_then(|s| {
             list_items(text)
@@ -328,12 +330,34 @@ fn is_media_type(s: &str) -> bool {
         })
 }
 
-/// Whether byte `c` may appear in a URI as itself (RFC 3986 unreserved,
-/// sub-delims, `:`, `@`, `/`, `?`, `#`, `[`, `]`), as part of a
-/// percent-encoding, or as part of a non-ASCII character, which a WHATWG URL
-/// string admits (7.x §2.12).
-fn is_uri_char(c: u8) -> bool {
-    c.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=:@/?#[]%".contains(&c) || c >= 0x80
+/// Whether `c` is a URL code point of the WHATWG URL standard, which a
+/// valid URL string writes as itself: an ASCII letter or digit, one of
+/// `!$&'()*+,-./:;=?@_~`, or a character from U+00A0 to U+10FFFD that is
+/// not a noncharacter (7.x §2.12: a file path "can contain non-ASCII
+/// characters that are permitted in a valid URL string").
+pub(crate) fn is_url_code_point(c: char) -> bool {
+    if c.is_ascii() {
+        return c.is_ascii_alphanumeric() || "!$&'()*+,-./:;=?@_~".contains(c);
+    }
+    let n = u32::from(c);
+    n >= 0xA0 && !(0xFDD0..=0xFDEF).contains(&n) && n & 0xFFFE != 0xFFFE
+}
+
+/// Whether byte `c` is an RFC 3986 character: unreserved, a sub-delim,
+/// `:`, `@`, `/`, `?`, `#`, `[`, `]`, or the `%` of a percent-encoding.
+fn is_rfc3986_char(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=:@/?#[]%".contains(&c)
+}
+
+/// Whether every `%` of `s` starts a percent-encoding (two hexadecimal
+/// digits).
+fn percents_ok(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.iter().enumerate().all(|(i, &c)| {
+        c != b'%'
+            || b.get(i + 1..i + 3)
+                .is_some_and(|h| h.iter().all(u8::is_ascii_hexdigit))
+    })
 }
 
 /// The scheme of a URI reference, when it has one (RFC 3986 §3.1).
@@ -346,34 +370,79 @@ fn scheme(s: &str) -> Option<&str> {
     .then_some(scheme)
 }
 
-/// Whether every `%` starts a percent-encoding and every character is a
-/// URI character.
-fn uri_chars_ok(s: &str) -> bool {
-    let b = s.as_bytes();
-    b.iter().all(|&c| is_uri_char(c))
-        && b.iter().enumerate().all(|(i, &c)| {
-            c != b'%'
-                || b.get(i + 1..i + 3)
-                    .is_some_and(|h| h.iter().all(u8::is_ascii_hexdigit))
-        })
+/// The authority of a URI reference (`//host` after the scheme, if any)
+/// and where it ends, when it has one.
+fn authority(s: &str) -> Option<(usize, usize)> {
+    let after_scheme = scheme(s).map_or(0, |sc| sc.len() + 1);
+    let rest = s.get(after_scheme..)?.strip_prefix("//")?;
+    let start = after_scheme + 2;
+    let len = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    Some((start, start + len))
 }
 
-/// RFC 3986 `absolute-URI`, loosely: a scheme, then URI characters.
-fn is_absolute_uri(s: &str) -> bool {
-    scheme(s).is_some() && uri_chars_ok(s)
+/// Whether `[` and `]` appear only in the authority of `s`, around an IP
+/// literal host, as RFC 3986 and the WHATWG URL standard admit them.
+fn brackets_ok(s: &str) -> bool {
+    if !s.contains(['[', ']']) {
+        return true;
+    }
+    let Some((start, end)) = authority(s) else {
+        return false;
+    };
+    let host = &s[start..end];
+    let host = host.rsplit_once('@').map_or(host, |(_, h)| h);
+    let outside = s[..start].contains(['[', ']']) || s[end..].contains(['[', ']']);
+    !outside
+        && host.starts_with('[')
+        && host.matches('[').count() == 1
+        && host.matches(']').count() == 1
+        && host
+            .find(']')
+            .is_some_and(|at| host[at + 1..].is_empty() || host[at + 1..].starts_with(':'))
 }
 
-/// 7.x `FilePath` (§2.12): a URI reference that is an `ftp`, `http`,
-/// `https` or `file` URL, or a relative reference that does not start with
-/// `/`, has no `..` segment, no backslash (escaped or not), no query and
-/// no fragment. A `file` URL names a host without a port (RFC 8089).
-/// 5.5.1 `MULTIMEDIA_FILE_REFERENCE` is any text.
+/// RFC 3986 `URI-reference` (§4.1), the 7.0.17 `URI` data type (7.x
+/// §2.13): ASCII only, every character an RFC 3986 one, percent-encodings
+/// whole, `#` at most once (before the fragment), brackets only around an
+/// IP literal host, and, without a scheme, no `:` in the first path
+/// segment (`path-noscheme`). A relative reference is one (it "should be
+/// avoided" in shared datasets, which is no grammar rule).
+pub(crate) fn is_uri_reference(s: &str) -> bool {
+    if !s.bytes().all(is_rfc3986_char) || !percents_ok(s) || s.matches('#').count() > 1 {
+        return false;
+    }
+    if !brackets_ok(s) {
+        return false;
+    }
+    if scheme(s).is_none() && authority(s).is_none() {
+        let first = s.split(['/', '?', '#']).next().unwrap_or("");
+        if first.contains(':') {
+            return false;
+        }
+    }
+    true
+}
+
+/// 7.x `FilePath` (§2.12): a "valid URL string" of the WHATWG URL standard
+/// that is an `ftp`, `http`, `https` or `file` URL, or a relative URL that
+/// does not start with `/`, has no `..` segment, no backslash (escaped or
+/// not), no query and no fragment. Every character is a URL code point
+/// ([`is_url_code_point`], non-ASCII ones included) or the `%` of a
+/// percent-encoding; `[` and `]` only around an IP literal host. A `file`
+/// URL names a host without a port (RFC 8089). 5.5.1
+/// `MULTIMEDIA_FILE_REFERENCE` is any text.
 fn file_path(s: &str, family: Family) -> Option<String> {
     if family == Family::V551 || s.is_empty() {
         return None;
     }
-    if !uri_chars_ok(s) {
-        return Some("not a URI reference".into());
+    let chars_ok = s
+        .chars()
+        .all(|c| is_url_code_point(c) || matches!(c, '%' | '#' | '[' | ']'))
+        && percents_ok(s)
+        && s.matches('#').count() <= 1
+        && brackets_ok(s);
+    if !chars_ok {
+        return Some("not a valid URL string".into());
     }
     if let Some(scheme) = scheme(s) {
         let scheme = scheme.to_ascii_lowercase();
@@ -401,30 +470,80 @@ fn file_path(s: &str, family: Family) -> Option<String> {
     } else if s.contains(['?', '#']) {
         Some("a local file path has no query or fragment".into())
     } else if s.split('/').next().is_some_and(|seg| seg.contains(':')) {
-        Some("not a URI reference".into())
+        Some("not a valid URL string".into())
     } else {
         None
     }
 }
 
-/// `N`/`S` (or `E`/`W`), then a decimal number of degrees up to `max`.
-fn is_coordinate(s: &str, dirs: [char; 2], max: u32) -> bool {
+/// `N`/`S` (or `E`/`W`), then a decimal number of degrees up to `max`,
+/// whose whole part has at most `digits` digits, and whose fraction, when
+/// there is a `.`, has one digit or more.
+///
+/// 7.x (§2.15, §2.16, 7.0.17 with the 7.0.18 correction): `("N" / "S")
+/// upto90 [ "." 1*digit ]` with at most two digits before the point, and
+/// `("E" / "W") upto180 [ "." 1*digit ]` with at most three, the degrees
+/// "limited by definition" to 90 and 180. 5.5.1 `PLACE_LATITUDE` and
+/// `PLACE_LONGITUDE` (p. 58) state no grammar beyond their example; up to
+/// three digits are read for both.
+fn is_coordinate(s: &str, dirs: [char; 2], max: u32, digits: usize) -> bool {
     let Some(rest) = s.strip_prefix(dirs) else {
         return false;
     };
     let (int, frac) = rest.split_once('.').unwrap_or((rest, "0"));
     is_digits(int)
         && is_digits(frac)
-        && int.len() <= 3
+        && int.len() <= digits
         && int
             .parse::<u32>()
             .is_ok_and(|d| d < max || d == max && frac.bytes().all(|b| b == b'0'))
 }
 
-/// 7.x `TagDef`: an extension tag, a space, an absolute URI.
+/// Whether `s` is a latitude of `family`.
+fn is_latitude(s: &str, family: Family) -> bool {
+    let digits = if family == Family::V7 { 2 } else { 3 };
+    is_coordinate(s, ['N', 'S'], 90, digits)
+}
+
+/// Whether `s` is a longitude of `family`.
+fn is_longitude(s: &str, _family: Family) -> bool {
+    is_coordinate(s, ['E', 'W'], 180, 3)
+}
+
+/// A 7.x coordinate that is valid once written in its canonical form: the
+/// direction in upper case, no leading zero before the degrees but one.
+/// `None` when that form is the text itself or is no valid coordinate.
+pub(crate) fn canonical_coordinate(kind: Kind, text: &str, family: Family) -> Option<String> {
+    let mut chars = text.chars();
+    let dir = chars.next()?.to_ascii_uppercase();
+    let rest = chars.as_str();
+    let (int, frac) = match rest.split_once('.') {
+        Some((i, f)) => (i, Some(f)),
+        None => (rest, None),
+    };
+    let trimmed = int.trim_start_matches('0');
+    let int = if trimmed.is_empty() && !int.is_empty() {
+        "0"
+    } else {
+        trimmed
+    };
+    let fixed = match frac {
+        Some(f) => format!("{dir}{int}.{f}"),
+        None => format!("{dir}{int}"),
+    };
+    let ok = match kind {
+        Kind::Lat => is_latitude(&fixed, family),
+        Kind::Long => is_longitude(&fixed, family),
+        _ => false,
+    };
+    (ok && fixed != text).then_some(fixed)
+}
+
+/// 7.x `TagDef` (§2.14, 7.0.17): an extension tag, a space, and a URI
+/// reference ([`is_uri_reference`]).
 fn is_tag_def(s: &str) -> bool {
     s.split_once(' ')
-        .is_some_and(|(tag, uri)| is_ext_tag(tag) && is_absolute_uri(uri))
+        .is_some_and(|(tag, uri)| is_ext_tag(tag) && !uri.is_empty() && is_uri_reference(uri))
 }
 
 /// The payload kinds for which an empty payload is still a value.
@@ -508,13 +627,174 @@ mod tests {
         assert!(file_path("c:\\dir\\file", Family::V551).is_none());
     }
 
+    /// 7.x coordinates follow the ABNF of 7.0.17 as 7.0.18 corrected it
+    /// (§2.15, §2.16); 5.5.1 reads up to three digits of degrees in both.
     #[test]
     fn coordinates() {
-        assert!(is_coordinate("N18.150944", ['N', 'S'], 90));
-        assert!(is_coordinate("S90", ['N', 'S'], 90));
-        assert!(!is_coordinate("N90.5", ['N', 'S'], 90));
-        assert!(!is_coordinate("W200", ['E', 'W'], 180));
-        assert!(!is_coordinate("18.15", ['N', 'S'], 90));
+        let lat = |t: &str| is_latitude(t, Family::V7);
+        let long = |t: &str| is_longitude(t, Family::V7);
+        // The examples of the specification.
+        assert!(lat("N18.150944"));
+        assert!(long("E168.150944"));
+        for ok in ["S90", "N90.000", "N0", "N05", "N89.9", "S8.1"] {
+            assert!(lat(ok), "{ok:?}");
+        }
+        for bad in [
+            "N90.5", "N91", "N090", "N005", "N18.", "N.5", "18.15", "n18.15", "N 18", "N18,15",
+            "E18", "N+18", "N-18", "N1e2", "",
+        ] {
+            assert!(!lat(bad), "{bad:?}");
+        }
+        for ok in [
+            "W180", "E180.0", "E0", "E05", "E099", "E100", "E179.99", "W9", "E17",
+        ] {
+            assert!(long(ok), "{ok:?}");
+        }
+        // 7.0.17 spelled the longitude with `N`/`S`, which 7.0.18 corrected.
+        for bad in [
+            "W200", "E181", "E180.5", "E0180", "E1800", "N18", "S18", "E18.", "e18", "",
+        ] {
+            assert!(!long(bad), "{bad:?}");
+        }
+        // 5.5.1 is as it was.
+        assert!(is_latitude("N090", Family::V551));
+        assert!(!is_latitude("N090", Family::V7));
+        assert!(check(Kind::Lat, None, "N005", Family::V551).is_none());
+        assert_eq!(
+            check(Kind::Lat, None, "N005", Family::V7).as_deref(),
+            Some("not a latitude")
+        );
+    }
+
+    #[test]
+    fn canonical_coordinates() {
+        let fix = |kind, t: &str| canonical_coordinate(kind, t, Family::V7);
+        assert_eq!(fix(Kind::Lat, "N005").as_deref(), Some("N5"));
+        assert_eq!(fix(Kind::Lat, "n18.150944").as_deref(), Some("N18.150944"));
+        assert_eq!(fix(Kind::Lat, "S000.5").as_deref(), Some("S0.5"));
+        assert_eq!(fix(Kind::Long, "w0168.15").as_deref(), Some("W168.15"));
+        // Valid already, or not a coordinate in any form.
+        assert_eq!(fix(Kind::Lat, "N18"), None);
+        assert_eq!(fix(Kind::Lat, "N090.5"), None);
+        assert_eq!(fix(Kind::Long, "E181"), None);
+        assert_eq!(fix(Kind::Lat, "X18"), None);
+        assert_eq!(fix(Kind::Lat, ""), None);
+    }
+
+    /// The 7.0.17 `URI` data type: an RFC 3986 URI reference (§2.13).
+    #[test]
+    fn uri_references() {
+        for ok in [
+            "https://gedcom.io/terms/v7/record-INDI",
+            "http://www.familysearch.org/ark:/61903/",
+            "urn:uuid:3c1d8c58-6e0b-4b0f-a2f9-1d8e3f0b7c11",
+            "https://[::1]:8080/a?b=c#d",
+            "mailto:someone@example.com",
+            "relative/path",
+            "./a:b",
+            "#fragment",
+            "?query",
+            "//host/path",
+            "a%20b",
+            "",
+        ] {
+            assert!(is_uri_reference(ok), "{ok:?}");
+        }
+        for bad in [
+            "has space",
+            "https://example.com/caf\u{e9}",
+            "a%2",
+            "a%zz",
+            "a#b#c",
+            "1a:b",
+            "https://example.com/[x]",
+            "x[1]",
+            "a\\b",
+            "<https://example.com>",
+        ] {
+            assert!(!is_uri_reference(bad), "{bad:?}");
+        }
+        assert_eq!(
+            check(Kind::Uri, None, "relative/type", Family::V7),
+            None,
+            "a relative URI is a URI reference"
+        );
+    }
+
+    /// The 7.0.17 `TagDef` data type: `extTag D URI-reference` (§2.14).
+    #[test]
+    fn tag_definitions() {
+        for ok in [
+            "_SKYPEID http://xmlns.com/foaf/0.1/skypeID",
+            "_MEMBER http://xmlns.com/foaf/0.1/member",
+            "_LOC https://gedcom.io/terms/v7.1/record-LOC",
+            "_X relative/uri",
+        ] {
+            assert!(is_tag_def(ok), "{ok:?}");
+        }
+        for bad in [
+            "SKYPEID http://xmlns.com/foaf/0.1/skypeID",
+            "_SKYPEID",
+            "_SKYPEID ",
+            "_SKYPEID  http://xmlns.com/foaf/0.1/skypeID",
+            "_SKYPEID http://xmlns.com/foaf/0.1/skype ID",
+            "_skype http://example.com/",
+            "_X 1a:b",
+        ] {
+            assert!(!is_tag_def(bad), "{bad:?}");
+        }
+    }
+
+    /// File paths are WHATWG valid URL strings (§2.12, 7.0.17): non-ASCII
+    /// URL code points as themselves, anything else percent-encoded.
+    #[test]
+    fn file_paths_are_url_strings() {
+        for ok in [
+            "photos/\u{e9}t\u{e9}.jpg",
+            "photos/\u{65e5}\u{672c}.png",
+            "photos/a%20b.jpg",
+            "photos/%E2%82%AC.jpg",
+            "https://[2001:db8::1]/a.jpg",
+            "https://example.com/a.jpg#page=2",
+            "file:///C:/photos/a%20b.jpg",
+        ] {
+            assert!(file_path(ok, Family::V7).is_none(), "{ok:?}");
+        }
+        for bad in [
+            "photos/a b.jpg",
+            "photos/a\u{fdd0}.jpg",
+            "photos/a\u{1fffe}.jpg",
+            "photos/a\u{9f}.jpg",
+            "photos/a[1].jpg",
+            "photos/a%2.jpg",
+            "photos/a|b.jpg",
+            "photos/a\"b.jpg",
+            "https://example.com/a#b#c",
+        ] {
+            assert!(file_path(bad, Family::V7).is_some(), "{bad:?}");
+        }
+        for c in ['a', '-', '~', '\u{a0}', '\u{10fffd}', '\u{fffd}'] {
+            assert!(is_url_code_point(c), "{c:?}");
+        }
+        for c in [
+            ' ',
+            '"',
+            '#',
+            '%',
+            '<',
+            '[',
+            '\\',
+            '^',
+            '`',
+            '{',
+            '|',
+            '\u{9f}',
+            '\u{fdef}',
+            '\u{ffff}',
+            '\u{10ffff}',
+        ] {
+            assert!(!is_url_code_point(c), "{c:?}");
+        }
     }
 
     #[test]

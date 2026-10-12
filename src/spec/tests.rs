@@ -258,6 +258,35 @@ fn payloads() {
         found("0 HEAD\n1 GEDC\n2 VERS 7.0\n1 SCHMA\n2 TAG X y\n0 TRLR\n"),
         [(5, K::Payload)]
     );
+    // The data types 7.0.17 defined (§2.12–2.16, 7.0.18 for the longitude).
+    let map = |lati: &str, long: &str| {
+        v70(&format!(
+            "0 @I1@ INDI\n1 RESI\n2 PLAC x\n3 MAP\n4 LATI {lati}\n4 LONG {long}\n"
+        ))
+    };
+    assert_eq!(map("N18.150944", "E168.150944"), []);
+    assert_eq!(map("N090", "W099"), [(8, K::Payload)]);
+    assert_eq!(map("S90", "E180.5"), [(9, K::Payload)]);
+    assert_eq!(
+        v551("0 @I1@ INDI\n1 RESI\n2 PLAC x\n3 MAP\n4 LATI N090\n4 LONG W099\n"),
+        []
+    );
+    let exid = |ty: &str| v70(&format!("0 @I1@ INDI\n1 EXID 123\n2 TYPE {ty}\n"));
+    assert_eq!(exid("https://www.familysearch.org/ark:/61903/"), []);
+    assert_eq!(exid("local/registry"), []);
+    assert_eq!(exid("not a uri"), [(6, K::Payload)]);
+    assert_eq!(exid("https://example.com/caf\u{e9}"), [(6, K::Payload)]);
+    let tag = |def: &str| found(&format!("{H70}1 SCHMA\n2 TAG {def}\n0 TRLR\n"));
+    assert_eq!(tag("_SKYPEID http://xmlns.com/foaf/0.1/skypeID"), []);
+    assert_eq!(tag("_LOCAL vocabulary/term"), []);
+    assert_eq!(tag("_X has space"), [(5, K::Payload)]);
+    let file = |path: &str| v70(&format!("0 @O1@ OBJE\n1 FILE {path}\n2 FORM image/jpeg\n"));
+    assert_eq!(file("photos/\u{e9}t\u{e9}.jpg"), []);
+    assert_eq!(file("photos/a%20b.jpg"), []);
+    assert_eq!(file("photos/a[1].jpg"), [(5, K::Payload)]);
+    // 7.0.17: other `text/` media types of a note are extensions that need
+    // no extension tag (§MIME).
+    assert_eq!(v70("0 @N1@ SNOTE # Title\n1 MIME text/markdown\n"), []);
     assert_eq!(v551("0 @I1@ INDI\n1 DEAT\n2 AGE > 79y\n"), []);
     assert_eq!(v551("0 @I1@ INDI\n1 DEAT\n2 AGE <79y\n"), []);
     assert_eq!(v551("0 @I1@ INDI\n1 DEAT\n2 DATE (some day)\n"), []);
@@ -503,6 +532,30 @@ fn repair_d_payloads() {
     let (k, out) = repair70("0 @N1@ SNOTE x\n1 MIME image/png\n");
     assert_eq!(k, [R::Payload]);
     assert!(out.contains("1 _MIME image/png\n"), "{out}");
+    // 7.x file paths are valid URL strings (7.0.17): percent-encoded as
+    // conversion writes them; a local path as a `file` URL.
+    let (k, out) = repair70("0 @O1@ OBJE\n1 FILE photos/my pic.jpg\n2 FORM image/jpeg\n");
+    assert_eq!(k, [R::Payload]);
+    assert!(out.contains("1 FILE photos/my%20pic.jpg\n"), "{out}");
+    let (k, out) = repair70("0 @O1@ OBJE\n1 FILE /media/a.jpg\n2 FORM image/jpeg\n");
+    assert_eq!(k, [R::Payload]);
+    assert!(out.contains("1 FILE file:///media/a.jpg\n"), "{out}");
+    let (k, out) = repair70("0 @O1@ OBJE\n1 FILE media/../a.jpg\n2 FORM image/jpeg\n");
+    assert_eq!(k, [R::Payload, R::Required]);
+    assert!(
+        out.contains("0 @O1@ _OBJE\n1 _FILE media/../a.jpg\n"),
+        "{out}"
+    );
+    // 7.x coordinates (7.0.17): the canonical form of the same degrees.
+    let (k, out) = repair70("0 @I1@ INDI\n1 RESI\n2 PLAC x\n3 MAP\n4 LATI n005.5\n4 LONG W0099\n");
+    assert_eq!(k, [R::Payload, R::Payload]);
+    assert!(out.contains("4 LATI N5.5\n4 LONG W99\n"), "{out}");
+    let (k, out) = repair70("0 @I1@ INDI\n1 RESI\n2 PLAC x\n3 MAP\n4 LATI N91\n4 LONG E1\n");
+    assert_eq!(k, [R::Payload, R::Required]);
+    assert!(out.contains("3 _MAP\n4 _LATI N91\n4 LONG E1\n"), "{out}");
+    // 5.5.1 is as it was.
+    let (k, _) = repair551("0 @I1@ INDI\n1 RESI\n2 PLAC x\n3 MAP\n4 LATI N090\n4 LONG W099\n");
+    assert_eq!(k, []);
     // An individual's EVEN keeps its 5.5.1 descriptor (551-errata.tsv).
     let (k, out) =
         repair551("0 @I1@ INDI\n1 EVEN Appointed chairperson\n2 TYPE Civic appointment\n");

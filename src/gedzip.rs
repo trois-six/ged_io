@@ -11,6 +11,15 @@
 //!
 //! GEDZIP files should use the `.gdz` file extension.
 //!
+//! Entry names are UTF-8 and not percent-escaped, while a `FILE` payload
+//! is a URL string that percent-escapes what it cannot hold (§4, 7.0.17):
+//! a reference finds its entry once decoded
+//! ([`GedzipReader::find_entry`]), and a media file added by its `FILE`
+//! payload is stored under the decoded name
+//! ([`GedzipWriter::add_media_file`]). Zip can encrypt entry contents (not
+//! their names and sizes); this crate reads and writes no encrypted entry:
+//! reading one fails with [`GedzipError::Zip`].
+//!
 //! An archive's dataset is GEDCOM 7.x: [`GedzipWriter::write_dataset`]
 //! writes a 5.5.1 dataset as 7.0, converting it ([`crate::convert`]), in
 //! UTF-8 with a byte order mark. Media names follow the GEDZIP rules: the
@@ -251,9 +260,10 @@ impl<R: Read + Seek> GedzipReader<R> {
     /// The name of the archive entry a `FILE` reference points at, if the
     /// archive holds it.
     ///
-    /// GEDZIP names are case-sensitive (§4), so the exact name comes first,
-    /// then the name the reference gives once decoded (GEDCOM 7.x `FILE`
-    /// values are URI references, so a space is `%20`). Producers that do
+    /// GEDZIP names are case-sensitive and not percent-escaped (§4), so the
+    /// exact name comes first, then the name the reference gives once
+    /// decoded (GEDCOM 7.x `FILE` values are URL strings, so a space is
+    /// `%20`, 7.0.17). Producers that do
     /// not follow the rules are read too: with backslashes or forward
     /// slashes, a leading `./` or `/`, and in any letter case. The names of
     /// directories are no entries.
@@ -487,11 +497,17 @@ impl<W: Write + Seek> GedzipWriter<W> {
 
     /// Adds a media file to the archive.
     ///
-    /// The file name should match the FILE path used in the GEDCOM data.
+    /// `name` is the `FILE` payload that names the file in the dataset, or
+    /// its entry name. GEDZIP entry names are UTF-8 and not percent-escaped,
+    /// while a `FILE` payload percent-escapes what a URL string cannot hold
+    /// (§4, 7.0.17): the entry is named by `name` with its
+    /// percent-encodings decoded (`photos/a%20b.jpg` is the entry
+    /// `photos/a b.jpg`), backslashes as slashes and no leading `./` or
+    /// `/`, as [`GedzipReader::find_entry`] matches them.
     ///
     /// # Arguments
     ///
-    /// * `name` - The file name (path) within the archive
+    /// * `name` - The `FILE` payload naming the file, or its entry name
     /// * `bytes` - The file contents
     ///
     /// # Errors
@@ -503,10 +519,11 @@ impl<W: Write + Seek> GedzipWriter<W> {
         if is_reserved(name) {
             return Err(GedzipError::ReservedName(name.to_string()));
         }
+        let entry = entry_key(name);
         let options =
-            zip::write::FileOptions::<()>::default().compression_method(media_compression(name));
+            zip::write::FileOptions::<()>::default().compression_method(media_compression(&entry));
 
-        self.zip.start_file(name, options)?;
+        self.zip.start_file(entry, options)?;
         self.zip.write_all(bytes)?;
         Ok(())
     }
@@ -550,7 +567,8 @@ impl<W: Write + Seek> GedzipWriter<W> {
 
 /// How to store a media file: formats that are already compressed (most
 /// images, audio, video, PDF and archives) gain nothing from Deflate and cost
-/// time on both ends, so they are stored as they are.
+/// time on both ends, so they are stored as they are, as GEDZIP suggests
+/// (§4, 7.0.17); `gedcom.ged` and other text is deflated.
 fn media_compression(name: &str) -> CompressionMethod {
     const COMPRESSED: [&str; 18] = [
         "jpg", "jpeg", "png", "gif", "webp", "avif", "heic", "jp2", "pdf", "mp3", "m4a", "ogg",
