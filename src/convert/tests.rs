@@ -251,3 +251,18 @@ fn conversion_output_is_written_again_as_it_is() {
         }
     }
 }
+
+/// A date's phrase keeps the 5.5.1 wording the date was converted from,
+/// escapes included: it is the date's words, not text to convert (fuzz
+/// `convert`).
+#[test]
+fn a_date_phrase_keeps_its_escapes() {
+    let body = "0 @I1@ INDI\n1 BIRT\n2 DATE @#DJULIAN@ 15 APR 1699/00\n1 NOTE seen @#DJULIAN@ x\n";
+    for out in [write("5.5.1", body, V70), write_tree("5.5.1", body, V70)] {
+        has(
+            &out,
+            "2 DATE JULIAN 15 APR 1699\n3 PHRASE @@#DJULIAN@ 15 APR 1699/00\n",
+        );
+        has(&out, "1 NOTE seen JULIAN x\n");
+    }
+}

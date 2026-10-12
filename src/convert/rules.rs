@@ -232,9 +232,7 @@ impl Converter {
             Direction::Up => {
                 if pointer.is_some_and(|p| p == Xref::VOID) && self.void.is_some()
                     || text.is_some_and(|t| {
-                        !self.options.keep_obsolete
-                            && t.contains("@#")
-                            && !matches!(tag, "DATE" | "AGE" | "TIME")
+                        !self.options.keep_obsolete && t.contains("@#") && !is_value(tag, parent)
                     })
                 {
                     return true;
@@ -334,7 +332,7 @@ impl Converter {
             record: r.tag.as_str().to_string(),
             stillborn: false,
         };
-        self.payload(r, &mut cx);
+        self.payload(r, "", &mut cx);
         self.children(r, "", &mut cx);
         if self.direction == Direction::Up && cx.stillborn && is(r, "INDI") {
             Self::stillborn_death(r, cx.out);
@@ -455,7 +453,7 @@ impl Converter {
     fn children(&self, s: &mut Structure, parent: &str, cx: &mut Cx<'_>) {
         let tag = s.tag.as_str().to_string();
         for c in &mut s.substructures {
-            self.payload(c, cx);
+            self.payload(c, &tag, cx);
             match self.direction {
                 Direction::Up => self.up(c, &tag, parent, cx),
                 Direction::Down => self.down(c, &tag, cx),
@@ -466,9 +464,9 @@ impl Converter {
         }
     }
 
-    /// Converts the payload of `s` itself: identifiers renamed, text
-    /// escapes (5.5.1), dates and ages.
-    fn payload(&self, s: &mut Structure, cx: &mut Cx<'_>) {
+    /// Converts the payload of `s` (under `parent`) itself: identifiers
+    /// renamed, text escapes (5.5.1), dates and ages.
+    fn payload(&self, s: &mut Structure, parent: &str, cx: &mut Cx<'_>) {
         match &mut s.payload {
             Payload::Pointer(p) => {
                 if let (Direction::Up, Some(void)) = (self.direction, &self.void) {
@@ -479,10 +477,9 @@ impl Converter {
                 }
             }
             Payload::Text(t) => {
-                let tag = s.tag.as_str();
                 if self.direction == Direction::Up
-                    && !matches!(tag, "DATE" | "AGE" | "TIME")
                     && !self.options.keep_obsolete
+                    && !is_value(s.tag.as_str(), parent)
                 {
                     if let Some(new) = text::without_escapes(t) {
                         *t = new.into();
@@ -1068,6 +1065,15 @@ struct Cx<'a> {
     record: String,
     /// Whether an age of the record says stillborn.
     stillborn: bool,
+}
+
+/// Whether a structure tagged `tag` under `parent` holds a value or the
+/// words of a value (a date's `PHRASE`, which keeps the 5.5.1 wording,
+/// escapes included, as the date was converted from it): text whose
+/// escapes are not converted as text.
+fn is_value(tag: &str, parent: &str) -> bool {
+    matches!(tag, "DATE" | "SDATE" | "_SDATE" | "AGE" | "TIME")
+        || matches!(parent, "DATE" | "SDATE" | "_SDATE" | "AGE" | "TIME")
 }
 
 /// Whether an age structure says stillborn: 5.5.1 `STILLBORN`, or `0y`
