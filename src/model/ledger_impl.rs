@@ -2,9 +2,6 @@
 //! structures a dataset kept untyped although the model has a type for
 //! them.
 
-use std::collections::HashMap;
-use std::sync::OnceLock;
-
 use super::dataset::Dataset;
 use super::driver::{FieldDesc, Fields, SpecNames, Struct};
 use super::enums::{LdsStatus, PHRASED_FIELDS};
@@ -26,7 +23,9 @@ use super::{
     SpouseLink, TextTranslation,
 };
 use crate::spec::conform::{Field, FieldOrder};
-use crate::spec::schema::StructId;
+use crate::spec::index::name_is;
+use crate::spec::schema::Schema as Tables;
+use crate::spec::tables;
 use crate::GedcomVersion;
 
 /// The typed structures and the structure types each stands for.
@@ -195,47 +194,188 @@ fn check(s: &dyn Fields, store: &Store, path: &mut Vec<&'static str>, out: &mut 
 
 /// The order in which the model writes the substructures of each structure
 /// type of `version` ([`FieldOrder`]): the fields of the typed structure
-/// that stands for it, in their declared order, and their shapes.
+/// that stands for it, in their declared order, and their shapes. Computed
+/// at compile time.
 pub(crate) fn field_order(version: GedcomVersion) -> &'static FieldOrder {
-    static ORDERS: [OnceLock<FieldOrder>; 3] = [const { OnceLock::new() }; 3];
-    let (slot, names): (_, fn(&SpecNames) -> &'static [&'static str]) =
-        match version.rules().spec.version {
-            "5.5.1" => (&ORDERS[0], |s| s.v551),
-            "7.0" => (&ORDERS[1], |s| s.v70),
-            _ => (&ORDERS[2], |s| s.v71),
-        };
-    slot.get_or_init(|| {
-        let schema = version.rules().spec;
-        let ids = (0..schema.structs.len()).filter_map(|i| StructId::try_from(i).ok());
-        let by_name: HashMap<&str, StructId> = ids.map(|id| (schema.name(id), id)).collect();
-        let mut ranks = vec![Vec::new(); schema.structs.len()];
-        for (_, spec, fields) in STRUCTURES {
-            for name in names(spec) {
-                let Some(slot) = by_name
-                    .get(name)
-                    .and_then(|&id| ranks.get_mut(usize::from(id)))
-                else {
-                    continue;
+    match version {
+        GedcomVersion::V5_5_1 => &ORDER_551,
+        GedcomVersion::V7_0 => &ORDER_70,
+        GedcomVersion::V7_1 => &ORDER_71,
+    }
+}
+
+/// The spec names of a typed structure for the version of `schema`.
+const fn spec_names(spec: &SpecNames, schema: &Tables) -> &'static [&'static str] {
+    match schema.version.as_bytes() {
+        b"5.5.1" => spec.v551,
+        b"7.0" => spec.v70,
+        _ => spec.v71,
+    }
+}
+
+/// The typed structure (an index into [`STRUCTURES`]) that stands for type
+/// `id` of `schema`: the first that names it and has fields with tags.
+const fn structure_of(schema: &Tables, id: usize) -> Option<usize> {
+    let mut e = 0;
+    while e < STRUCTURES.len() {
+        let names = spec_names(&STRUCTURES[e].1, schema);
+        let mut n = 0;
+        while n < names.len() {
+            if name_is(schema, id, names[n]) && tag_count(STRUCTURES[e].2) > 0 {
+                return Some(e);
+            }
+            n += 1;
+        }
+        e += 1;
+    }
+    None
+}
+
+/// The number of tags the fields take.
+const fn tag_count(fields: &[FieldDesc]) -> usize {
+    let (mut n, mut f) = (0, 0);
+    while f < fields.len() {
+        n += fields[f].tags.len();
+        f += 1;
+    }
+    n
+}
+
+/// The number of (type, tag) cells of the order of `schema`.
+const fn order_len(schema: &Tables) -> usize {
+    let (mut n, mut id) = (0, 0);
+    while id < schema.structs.len() {
+        if let Some(e) = structure_of(schema, id) {
+            n += tag_count(STRUCTURES[e].2);
+        }
+        id += 1;
+    }
+    n
+}
+
+/// The rows and cells of a [`FieldOrder`].
+type OrderTables<const R: usize, const C: usize> = ([(u16, u16); R], [(u16, Field); C]);
+
+/// The rows and cells of [`FieldOrder`] for `schema`: `R` types, `C`
+/// cells.
+// Ranks and indices are below 65,536 (checked); constants convert with
+// `as` only.
+#[allow(clippy::cast_possible_truncation)]
+const fn order<const R: usize, const C: usize>(schema: &Tables) -> OrderTables<R, C> {
+    let none = Field {
+        rank: 0,
+        leaf: false,
+        many: false,
+    };
+    let mut rows = [(0_u16, 0_u16); R];
+    let mut cells = [(0_u16, none); C];
+    assert!(C < u16::MAX as usize);
+    let (mut c, mut id) = (0, 0);
+    while id < R {
+        let first = c;
+        if let Some(e) = structure_of(schema, id) {
+            let fields = STRUCTURES[e].2;
+            let mut f = 0;
+            while f < fields.len() {
+                let field = Field {
+                    rank: f as u16,
+                    leaf: fields[f].leaf,
+                    many: fields[f].many,
                 };
-                if !slot.is_empty() {
-                    continue;
+                let mut t = 0;
+                while t < fields[f].tags.len() {
+                    let standard = crate::tree::standard_index_const(fields[f].tags[t]);
+                    assert!(standard.is_some(), "a field tag is not a standard tag");
+                    if let Some(standard) = standard {
+                        cells[c] = (standard, field);
+                        c += 1;
+                    }
+                    t += 1;
                 }
-                for (rank, field) in (0_u16..).zip(fields.iter()) {
-                    let field_shape = Field {
-                        rank,
-                        leaf: field.leaf,
-                        many: field.many,
-                    };
-                    slot.extend(
-                        field
-                            .tags
-                            .iter()
-                            .filter_map(|&tag| crate::tree::node::standard_index(tag))
-                            .map(|standard| (standard, field_shape)),
-                    );
-                }
+                f += 1;
             }
         }
-        FieldOrder::new(ranks)
-    })
+        rows[id] = (first as u16, (c - first) as u16);
+        id += 1;
+    }
+    assert!(c == C);
+    (rows, cells)
+}
+
+/// Declares the [`FieldOrder`] of one version's tables.
+macro_rules! order {
+    ($name:ident, $schema:path) => {
+        static $name: FieldOrder = {
+            const R: usize = $schema.structs.len();
+            const C: usize = order_len(&$schema);
+            static TABLES: OrderTables<R, C> = order(&$schema);
+            FieldOrder::new(&TABLES.0, &TABLES.1)
+        };
+    };
+}
+
+order!(ORDER_551, tables::V551);
+order!(ORDER_70, tables::V70);
+order!(ORDER_71, tables::V71);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::spec::schema::StructId;
+    use std::collections::HashMap;
+
+    /// The order computed at compile time is the one the typed model's
+    /// declarations give: for each structure type, the fields of the first
+    /// typed structure that names it, each of its tags with the field.
+    #[test]
+    fn the_field_order_is_the_declarations() {
+        for version in [
+            GedcomVersion::V5_5_1,
+            GedcomVersion::V7_0,
+            GedcomVersion::V7_1,
+        ] {
+            let schema = version.rules().spec;
+            let by_name: HashMap<&str, usize> = (0..schema.structs.len())
+                .map(|i| (schema.name(StructId::try_from(i).unwrap()), i))
+                .collect();
+            let mut expected: Vec<Vec<(u16, u16, bool, bool)>> =
+                vec![Vec::new(); schema.structs.len()];
+            for (_, spec, fields) in STRUCTURES {
+                for name in spec_names(spec, schema) {
+                    let Some(slot) = by_name.get(name).and_then(|&i| expected.get_mut(i)) else {
+                        continue;
+                    };
+                    if !slot.is_empty() {
+                        continue;
+                    }
+                    for (rank, field) in (0_u16..).zip(fields.iter()) {
+                        for tag in field.tags {
+                            let standard = crate::tree::node::standard_index(tag).unwrap();
+                            slot.push((standard, rank, field.leaf, field.many));
+                        }
+                    }
+                }
+            }
+            let order = field_order(version);
+            for (ty, cells) in expected.iter().enumerate() {
+                let ty = StructId::try_from(ty).unwrap();
+                for &(standard, rank, leaf, many) in cells {
+                    let f = order.field(ty, standard).unwrap();
+                    // The first field taking a tag is the one found.
+                    if cells.iter().find(|c| c.0 == standard).unwrap().1 == rank {
+                        assert_eq!(
+                            (f.rank, f.leaf, f.many),
+                            (rank, leaf, many),
+                            "{version} {ty}"
+                        );
+                    }
+                }
+                let count = (0..crate::tree::node::STANDARD_TAGS.len())
+                    .filter(|&s| order.field(ty, u16::try_from(s).unwrap()).is_some())
+                    .count();
+                let distinct: std::collections::HashSet<u16> = cells.iter().map(|c| c.0).collect();
+                assert_eq!(count, distinct.len(), "{version} {ty}");
+            }
+        }
+    }
 }

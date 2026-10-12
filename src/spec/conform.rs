@@ -22,14 +22,12 @@ use clean::Walk;
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-use std::sync::OnceLock;
 
+use super::index::SchemaIndex;
 use super::payload::{self, is_ext_tag, Family};
 use super::schema::{tag_index, Kind, Schema, StructId, DATASET};
-use super::tables::{self, TAGS};
 use super::validate::{
-    bounds, encoded_len, is_external_pointer, pick, xref_error, Aliases, Pick, Picker,
-    MAX_RECORD_BYTES,
+    encoded_len, is_external_pointer, pick, xref_error, Aliases, Pick, Picker, MAX_RECORD_BYTES,
 };
 use crate::tree::{Flat, FlatPayload, FlatRef, Node, Payload, PayloadRef, Structure, Tag, Xref};
 use crate::version::VersionRules;
@@ -81,16 +79,15 @@ pub fn conform(records: &mut Vec<Structure>, version: GedcomVersion) -> Vec<Repa
 /// field. A record that becomes an extension record goes after the others.
 /// Writing what was written then writes the same lines. Without it (a
 /// tree, whose order is the file's), the pass repairs in place.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct FieldOrder {
-    /// For each structure type, the fields of the typed structure that
-    /// stands for it ([`Field`]), by the standard tags they take.
-    fields: Box<[FieldsByTag]>,
+    /// For each structure type, where its fields are in `cells`: the first
+    /// and the number.
+    rows: &'static [(u16, u16)],
+    /// The fields of each structure type ([`Field`]), by the indices of
+    /// the standard tags they take (`crate::tree::STANDARD_TAGS`).
+    cells: &'static [(u16, Field)],
 }
-
-/// The fields of a typed structure, by the indices of the standard tags
-/// they take (`crate::tree::STANDARD_TAGS`).
-type FieldsByTag = Box<[(u16, Field)]>;
 
 /// A field of a typed structure, as [`FieldOrder`] needs it.
 #[derive(Clone, Copy, Debug)]
@@ -105,20 +102,22 @@ pub(crate) struct Field {
 }
 
 impl FieldOrder {
-    /// The order of `fields`: for each structure type (by [`StructId`]),
-    /// the index of each standard tag its fields take, with the field.
-    pub(crate) fn new(fields: Vec<Vec<(u16, Field)>>) -> Self {
-        Self {
-            fields: fields.into_iter().map(Vec::into_boxed_slice).collect(),
-        }
+    /// The order of the fields of each structure type (by [`StructId`]):
+    /// `rows` gives where its fields are in `cells`, each the index of a
+    /// standard tag a field takes, with the field.
+    pub(crate) const fn new(rows: &'static [(u16, u16)], cells: &'static [(u16, Field)]) -> Self {
+        Self { rows, cells }
     }
 
     /// The field of a `ty` structure that takes substructures with the
     /// standard tag `standard`.
-    fn field(&self, ty: StructId, standard: u16) -> Option<Field> {
-        self.fields
-            .get(usize::from(ty))
-            .and_then(|f| f.iter().find(|&&(t, _)| t == standard))
+    pub(crate) fn field(&self, ty: StructId, standard: u16) -> Option<Field> {
+        let &(first, len) = self.rows.get(usize::from(ty))?;
+        let (first, len) = (usize::from(first), usize::from(len));
+        self.cells
+            .get(first..first + len)?
+            .iter()
+            .find(|&&(t, _)| t == standard)
             .map(|&(_, field)| field)
     }
 }
@@ -498,8 +497,8 @@ struct Conformer<'n> {
     state: u32,
     /// The number of repairs when the last pass began.
     pass_start: usize,
-    /// What the check needs of each type, computed once per version.
-    tables: &'static TypeTables,
+    /// What the check needs of each type ([`SchemaIndex`]).
+    tables: &'static SchemaIndex,
     /// The type of each substructure, by tag.
     picker: Picker,
     /// Room for a record that writes itself ([`Build`]), kept from pass to
@@ -514,78 +513,6 @@ struct Conformer<'n> {
     order: Option<&'static FieldOrder>,
 }
 
-/// A required substructure: its tag, its minimum and the first
-/// substructure type with that tag.
-type Required = (u8, u8, StructId);
-
-/// What the check needs of each structure type of a version's tables.
-struct TypeTables {
-    /// The required substructures of each type: (tag, minimum, the first
-    /// substructure type with that tag), in the order of the tables.
-    required: Box<[Box<[Required]>]>,
-    /// The types whose rules the tables cannot state: 7.x `NOTE-TRAN` and
-    /// `MIME`.
-    note_tran: Box<[StructId]>,
-    mime: Box<[StructId]>,
-    /// The record type of each tag of the tables ([`Schema::record`]), 0
-    /// for none.
-    records: Box<[StructId]>,
-}
-
-impl TypeTables {
-    fn of(schema: &'static Schema) -> &'static TypeTables {
-        static TABLES: [OnceLock<TypeTables>; 3] = [const { OnceLock::new() }; 3];
-        static OTHER: OnceLock<TypeTables> = OnceLock::new();
-        let slot = [&tables::V551, &tables::V70, &tables::V71]
-            .into_iter()
-            .position(|s| std::ptr::eq(s, schema))
-            .and_then(|i| TABLES.get(i))
-            .unwrap_or(&OTHER);
-        slot.get_or_init(|| TypeTables::build(schema))
-    }
-
-    fn build(schema: &Schema) -> TypeTables {
-        let ids = || (0..schema.structs.len()).filter_map(|i| StructId::try_from(i).ok());
-        let required = ids()
-            .map(|ty| {
-                let mut seen: Vec<u8> = Vec::new();
-                let mut req: Vec<Required> = Vec::new();
-                for sub in schema.subs(ty) {
-                    let Some(t) = schema.tag_id(sub.id) else {
-                        continue;
-                    };
-                    if seen.contains(&t) {
-                        continue;
-                    }
-                    seen.push(t);
-                    let (min, _) = bounds(schema, ty, t);
-                    if min > 0 {
-                        req.push((t, min, sub.id));
-                    }
-                }
-                req.into_boxed_slice()
-            })
-            .collect();
-        let named = |name: &str| -> Box<[StructId]> {
-            if schema.version.starts_with('7') {
-                ids().filter(|&ty| schema.name(ty) == name).collect()
-            } else {
-                Box::default()
-            }
-        };
-        let records = TAGS
-            .iter()
-            .map(|tag| schema.record(tag).unwrap_or(DATASET))
-            .collect();
-        TypeTables {
-            required,
-            note_tran: named("NOTE-TRAN"),
-            mime: named("MIME"),
-            records,
-        }
-    }
-}
-
 /// What a record of the typed model checks of itself as it writes itself
 /// into a [`Flat`] arena ([`Flat::open_typed`]), so that the check of the
 /// pass does not walk it again: each structure is placed by its standard
@@ -597,7 +524,7 @@ impl TypeTables {
 pub(crate) struct Typing {
     picker: Picker,
     schema: &'static Schema,
-    tables: &'static TypeTables,
+    tables: &'static SchemaIndex,
     v7: bool,
 }
 
@@ -608,7 +535,7 @@ impl Typing {
         Typing {
             picker: Picker::of(rules),
             schema: rules.spec,
-            tables: TypeTables::of(rules.spec),
+            tables: rules.index,
             v7: Family::of(rules) == Family::V7,
         }
     }
@@ -678,12 +605,7 @@ impl Typing {
     /// tables' tags) and the fewest occurrences.
     #[inline]
     pub(crate) fn required(&self, ty: StructId) -> impl Iterator<Item = (u8, u8)> + 'static {
-        self.tables
-            .required
-            .get(usize::from(ty))
-            .map_or(&[][..], |r| r)
-            .iter()
-            .map(|&(t, min, _)| (t, min))
+        self.tables.required(ty).map(|c| (c.tag, c.min))
     }
 
     /// The index in the tables' tags of a standard tag.
@@ -703,7 +625,7 @@ impl Typing {
     /// or its media type.
     #[inline]
     pub(crate) fn is_note_tran(&self, ty: StructId) -> bool {
-        self.tables.note_tran.contains(&ty)
+        self.tables.is_note_tran(ty)
     }
 }
 
@@ -849,7 +771,7 @@ impl<'n> Conformer<'n> {
             used: None,
             state: 1,
             pass_start: 0,
-            tables: TypeTables::of(schema),
+            tables: rules.index,
             picker: Picker::of(rules),
             scratch: Flat::default(),
             arena: Flat::default(),
@@ -1396,12 +1318,7 @@ impl<'n> Conformer<'n> {
 
     fn record_of_standard(&self, tag: &str, standard: Option<u16>) -> Option<StructId> {
         match standard.and_then(|t| self.picker.spec_tag(t)) {
-            Some(t) => self
-                .tables
-                .records
-                .get(usize::from(t))
-                .copied()
-                .filter(|&ty| ty != DATASET),
+            Some(t) => self.tables.cell(DATASET, t).map(|c| c.first),
             None => self.schema.record(tag),
         }
     }
@@ -2138,12 +2055,8 @@ impl<'n> Conformer<'n> {
     /// (g) Required substructures.
     fn required(&mut self, s: &mut Structure, ty: StructId, counts: &[(u8, u32)]) -> Fate {
         let schema = self.schema;
-        let required = self
-            .tables
-            .required
-            .get(usize::from(ty))
-            .map_or(&[][..], |r| r);
-        for &(t, min, sub) in required {
+        for cell in self.tables.required(ty) {
+            let (t, min, sub) = (cell.tag, cell.min, cell.first);
             let found = counts.iter().find(|(k, _)| *k == t).map_or(0, |(_, n)| *n);
             if found >= u32::from(min) {
                 continue;
