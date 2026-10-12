@@ -468,6 +468,38 @@ pub(crate) fn emit_typed(
         return emit_known(rules, sink, level, xref, tag, true, payload, Some(special));
     }
     debug_assert!(rules.is_valid_tag(tag) && xref.is_none_or(|x| rules.is_valid_xref(x)));
+    // Nearly every line: a level of one digit, no identifier, and a payload
+    // written as it is that fits the line (no line break, no `@`, nothing
+    // banned), in UTF-8.
+    let payload_len = match payload {
+        PayloadRef::None => Some(0),
+        PayloadRef::Pointer(p) if !p.is_empty() => Some(p.len()),
+        PayloadRef::Text(t) if special == 0 => Some(t.len()),
+        PayloadRef::Pointer(_) | PayloadRef::Text(_) => None,
+    };
+    if let (Some(payload_len), Ok(digit @ 0..=9), None, OutputEncoding::Utf8) =
+        (payload_len, u8::try_from(level), xref, sink.encoding)
+    {
+        let len = 2 + tag.len() + payload_len + usize::from(payload_len > 0) + sink.eol.len();
+        if sink.max_line.is_none_or(|max| len <= max) {
+            let text = &mut sink.text;
+            text.reserve(len);
+            text.push(char::from(b'0' + digit));
+            text.push(' ');
+            text.push_str(tag);
+            if let Some(p) = payload.as_str().filter(|p| !p.is_empty()) {
+                text.push(' ');
+                text.push_str(p);
+            }
+            text.push_str(sink.eol);
+            sink.line_start = sink.text.len();
+            sink.line_no += 1;
+            if sink.writer.is_some() && sink.text.len() >= FLUSH_AT {
+                sink.flush()?;
+            }
+            return Ok(());
+        }
+    }
     sink.start(level, xref, tag);
     match payload {
         PayloadRef::None => sink.end_line(),

@@ -645,21 +645,24 @@ impl<'s> Flat<'s> {
             FlatPayload::Text(t) => special_bytes(t),
             FlatPayload::None | FlatPayload::Pointer(..) => 0,
         };
-        self.size += size_bound(tag, standard, xref, &payload);
-        st.line(depth, tag, standard.is_some(), &payload, special);
-        if let Some(p) = st.open.last_mut() {
-            p.children = true;
-            p.lang |= matches!(tag, "MIME" | "LANG");
-            let from = p.counts;
-            st.bump(from, spec);
-        } else {
-            st.root = ty;
+        if !typing.v7() {
+            self.size += size_bound(tag, standard, xref, &payload);
         }
+        st.line(depth, tag, standard.is_some(), &payload, special);
         let empty = match &payload {
             FlatPayload::None => true,
             FlatPayload::Pointer(..) => false,
             FlatPayload::Text(t) => t.is_empty(),
         };
+        match st.open.last_mut() {
+            Some(p) => {
+                p.children = true;
+                p.lang |= matches!(tag, "MIME" | "LANG");
+                let from = p.counts;
+                st.bump(from, spec);
+            }
+            None => st.root = ty,
+        }
         st.open.push(Open {
             ty,
             counts: u32::try_from(st.counts.len()).unwrap_or(u32::MAX),
@@ -667,13 +670,11 @@ impl<'s> Flat<'s> {
             empty,
             lang: false,
         });
-        if !typing.trusts(ty, &payload, claim) {
+        match typing.check(ty, &payload, claim, special) {
+            Some(true) => {}
+            Some(false) => st.spoiled = true,
             // A pointer is looked up with the dataset's records later.
-            match typing.is_clean(ty, &payload, special) {
-                Some(true) => {}
-                Some(false) => st.spoiled = true,
-                None => st.checks.push((payload, ty, special)),
-            }
+            None => st.checks.push((payload, ty, special)),
         }
         st.written += 1;
     }

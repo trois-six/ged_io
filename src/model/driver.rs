@@ -1179,8 +1179,8 @@ pub(crate) fn read_into(s: &mut dyn Fields, node: NodeRef<'_>, cx: &mut ReadCx<'
 /// [`write`] into a flat arena, the texts borrowed where they can be:
 /// typed ([`Flat::open_typed`]), the payload trusted as `claim` (or the
 /// type's [`Fields::payload_claim`]) says.
-pub(crate) fn write_flat<'s>(
-    s: &'s dyn Fields,
+pub(crate) fn write_flat<'s, F: Fields + ?Sized>(
+    s: &'s F,
     tag: StdTag,
     cx: &WriteCx<'s>,
     out: &mut Flat<'s>,

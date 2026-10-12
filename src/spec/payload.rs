@@ -101,7 +101,21 @@ pub(crate) fn is_valid(kind: Kind, set: Option<&EnumSet>, text: &str, family: Fa
 /// digits from 1, a day of the month from 1. Anything else is left to the
 /// grammar.
 pub(crate) fn is_simple_date(text: &str, exact: bool, any_case: bool) -> bool {
-    // A number of one to `max_len` digits, not starting with 0.
+    let b = text.as_bytes();
+    // The keyword.
+    let rest = match b {
+        [b'A', b'B', b'T' | b'F', b' ', rest @ ..]
+        | [b'C', b'A', b'L', b' ', rest @ ..]
+        | [b'E', b'S', b'T', b' ', rest @ ..]
+        | [b'B', b'E', b'F', b' ', rest @ ..]
+            if !exact =>
+        {
+            rest
+        }
+        _ => b,
+    };
+    // A number of one to `max_len` digits, not starting with 0, and the
+    // bytes after it.
     let number = |w: &[u8], max_len: usize| -> Option<u16> {
         if w.is_empty() || w.len() > max_len || w.first() == Some(&b'0') {
             return None;
@@ -111,11 +125,9 @@ pub(crate) fn is_simple_date(text: &str, exact: bool, any_case: bool) -> bool {
         })
     };
     let leap = |y: u16| y.is_multiple_of(4) && (!y.is_multiple_of(100) || y.is_multiple_of(400));
-    let days = |m: &[u8], y: u16| -> Option<u16> {
-        let upper = match *m {
-            [x, y, z] => [x, y, z].map(|c| c.to_ascii_uppercase()),
-            _ => return None,
-        };
+    // The days of month `m` of year `y`.
+    let days = |m: [u8; 3], y: u16| -> Option<u16> {
+        let upper = m.map(|c| c.to_ascii_uppercase());
         if !any_case && upper != m {
             return None;
         }
@@ -127,22 +139,30 @@ pub(crate) fn is_simple_date(text: &str, exact: bool, any_case: bool) -> bool {
             _ => return None,
         })
     };
-    let mut words = text.as_bytes().split(|&c| c == b' ');
-    let mut first = words.next();
-    if !exact && matches!(first, Some(b"ABT" | b"CAL" | b"EST" | b"BEF" | b"AFT")) {
-        first = words.next();
-    }
-    match (first, words.next(), words.next(), words.next()) {
-        (Some(y), None, None, None) => !exact && number(y, 4).is_some(),
-        (Some(m), Some(y), None, None) => {
-            !exact && number(y, 4).is_some_and(|y| days(m, y).is_some())
+    // `MON YYYY`: the days of the month.
+    let month_year = |w: &[u8]| -> Option<u16> {
+        let ([m0, m1, m2, b' '], year) = w.split_first_chunk::<4>().map(|(m, y)| (*m, y))? else {
+            return None;
+        };
+        days([m0, m1, m2], number(year, 4)?)
+    };
+    match rest.iter().position(|&c| c == b' ') {
+        // `YYYY`.
+        None => !exact && number(rest, 4).is_some(),
+        Some(at) => {
+            let (first, after) = rest.split_at(at);
+            let after = after.get(1..).unwrap_or_default();
+            let digit = first.first().is_some_and(u8::is_ascii_digit);
+            if let (Ok(&month), false) = (<&[u8; 3]>::try_from(first), digit) {
+                // `MON YYYY`.
+                !exact && number(after, 4).is_some_and(|y| days(month, y).is_some())
+            } else {
+                // `D MON YYYY`.
+                number(first, 2)
+                    .zip(month_year(after))
+                    .is_some_and(|(d, max)| d <= max)
+            }
         }
-        (Some(d), Some(m), Some(y), None) => number(y, 4).is_some_and(|y| {
-            number(d, 2)
-                .zip(days(m, y))
-                .is_some_and(|(d, max)| d <= max)
-        }),
-        _ => false,
     }
 }
 
@@ -527,6 +547,113 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// [`is_simple_date`] by words, as it was first written: the reference
+    /// of the byte-wise one.
+    fn simple_date_by_words(text: &str, exact: bool, any_case: bool) -> bool {
+        let number = |w: &[u8], max_len: usize| -> Option<u16> {
+            if w.is_empty() || w.len() > max_len || w.first() == Some(&b'0') {
+                return None;
+            }
+            w.iter().try_fold(0_u16, |n, &c| {
+                c.is_ascii_digit().then(|| n * 10 + u16::from(c - b'0'))
+            })
+        };
+        let leap =
+            |y: u16| y.is_multiple_of(4) && (!y.is_multiple_of(100) || y.is_multiple_of(400));
+        let days = |m: &[u8], y: u16| -> Option<u16> {
+            let upper = match *m {
+                [x, y, z] => [x, y, z].map(|c| c.to_ascii_uppercase()),
+                _ => return None,
+            };
+            if !any_case && upper != m {
+                return None;
+            }
+            Some(match &upper {
+                b"JAN" | b"MAR" | b"MAY" | b"JUL" | b"AUG" | b"OCT" | b"DEC" => 31,
+                b"APR" | b"JUN" | b"SEP" | b"NOV" => 30,
+                b"FEB" if leap(y) => 29,
+                b"FEB" => 28,
+                _ => return None,
+            })
+        };
+        let mut words = text.as_bytes().split(|&c| c == b' ');
+        let mut first = words.next();
+        if !exact && matches!(first, Some(b"ABT" | b"CAL" | b"EST" | b"BEF" | b"AFT")) {
+            first = words.next();
+        }
+        match (first, words.next(), words.next(), words.next()) {
+            (Some(y), None, None, None) => !exact && number(y, 4).is_some(),
+            (Some(m), Some(y), None, None) => {
+                !exact && number(y, 4).is_some_and(|y| days(m, y).is_some())
+            }
+            (Some(d), Some(m), Some(y), None) => number(y, 4).is_some_and(|y| {
+                number(d, 2)
+                    .zip(days(m, y))
+                    .is_some_and(|(d, max)| d <= max)
+            }),
+            _ => false,
+        }
+    }
+
+    /// The byte-wise test of simple dates answers as the test by words.
+    #[test]
+    fn simple_dates_by_bytes() {
+        let parts = [
+            "",
+            " ",
+            "ABT",
+            "abt",
+            "BET",
+            "1",
+            "01",
+            "9",
+            "29",
+            "31",
+            "32",
+            "123",
+            "JAN",
+            "FEB",
+            "Feb",
+            "fEB",
+            "XYZ",
+            "1900",
+            "2000",
+            "1999",
+            "0",
+            "10000",
+            "@#DJULIAN@",
+            "1700",
+        ];
+        let mut n = 0;
+        for a in parts {
+            for b in parts {
+                for c in parts {
+                    for d in ["", " ", " 1900", "  1900", " X"] {
+                        for text in [
+                            format!("{a} {b} {c}{d}"),
+                            format!("{a}{b} {c}{d}"),
+                            format!("{a} {b}{c}{d}"),
+                            format!("{a}{d}"),
+                            format!("{a} {b}{d}"),
+                        ] {
+                            for exact in [false, true] {
+                                for any_case in [false, true] {
+                                    assert_eq!(
+                                        is_simple_date(&text, exact, any_case),
+                                        simple_date_by_words(&text, exact, any_case),
+                                        "{text:?} {exact} {any_case}"
+                                    );
+                                    n += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(n > 100_000, "{n}");
     }
 
     /// The dates the fast path takes are exactly those of the grammar that
