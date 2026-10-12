@@ -488,6 +488,14 @@ each structure a map of its non-empty fields, texts and identifiers as
 strings, enumeration values by name (`"Female"`) or as written
 (`{"Unknown": "x"}`); it deserializes back into a dataset.
 
+What may nest to any depth is listed flat, so that the JSON of any dataset
+nests a few levels deep and reads back within the nesting limit of
+`serde_json` (128): a structure kept untyped (`extra`) lists its
+`descendants`, each with its `level` below it, and a list of notes (or of
+citations) gives each note and citation held in another after it, as
+`[depth, {…}]` (a citation at depth 1 of a list of notes, a note at depth
+2, and so on).
+
 ```rust
 fn main() -> Result<(), serde_json::Error> {
     let data = ged_io::Dataset::parse("0 HEAD\n0 @I1@ INDI\n1 NAME Ann /Example/\n0 TRLR\n");
