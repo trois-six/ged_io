@@ -108,6 +108,27 @@ impl<'w> LineSink<'w> {
         )
     }
 
+    /// Hands the bytes written so far, encoded, to `writer`, and forgets
+    /// them, when they are more than a block (or `all` of them): for a
+    /// sink without a writer that writes to one in blocks.
+    pub(crate) fn drain_to(
+        &mut self,
+        writer: &mut dyn io::Write,
+        all: bool,
+    ) -> Result<(), WriteError> {
+        if self.encoding == OutputEncoding::Utf8 {
+            if all || self.text.len() >= FLUSH_AT {
+                writer.write_all(self.text.as_bytes())?;
+                self.text.clear();
+                self.line_start = 0;
+            }
+        } else if all || self.buf.len() >= FLUSH_AT {
+            writer.write_all(&self.buf)?;
+            self.buf.clear();
+        }
+        Ok(())
+    }
+
     /// The output encoding.
     pub(crate) fn encoding(&self) -> OutputEncoding {
         self.encoding

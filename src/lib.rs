@@ -87,6 +87,6 @@ pub struct ReadmeExamples;
 pub struct MigrationExamples;
 
 pub use writer::{
-    Bom, GedcomWriter, LineEnding, OutputEncoding, Repair, RepairKind, RepairPolicy, Unencodable,
-    WriteError, WriteReport, WriterConfig,
+    Bom, GedcomStreamWriter, GedcomWriter, LineEnding, OutputEncoding, Repair, RepairKind,
+    RepairPolicy, Unencodable, WriteError, WriteReport, WriterConfig,
 };

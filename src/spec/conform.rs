@@ -18,6 +18,7 @@
 
 mod clean;
 mod direct;
+pub(crate) mod streamed;
 
 pub(crate) use direct::{take_head, Direct, IdTypes, Place};
 
@@ -531,6 +532,13 @@ struct Conformer<'n> {
     added: bool,
     /// The order of the typed model the records come from, if they do.
     order: Option<&'static FieldOrder>,
+    /// Whether pointers are taken to name records of their types, which
+    /// the pass cannot see (records written one at a time:
+    /// [`streamed`]).
+    trust: bool,
+    /// Whether the header can no longer declare extension tags: a
+    /// relocated structure is then a plain extension structure.
+    no_declare: bool,
 }
 
 /// What a record of the typed model checks of itself as it writes itself
@@ -864,6 +872,8 @@ impl<'n> Conformer<'n> {
             arena: Flat::default(),
             added: false,
             order: None,
+            trust: false,
+            no_declare: false,
         };
         c.arena.set_typing(Some(Typing::of(version)));
         c
@@ -1443,7 +1453,8 @@ impl<'n> Conformer<'n> {
             let uri = self.schema.uri(ty);
             let ours = self.aliases.structs.get(&candidate) == Some(&ty)
                 || self.schma.iter().any(|(t, u)| *t == candidate && *u == uri);
-            let free = !self.aliases.structs.contains_key(&candidate)
+            let free = !self.no_declare
+                && !self.aliases.structs.contains_key(&candidate)
                 && !self.used.as_ref().is_some_and(|u| u.contains(&candidate))
                 && !self.schma.iter().any(|(t, _)| *t == candidate);
             if ours || free {
@@ -1577,7 +1588,7 @@ impl<'n> Conformer<'n> {
     fn resolve(&mut self, s: &mut Structure, p: &str) -> Result<Option<StructId>, ()> {
         // `@VOID@` points to nothing in 7.x, even when a record had it (and
         // was renamed).
-        if self.family == Family::V7 && p == "@VOID@" {
+        if self.trust || (self.family == Family::V7 && p == "@VOID@") {
             return Ok(None);
         }
         let p = match self.renamed.get(p) {
@@ -2074,6 +2085,7 @@ impl<'n> Conformer<'n> {
             }
         };
         match s.payload.clone() {
+            Payload::Pointer(_) if self.trust => Fate::Keep,
             Payload::Pointer(p) => {
                 let p = p.as_str().to_string();
                 match self.resolve(s, &p) {
@@ -2242,6 +2254,51 @@ impl<'n> Conformer<'n> {
         }
     }
 
+    /// (j) Moves inline notes out of `r`, a 5.5.1 record of type `ty` over
+    /// 32K (`size` bytes as written), longest first, until it fits, each to
+    /// new `NOTE` records ([`Conformer::move_note`]) whose identifiers
+    /// `fresh` makes: the new records, `None` when moving every note would not bring it under
+    /// the limit (it is left as it is).
+    fn move_notes(
+        &mut self,
+        r: &mut Structure,
+        ty: StructId,
+        mut size: usize,
+        fresh: &mut dyn FnMut(&mut Self) -> String,
+    ) -> Option<Vec<Structure>> {
+        let mut notes = Vec::new();
+        movable_notes(self.rules, r, ty, &mut Vec::new(), &mut notes);
+        // The bytes each move saves: the note's lines, less the pointer
+        // line left in its place (`n NOTE @N…@`, at most 32 bytes).
+        let saved = |n: &(usize, Vec<usize>)| n.0.saturating_sub(32);
+        if size.saturating_sub(notes.iter().map(saved).sum()) > MAX_RECORD_BYTES {
+            return None;
+        }
+        // Longest first; between equals, file order.
+        notes.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        let tag = r.tag.as_str().to_string();
+        let mut added = Vec::new();
+        // The pointers to the further parts of notes split, inserted after
+        // the first part's once every note is moved (last path first, so
+        // that the paths stay right).
+        let mut further: Vec<(Vec<usize>, Vec<Structure>)> = Vec::new();
+        for note in &notes {
+            if size <= MAX_RECORD_BYTES {
+                break;
+            }
+            size = size.saturating_sub(saved(note));
+            let Some(at) = node_at(r, &note.1) else {
+                continue;
+            };
+            let pointers = self.move_note(at, &tag, &mut added, fresh);
+            if !pointers.is_empty() {
+                further.push((note.1.clone(), pointers));
+            }
+        }
+        insert_after(r, further);
+        Some(added)
+    }
+
     /// (j) Moves inline notes out of 5.5.1 records over 32K, longest first,
     /// until the record fits; a record that moving every note would not
     /// bring under the limit is left as it is.
@@ -2256,7 +2313,7 @@ impl<'n> Conformer<'n> {
             if rec.size as usize <= MAX_RECORD_BYTES {
                 continue;
             }
-            let mut size = with_node!(rec.get(&self.arena), scratch, |n| encoded_len(
+            let size = with_node!(rec.get(&self.arena), scratch, |n| encoded_len(
                 n,
                 0,
                 self.family
@@ -2265,35 +2322,10 @@ impl<'n> Conformer<'n> {
                 continue;
             }
             let r = rec.make_owned(&self.arena);
-            let mut notes = Vec::new();
-            movable_notes(self.rules, r, ty, &mut Vec::new(), &mut notes);
-            // The bytes each move saves: the note's lines, less the pointer
-            // line left in its place (`n NOTE @N…@`, at most 32 bytes).
-            let saved = |n: &(usize, Vec<usize>)| n.0.saturating_sub(32);
-            if size.saturating_sub(notes.iter().map(saved).sum()) > MAX_RECORD_BYTES {
-                continue;
-            }
-            // Longest first; between equals, file order.
-            notes.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-            let tag = r.tag.as_str().to_string();
-            // The pointers to the further parts of notes split, inserted
-            // after the first part's once every note is moved (last path
-            // first, so that the paths stay right).
-            let mut further: Vec<(Vec<usize>, Vec<Structure>)> = Vec::new();
-            for note in &notes {
-                if size <= MAX_RECORD_BYTES {
-                    break;
-                }
-                size = size.saturating_sub(saved(note));
-                let Some(at) = node_at(r, &note.1) else {
-                    continue;
-                };
-                let pointers = self.move_note(at, &tag, &mut added);
-                if !pointers.is_empty() {
-                    further.push((note.1.clone(), pointers));
-                }
-            }
-            insert_after(r, further);
+            let note_ty = self.record_of("NOTE");
+            let moved = self.move_notes(r, ty, size, &mut |c: &mut Self| c.unique("@N1@", note_ty));
+            let Some(moved) = moved else { continue };
+            added.extend(moved);
             (rec.clean, rec.size) = (0, u32::MAX);
         }
         self.scratch = scratch;
@@ -2303,7 +2335,7 @@ impl<'n> Conformer<'n> {
     }
 
     /// Moves the inline note `at` of a `tag` record over 32K to new `NOTE`
-    /// records (`added`), one, or several when the note is over 32K itself
+    /// records (`added`) with the identifiers `fresh` makes, one, or several when the note is over 32K itself
     /// ([`note_parts`]): `at` points to the first, and the pointers to the
     /// others, to go after it, are returned.
     fn move_note(
@@ -2311,6 +2343,7 @@ impl<'n> Conformer<'n> {
         at: &mut Structure,
         tag: &str,
         added: &mut Vec<Structure>,
+        fresh: &mut dyn FnMut(&mut Self) -> String,
     ) -> Vec<Structure> {
         let line = at.line;
         let text = match std::mem::take(&mut at.payload) {
@@ -2321,10 +2354,10 @@ impl<'n> Conformer<'n> {
             }
         };
         let parts = note_parts(&text);
-        let xrefs: Vec<String> = parts
-            .iter()
-            .map(|_| self.unique("@N1@", self.record_of("NOTE")))
-            .collect();
+        let mut xrefs: Vec<String> = Vec::with_capacity(parts.len());
+        for _ in &parts {
+            xrefs.push(fresh(self));
+        }
         let mut substructures = std::mem::take(&mut at.substructures);
         at.payload = Payload::Pointer(Xref::new(xrefs.first().map_or("@N1@", String::as_str)));
         for (part, xref) in parts.into_iter().zip(&xrefs) {
