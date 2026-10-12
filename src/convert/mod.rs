@@ -156,29 +156,24 @@ pub fn convert_dataset(data: &Dataset, to: GedcomVersion, options: &ConversionOp
     }
 }
 
-/// Fresh identifiers, unused in the dataset: `@<prefix><n>@`, `n` from 1.
-/// The identifiers in use are gathered with the first one asked for, as few
-/// datasets need any.
+/// Fresh identifiers, unused in the dataset: `@<prefix><n>@`, `n` from 1,
+/// that no record has and no pointer holds, so that a new record never
+/// takes what a pointer to no record named.
 struct Alloc<'f> {
-    used: Option<HashSet<Box<str>>>,
+    /// The identifiers handed out.
+    given: HashSet<Box<str>>,
     next: HashMap<String, u32>,
-    /// Adds the identifiers of the dataset to a set.
-    gather: &'f dyn Fn(&mut HashSet<Box<str>>),
+    /// Whether the dataset uses an identifier, as a record's or a pointer's.
+    used: &'f dyn Fn(&str) -> bool,
 }
 
 impl Alloc<'_> {
     fn fresh(&mut self, prefix: &str) -> Box<str> {
-        let gather = self.gather;
-        let used = self.used.get_or_insert_with(|| {
-            let mut set = HashSet::new();
-            gather(&mut set);
-            set
-        });
         let n = self.next.entry(prefix.to_string()).or_insert(1);
         loop {
             let candidate: Box<str> = format!("@{prefix}{n}@").into();
             *n = n.saturating_add(1);
-            if used.insert(candidate.clone()) {
+            if !(self.used)(&candidate) && self.given.insert(candidate.clone()) {
                 return candidate;
             }
         }
@@ -255,15 +250,17 @@ pub(crate) struct Plan {
 
 impl Plan {
     /// Plans the conversion of `n` records, `tag`, `xref` and `owned` giving
-    /// each one's tag, identifier and structures. `None` when the versions
-    /// need none. Without `scan`, the records are not looked at (the header
-    /// only is converted); without `maybe_void`, no record is named
-    /// `@VOID@`.
+    /// each one's tag, identifier and structures, `used` whether the
+    /// records use an identifier (a record's or a pointer's). `None` when
+    /// the versions need none. Without `scan`, the records are not looked
+    /// at (the header only is converted); without `maybe_void`, no record
+    /// is named `@VOID@`.
     #[allow(clippy::too_many_arguments)]
     fn new<'a>(
         n: usize,
         tag: impl Fn(usize) -> &'a str,
         xref: impl Fn(usize) -> Option<&'a str>,
+        used: &dyn Fn(&str) -> bool,
         head_of: impl FnOnce(usize) -> Structure,
         mut prepare: impl FnMut(usize, &Converter) -> Option<Structure>,
         from: GedcomVersion,
@@ -275,13 +272,10 @@ impl Plan {
         maybe_void: bool,
     ) -> Option<Self> {
         let mut conv = Converter::new(from, to, options, values)?;
-        let gather = |set: &mut HashSet<Box<str>>| {
-            set.extend((0..n).filter_map(&xref).map(Box::from));
-        };
         let mut alloc = Alloc {
-            used: None,
+            given: HashSet::new(),
             next: HashMap::new(),
-            gather: &gather,
+            used,
         };
         let void = maybe_void && (0..n).any(|i| xref(i) == Some(Xref::VOID));
         let head_at = (0..n).find(|&i| tag(i) == "HEAD");
@@ -369,10 +363,27 @@ impl Plan {
         order: Option<&'static FieldOrder>,
     ) -> Option<Self> {
         let get = |i: usize| records.get(i).copied();
+        // Gathered with the first identifier asked for, as few datasets
+        // need any.
+        let identifiers = std::cell::OnceCell::new();
+        let used = |x: &str| {
+            identifiers
+                .get_or_init(|| {
+                    let mut set = HashSet::new();
+                    for r in records {
+                        crate::tree::node::identifiers(*r, &mut |x| {
+                            set.insert(x);
+                        });
+                    }
+                    set
+                })
+                .contains(x)
+        };
         Self::new(
             records.len(),
             |i| get(i).map_or("", Node::tag),
             |i| get(i).and_then(Node::xref),
+            &used,
             |i| get(i).map(Node::to_owned_structure).unwrap_or_default(),
             |i, conv| get(i).and_then(|r| needed(conv, r)),
             from,
@@ -402,10 +413,13 @@ impl Plan {
         scan: bool,
     ) -> Option<Self> {
         let mut scratch = Flat::default();
+        // The store has every identifier of the dataset.
+        let used = |x: &str| data.store().find_xref(x).is_some();
         Self::new(
             built.len(),
             |i| built.get(i).map_or("", Build::tag),
             |i| built.get(i).and_then(Build::xref),
+            &used,
             |i| built.get(i).map(built_structure).unwrap_or_default(),
             |i, conv| {
                 // Written once, looked at, copied only when it needs it.

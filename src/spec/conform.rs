@@ -36,6 +36,7 @@ use super::schema::{tag_index, Kind, Schema, StructId, DATASET};
 use super::validate::{
     encoded_len, is_external_pointer, pick, xref_error, Aliases, Pick, Picker, MAX_RECORD_BYTES,
 };
+use crate::tree::node::identifiers;
 use crate::tree::{Flat, FlatPayload, FlatRef, Node, Payload, PayloadRef, Structure, Tag, Xref};
 use crate::version::VersionRules;
 use crate::writer::{
@@ -172,6 +173,9 @@ pub(crate) struct Conformed<'n> {
     /// The repairs, in the order they were made.
     pub(crate) repairs: Vec<Repair>,
     xrefs: XrefIndex<'n, Option<StructId>>,
+    /// The identifiers pointers hold, when a record has no identifier
+    /// ([`Conformer::pointed`]).
+    pointed: Option<HashSet<Box<str>>>,
     /// The records that write themselves kept once written
     /// ([`Rec::get`]).
     pub(crate) arena: Flat<'n>,
@@ -182,6 +186,13 @@ impl Conformed<'_> {
     /// valid and unique once repaired.
     pub(crate) fn knows(&self, xref: &str) -> bool {
         self.xrefs.contains_key(xref)
+    }
+
+    /// Whether the records use `xref`: a record has it or a pointer holds
+    /// it. An identifier given to a record without one is never one of
+    /// these.
+    pub(crate) fn uses(&self, xref: &str) -> bool {
+        self.knows(xref) || self.pointed.as_ref().is_some_and(|p| p.contains(xref))
     }
 }
 
@@ -210,9 +221,17 @@ pub(crate) fn conform_records<'n, N: Node<'n>>(
             break;
         }
     }
+    // The writer gives an identifier to a standard record without one.
+    if records
+        .iter()
+        .any(|r| r.xref().is_none() && crate::writer::record_prefix(r.tag()).is_some())
+    {
+        c.gather_pointed(records);
+    }
     Conformed {
         repairs: c.repairs,
         xrefs: c.xrefs,
+        pointed: c.pointed,
         arena: c.arena,
     }
 }
@@ -538,6 +557,10 @@ struct Conformer<'n> {
     ids: Option<std::rc::Rc<IdTypes<'n>>>,
     /// The new identifier of each identifier that was invalid.
     renamed: HashMap<Box<str>, Box<str>>,
+    /// Every identifier the records hold, pointers' included, gathered
+    /// before the first new identifier is made
+    /// ([`Conformer::gather_pointed`]).
+    pointed: Option<HashSet<Box<str>>>,
     /// Extension tags of relocated standard structures, with their URIs.
     schma: Vec<(String, String)>,
     /// The tags from the record to the structure being repaired.
@@ -903,6 +926,7 @@ impl<'n> Conformer<'n> {
             xrefs: XrefIndex::default(),
             ids: None,
             renamed: HashMap::new(),
+            pointed: None,
             schma: Vec::new(),
             path: Vec::new(),
             submitter: None,
@@ -1226,8 +1250,16 @@ impl<'n> Conformer<'n> {
             return;
         };
         head.clean = 0;
+        let needs = needs_submitter(head.make_owned(&self.arena), self.rules);
+        if needs && self.submitter.is_none() {
+            // A stub submitter is made.
+            self.gather_pointed(records);
+        }
+        let Some(head) = records.first_mut() else {
+            return;
+        };
         let head = head.make_owned(&self.arena);
-        let submitter = needs_submitter(head, self.rules).then(|| {
+        let submitter = needs.then(|| {
             if let Some(x) = &self.submitter {
                 return x.to_string();
             }
@@ -1244,14 +1276,15 @@ impl<'n> Conformer<'n> {
         }
     }
 
-    /// The first `@<prefix>n@` no record holds; taken, for a record of type
+    /// The first `@<prefix>n@` no record and no pointer holds
+    /// ([`Conformer::gather_pointed`] first); taken, for a record of type
     /// `ty`.
     fn fresh(&mut self, prefix: &str, ty: Option<StructId>) -> String {
         let mut n = 0_usize;
         loop {
             n += 1;
             let candidate = format!("@{prefix}{n}@");
-            if !self.xrefs.contains_key(candidate.as_str()) {
+            if !self.is_used(&candidate) {
                 self.xrefs.insert(Cow::Owned(candidate.clone()), ty);
                 return candidate;
             }
@@ -1400,6 +1433,9 @@ impl<'n> Conformer<'n> {
                 self.xrefs.insert(Cow::Owned(x.to_string()), ty);
             }
         }
+        if keep.contains(&false) {
+            self.gather_pointed(records);
+        }
         for (r, ok) in records.iter_mut().zip(keep) {
             if ok {
                 continue;
@@ -1421,6 +1457,34 @@ impl<'n> Conformer<'n> {
         }
     }
 
+    /// Whether a record or a pointer holds `xref`.
+    fn is_used(&self, xref: &str) -> bool {
+        debug_assert!(self.pointed.is_some(), "pointers not gathered");
+        self.xrefs.contains_key(xref) || self.pointed.as_ref().is_some_and(|p| p.contains(xref))
+    }
+
+    /// Gathers, once, every identifier the records hold, pointers'
+    /// included: a new identifier is never one of them, so that it names
+    /// nothing a pointer named (a pointer to no record keeps naming none).
+    fn gather_pointed<N: Node<'n>>(&mut self, records: &[Rec<'n, N>]) {
+        if self.pointed.is_some() {
+            return;
+        }
+        let mut set = HashSet::new();
+        let mut add = |x: &str| {
+            set.insert(Box::from(x));
+        };
+        let mut scratch = std::mem::take(&mut self.scratch);
+        for r in records {
+            with_node!(r.get(&self.arena), scratch, |n| identifiers(n, &mut add));
+        }
+        for r in &self.new_records {
+            identifiers(r, &mut add);
+        }
+        self.scratch = scratch;
+        self.pointed = Some(set);
+    }
+
     /// Takes `xref`, the valid identifier of a record tagged `tag`, unless
     /// a record holds it already.
     fn take(&mut self, xref: Cow<'n, str>, tag: &str, standard: Option<u16>) -> bool {
@@ -1431,12 +1495,13 @@ impl<'n> Conformer<'n> {
         self.xrefs.insert_new(xref, ty)
     }
 
-    /// `candidate`, or `candidate` with the first free `_2`, `_3`… suffix;
+    /// `candidate`, or `candidate` with the first `_2`, `_3`… suffix no
+    /// record and no pointer holds ([`Conformer::gather_pointed`] first);
     /// taken, for a record of type `ty`.
     fn unique(&mut self, candidate: &str, ty: Option<StructId>) -> String {
         let mut new = candidate.to_string();
         let mut n = 1_usize;
-        while self.xrefs.contains_key(new.as_str()) {
+        while self.is_used(&new) {
             n += 1;
             new = numbered_xref(self.rules, candidate, n);
         }
@@ -2377,9 +2442,9 @@ impl<'n> Conformer<'n> {
     /// until the record fits; a record that moving every note would not
     /// bring under the limit is left as it is.
     fn record_sizes<N: Node<'n>>(&mut self, records: &mut Vec<Rec<'n, N>>) {
-        let mut added = Vec::new();
+        let mut over = Vec::new();
         let mut scratch = std::mem::take(&mut self.scratch);
-        for rec in records.iter_mut() {
+        for (i, rec) in records.iter().enumerate() {
             let Some(ty) = self.record_of_standard(rec.tag(), rec.standard_tag()) else {
                 continue;
             };
@@ -2392,9 +2457,20 @@ impl<'n> Conformer<'n> {
                 0,
                 self.family
             ));
-            if size <= MAX_RECORD_BYTES {
-                continue;
+            if size > MAX_RECORD_BYTES {
+                over.push((i, ty, size));
             }
+        }
+        self.scratch = scratch;
+        if over.is_empty() {
+            return;
+        }
+        self.gather_pointed(records);
+        let mut added = Vec::new();
+        for (i, ty, size) in over {
+            let Some(rec) = records.get_mut(i) else {
+                continue;
+            };
             let r = rec.make_owned(&self.arena);
             let note_ty = self.record_of("NOTE");
             let moved = self.move_notes(r, ty, size, &mut |c: &mut Self| c.unique("@N1@", note_ty));
@@ -2402,7 +2478,6 @@ impl<'n> Conformer<'n> {
             added.extend(moved);
             (rec.clean, rec.size) = (0, u32::MAX);
         }
-        self.scratch = scratch;
         if !added.is_empty() {
             insert_records(records, added);
         }
