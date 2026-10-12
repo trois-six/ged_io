@@ -12,7 +12,7 @@ env:
 
 jobs:
   fuzz:
-    name: Fuzz every entry point, the decoder and the lexer
+    name: Fuzz every target
     runs-on: ubuntu-latest
 
     steps:
@@ -28,7 +28,7 @@ jobs:
 
     - name: Seed the corpora with the test fixtures
       run: |
-        for target in entry_points tree writer spec model editing; do
+        for target in entry_points tree writer spec model convert editing; do
           mkdir -p fuzz/corpus/$target
           find tests/fixtures -name '*.ged' -size -64k -exec cp {} fuzz/corpus/$target/ \;
         done
@@ -47,6 +47,9 @@ jobs:
 
     - name: Fuzz the typed model under construction for five minutes
       run: cargo fuzz run model -- -max_total_time=300 -max_len=65536
+
+    - name: Fuzz the conversion between 5.5.1 and 7.x for five minutes
+      run: cargo fuzz run convert -- -max_total_time=300 -max_len=65536
 
     - name: Fuzz edit sequences (counts, lookups, dangling pointers, writes) for five minutes
       run: cargo fuzz run editing -- -max_total_time=300 -max_len=65536
