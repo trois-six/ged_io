@@ -711,8 +711,9 @@ pub(crate) struct Index {
     /// The other records that have an identifier a record has before
     /// them: (identifier, place).
     more: Vec<(XrefId, Place)>,
-    /// The records whose identifier is invalid in 5.5.1, in 7.x.
-    invalid: [u32; 2],
+    /// The records whose identifier is invalid in 5.5.1, in 7.x: counted
+    /// the first time the writer asks, from the definitions.
+    invalid: OnceLock<[u32; 2]>,
     /// By identifier id, the pointers that hold it; built when first asked
     /// for.
     refs: OnceLock<Vec<u32>>,
@@ -750,14 +751,17 @@ impl Index {
         if !store.has_xref(id) {
             return;
         }
-        let (v551, v7) = store.xref_validity(id);
-        self.invalid[0] += u32::from(!v551);
-        self.invalid[1] += u32::from(!v7);
+        if let Some(invalid) = self.invalid.get_mut() {
+            let (v551, v7) = store.xref_validity(id);
+            invalid[0] += u32::from(!v551);
+            invalid[1] += u32::from(!v7);
+        }
         self.place_def(id, at);
     }
 
     /// Records where the record that has `id` is, as [`Index::define`]
     /// does, its validity left to be counted.
+    #[inline]
     fn place_def(&mut self, id: XrefId, at: Place) {
         let i = id.index();
         if self.defs.len() <= i {
@@ -784,9 +788,11 @@ impl Index {
         if !store.has_xref(id) {
             return;
         }
-        let (v551, v7) = store.xref_validity(id);
-        self.invalid[0] -= u32::from(!v551);
-        self.invalid[1] -= u32::from(!v7);
+        if let Some(invalid) = self.invalid.get_mut() {
+            let (v551, v7) = store.xref_validity(id);
+            invalid[0] -= u32::from(!v551);
+            invalid[1] -= u32::from(!v7);
+        }
         if self.def(id) == at {
             // The next record with it, if any, comes first now.
             let next = self
@@ -1237,8 +1243,7 @@ impl Dataset {
     }
 
     /// Completes the tables once every record is read and the store is
-    /// the dataset's: the identifiers of another store left out, the
-    /// invalid ones counted, from the compact tables, not the records.
+    /// the dataset's: the identifiers of another store left out.
     pub(crate) fn index_read(&mut self) {
         let store = &self.store;
         let index = &mut self.index;
@@ -1246,22 +1251,36 @@ impl Dataset {
             // Ids of no identifier of the store: none is defined.
             index.defs.truncate(store.xref_count());
         }
-        index.defs.shrink_to_fit();
-        index.more.retain(|(id, _)| store.has_xref(*id));
+        // Grown by doubling: what is spare is given back when it is worth
+        // a copy.
+        if index.defs.capacity() - index.defs.len() > 1 << 14 {
+            index.defs.shrink_to_fit();
+        }
+        if !index.more.is_empty() {
+            index.more.retain(|(id, _)| store.has_xref(*id));
+        }
+    }
+
+    /// The records whose identifier is invalid in 5.5.1 and in 7.x,
+    /// counted from the definitions, not the records: once.
+    #[cold]
+    #[inline(never)]
+    fn count_invalid(&self) -> [u32; 2] {
         let mut invalid = [0_u32; 2];
-        let ids = index
+        let ids = self
+            .index
             .defs
             .iter()
             .enumerate()
             .filter(|(_, &d)| d != 0)
             .map(|(i, _)| i)
-            .chain(index.more.iter().map(|(id, _)| id.index()));
+            .chain(self.index.more.iter().map(|(id, _)| id.index()));
         for i in ids {
-            let (v551, v7) = store.xref_validity_at(i);
+            let (v551, v7) = self.store.xref_validity_at(i);
             invalid[0] += u32::from(!v551);
             invalid[1] += u32::from(!v7);
         }
-        index.invalid = invalid;
+        invalid
     }
 
     /// Every pointer of the dataset, counted by id, leaving out the record
@@ -1398,7 +1417,12 @@ impl Dataset {
         let i = usize::from(matches!(rules.xref, crate::version::XrefGrammar::V7));
         self.index.lent.is_none()
             && self.index.more.is_empty()
-            && self.index.invalid.get(i) == Some(&0)
+            && self
+                .index
+                .invalid
+                .get_or_init(|| self.count_invalid())
+                .get(i)
+                == Some(&0)
     }
 
     /// By identifier id, where the record that has it is: its kind
@@ -1848,8 +1872,10 @@ impl Dataset {
         }
         let (n551, n7) = self.store.xref_validity(id);
         let n = u32::try_from(holders).unwrap_or(u32::MAX);
-        self.index.invalid[0] = self.index.invalid[0] - n * u32::from(!v551) + n * u32::from(!n551);
-        self.index.invalid[1] = self.index.invalid[1] - n * u32::from(!v7) + n * u32::from(!n7);
+        if let Some(invalid) = self.index.invalid.get_mut() {
+            invalid[0] = invalid[0] - n * u32::from(!v551) + n * u32::from(!n551);
+            invalid[1] = invalid[1] - n * u32::from(!v7) + n * u32::from(!n7);
+        }
         Ok(id)
     }
 
