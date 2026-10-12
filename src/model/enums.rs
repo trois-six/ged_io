@@ -270,7 +270,12 @@ macro_rules! gedcom_enum {
 fn find_known(values: &[EnumValue], s: &str, version: Option<GedcomVersion>) -> Option<usize> {
     // Spaces around a value are not the value; a line break is (a value
     // continued is no value of the set, and writes back as continued).
-    let s = s.trim_matches(|c: char| c.is_whitespace() && c != '\n');
+    let edge = |b: Option<&u8>| b.is_some_and(|b| !b.is_ascii_alphanumeric());
+    let s = if edge(s.as_bytes().first()) || edge(s.as_bytes().last()) {
+        s.trim_matches(|c: char| c.is_whitespace() && c != '\n')
+    } else {
+        s
+    };
     values.iter().position(|v| {
         let own = match version {
             Some(version) if version.is_v7() => v.v7.is_some(),

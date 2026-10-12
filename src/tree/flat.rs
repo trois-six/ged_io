@@ -103,7 +103,7 @@ pub(crate) struct Flat<'s> {
     /// The extension structures under typed ones, which the check walks.
     extensions: Vec<u32>,
     /// The state of stream mode, when set.
-    stream: Option<Stream<'s>>,
+    stream: Option<Box<Stream<'s>>>,
 }
 
 /// A structure open in stream mode.
@@ -317,7 +317,7 @@ impl<'s> Flat<'s> {
     /// Sets stream mode ([`Stream`]), or node mode (`None`), for the
     /// records written from now on.
     pub(crate) fn set_stream(&mut self, stream: Option<Stream<'s>>) {
-        self.stream = stream;
+        self.stream = stream.map(Box::new);
     }
 
     /// Whether the arena is in stream mode.
@@ -327,14 +327,14 @@ impl<'s> Flat<'s> {
 
     /// The state of stream mode, taken out: the arena is in node mode.
     pub(crate) fn take_stream(&mut self) -> Option<Stream<'s>> {
-        self.stream.take()
+        self.stream.take().map(|b| *b)
     }
 
     /// Starts a record in stream mode, written with the identifier `xref`
     /// on its line.
     pub(crate) fn begin_stream(&mut self, xref: Option<Cow<'s, str>>) {
         self.clear();
-        if let Some(st) = self.stream.as_mut() {
+        if let Some(st) = self.stream.as_deref_mut() {
             st.lines.clear();
             st.xref = xref;
             st.open.clear();
@@ -359,7 +359,7 @@ impl<'s> Flat<'s> {
 
     /// The lines of the record streamed.
     pub(crate) fn stream_lines(&mut self) -> Option<&mut LineSink<'static>> {
-        self.stream.as_mut().map(|st| &mut st.lines)
+        self.stream.as_deref_mut().map(|st| &mut st.lines)
     }
 
     /// The typed pointers of the record streamed, which the check looks
@@ -367,7 +367,7 @@ impl<'s> Flat<'s> {
     pub(crate) fn stream_pointers(
         &self,
     ) -> impl Iterator<Item = (PayloadRef<'_>, Option<XrefId>, StructId)> {
-        let checks: &[_] = self.stream.as_ref().map_or(&[], |st| &st.checks);
+        let checks: &[_] = self.stream.as_deref().map_or(&[], |st| &st.checks);
         checks.iter().map(|(p, ty, _)| {
             let id = match p {
                 FlatPayload::Pointer(_, id) => *id,
@@ -380,7 +380,7 @@ impl<'s> Flat<'s> {
     /// The pointers of the extension structures of the record streamed,
     /// each to name a record, with their ids.
     pub(crate) fn stream_extension_pointers(&self) -> impl Iterator<Item = (&str, Option<XrefId>)> {
-        let pointers: &[_] = self.stream.as_ref().map_or(&[], |st| &st.pointers);
+        let pointers: &[_] = self.stream.as_deref().map_or(&[], |st| &st.pointers);
         pointers.iter().map(|(p, id)| (&**p, *id))
     }
 
@@ -438,7 +438,7 @@ impl<'s> Flat<'s> {
 
     /// The type of the record being written, once typed.
     pub(crate) fn root_type(&self) -> Option<StructId> {
-        if let Some(st) = self.stream.as_ref() {
+        if let Some(st) = self.stream.as_deref() {
             return Some(st.root).filter(|&t| t != UNTYPED);
         }
         self.nodes
@@ -482,7 +482,7 @@ impl<'s> Flat<'s> {
     /// Something not typed is written: the check walks the record.
     pub(crate) fn untrusted(&mut self) {
         self.untyped = true;
-        if let Some(st) = self.stream.as_mut() {
+        if let Some(st) = self.stream.as_deref_mut() {
             st.spoiled = true;
         }
     }
@@ -682,7 +682,7 @@ impl<'s> Flat<'s> {
         let repeat = std::mem::take(&mut self.repeat);
         let depth = self.depth;
         self.depth += 1;
-        let (Some(st), Some(typing)) = (self.stream.as_mut(), self.typing.as_ref()) else {
+        let (Some(st), Some(typing)) = (self.stream.as_deref_mut(), self.typing.as_ref()) else {
             return;
         };
         if st.spoiled {
@@ -772,7 +772,7 @@ impl<'s> Flat<'s> {
     ) {
         let depth = self.depth;
         self.depth += 1;
-        let Some(st) = self.stream.as_mut() else {
+        let Some(st) = self.stream.as_deref_mut() else {
             return;
         };
         if st.spoiled {
@@ -831,7 +831,7 @@ impl<'s> Flat<'s> {
     #[inline]
     fn stream_close(&mut self) {
         self.depth = self.depth.saturating_sub(1);
-        let (Some(st), Some(typing)) = (self.stream.as_mut(), self.typing.as_ref()) else {
+        let (Some(st), Some(typing)) = (self.stream.as_deref_mut(), self.typing.as_ref()) else {
             return;
         };
         if st.spoiled {
