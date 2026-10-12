@@ -12,6 +12,7 @@
 //! cost of conformance on a dataset that needs no repair.
 
 use super::{payload, Conformer, Family, Kind, Pick, Schema, SchemaIndex, StructId, DATASET};
+use crate::model::XrefId;
 use crate::spec::schema::EnumSet;
 use crate::spec::validate::is_external_pointer;
 use crate::tree::{Flat, Node, PayloadRef};
@@ -183,11 +184,12 @@ impl Conformer<'_> {
         debug_assert!(self.aliases.structs.is_empty());
         walk.size += flat.size();
         walk.rtype = flat.root_type().unwrap_or(DATASET);
-        let (checks, mut pointers) = flat.stream_checks();
-        let mut checks = checks;
-        checks.all(|(payload, ty, special)| {
-            self.clean_payload_known(payload, ty, Some(special), walk)
-        }) && pointers.all(|p| self.resolves(p, walk))
+        flat.stream_pointers().all(|(payload, id, ty)| {
+            let (kind, arg) = self.schema.kind(ty);
+            self.clean_pointer(payload, id, kind, arg, walk)
+        }) && flat
+            .stream_extension_pointers()
+            .all(|(p, id)| self.resolves(p, id, walk))
     }
 
     /// [`Conformer::is_clean`] of a record, its size bound added to
@@ -318,7 +320,7 @@ impl Conformer<'_> {
             }
         }
         let payload_ok = match at.payload {
-            PayloadRef::Pointer(p) => self.resolves(p, walk),
+            PayloadRef::Pointer(p) => self.resolves(p, None, walk),
             PayloadRef::Text(t) => !payload::has_banned(t, self.rules),
             PayloadRef::None => true,
         };
@@ -335,18 +337,26 @@ impl Conformer<'_> {
     /// Whether a pointer stays as it is and names a record (of any type),
     /// `@VOID@` or, in 5.5.1, a substructure or a record of another file
     /// ([`Conformer::resolve`]).
-    fn resolves(&self, p: &str, walk: &mut Walk<'_>) -> bool {
+    /// `id` is its id in the store of the typed dataset written
+    /// ([`Conformer::ids`]), when it has one.
+    fn resolves(&self, p: &str, id: Option<XrefId>, walk: &mut Walk<'_>) -> bool {
         if !self.renamed.is_empty() && self.renamed.contains_key(p) {
             return false;
         }
         (self.family == Family::V7 && p == "@VOID@")
             || is_external_pointer(p, self.family)
-            || self.names(p, ANY, walk)
+            || self.names(p, id, ANY, walk)
     }
 
     /// Whether `p` names a record of type `want` ([`ANY`]: of any type),
     /// or will be checked to ([`Walk::pending`]).
-    fn names(&self, p: &str, want: StructId, walk: &mut Walk<'_>) -> bool {
+    fn names(&self, p: &str, id: Option<XrefId>, want: StructId, walk: &mut Walk<'_>) -> bool {
+        if let (Some(ids), Some(id)) = (&self.ids, id) {
+            return match ids.get_id(id, p) {
+                Some(named) => want == ANY || named.0 == Some(want),
+                None => false,
+            };
+        }
         match (XrefIndex::<()>::packed(p), walk.pending.as_deref_mut()) {
             (Some(key), Some(pending)) => {
                 pending.push(Lookup {
@@ -397,7 +407,7 @@ impl Conformer<'_> {
         let (kind, arg) = self.schema.kind(ty);
         let raw = match payload {
             p if matches!(kind, Kind::Pointer | Kind::NullablePointer) => {
-                return self.clean_pointer(p, kind, arg, walk);
+                return self.clean_pointer(p, None, kind, arg, walk);
             }
             PayloadRef::Pointer(_) => return false,
             PayloadRef::Text(t) => t,
@@ -426,6 +436,7 @@ impl Conformer<'_> {
     fn clean_pointer(
         &self,
         payload: PayloadRef<'_>,
+        id: Option<XrefId>,
         kind: Kind,
         target: u16,
         walk: &mut Walk<'_>,
@@ -440,7 +451,7 @@ impl Conformer<'_> {
                 {
                     return true;
                 }
-                self.names(p, target, walk)
+                self.names(p, id, target, walk)
             }
             PayloadRef::None => kind == Kind::NullablePointer,
             PayloadRef::Text(_) => false,
