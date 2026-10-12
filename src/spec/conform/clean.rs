@@ -351,6 +351,9 @@ impl Conformer<'_> {
     /// Whether `p` names a record of type `want` ([`ANY`]: of any type),
     /// or will be checked to ([`Walk::pending`]).
     fn names(&self, p: &str, id: Option<XrefId>, want: StructId, walk: &mut Walk<'_>) -> bool {
+        if self.trust {
+            return true;
+        }
         if let (Some(ids), Some(id)) = (&self.ids, id) {
             return match ids.get_id(id, p) {
                 Some(named) => want == ANY || named.0 == Some(want),

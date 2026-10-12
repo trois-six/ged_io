@@ -19,6 +19,17 @@ pub(crate) struct Built<'d> {
     cx: WriteCx<'d>,
 }
 
+impl<'d> Built<'d> {
+    /// A record of a dataset whose store `cx` holds, to write in
+    /// `cx.version`.
+    pub(crate) fn new(record: RecordRef<'d>, cx: WriteCx<'d>) -> Self {
+        Self {
+            record: Some(record),
+            cx,
+        }
+    }
+}
+
 impl<'d> Build<'d> for Built<'d> {
     fn tag(&self) -> &'d str {
         self.record

@@ -47,7 +47,7 @@ pub(crate) struct Validator<'a> {
 /// The extension tags `HEAD.SCHMA` documents with a standard URI (7.x
 /// §1.5.1): a tag that stands for a standard structure type, and a tag that
 /// stands for a standard enumeration value, month or calendar.
-#[derive(Default, PartialEq)]
+#[derive(Clone, Default, PartialEq)]
 pub(crate) struct Aliases {
     pub(crate) structs: HashMap<String, StructId>,
     pub(crate) words: HashMap<String, String>,

@@ -50,6 +50,7 @@
 
 mod emit;
 mod head;
+mod stream;
 mod xref;
 
 use std::borrow::Cow;
@@ -71,6 +72,7 @@ pub(crate) use emit::{
     emit_typed, extension_tag, new_xref, special_bytes, LineSink, CONTROL, MAYBE_BANNED, TAB,
 };
 pub(crate) use head::{complete as complete_head, needs_submitter, stub_submitter, PLACEHOLDER};
+pub use stream::GedcomStreamWriter;
 pub(crate) use xref::{numbered_xref, XrefIndex};
 
 /// The line terminator of written files.
@@ -869,6 +871,19 @@ fn declared_version(records: &[Structure]) -> GedcomVersion {
         .unwrap_or_default()
 }
 
+/// What a pointer is written as: [`XrefMap::pointer`] for a whole
+/// dataset, [`stream::StreamXrefs::pointer`] record by record.
+pub(crate) trait Pointers {
+    /// The identifier `pointer` is written with.
+    fn pointer<'p>(&mut self, pointer: &'p str) -> Cow<'p, str>;
+}
+
+impl Pointers for XrefMap<'_> {
+    fn pointer<'p>(&mut self, pointer: &'p str) -> Cow<'p, str> {
+        XrefMap::pointer(self, pointer)
+    }
+}
+
 /// Whether a record is the trailer the writer replaces by its own: an
 /// empty `TRLR`.
 fn is_trailer<'n, N: Node<'n>>(r: &Rec<'n, N>) -> bool {
@@ -1093,7 +1108,7 @@ fn assert_lines<'n>(
 /// record.
 fn put_record<'a, M: Node<'a>>(
     out: &mut Emitter<'_, '_>,
-    xrefs: &mut XrefMap<'_>,
+    xrefs: &mut dyn Pointers,
     xref: Option<&str>,
     record: M,
     stack: &mut Vec<(usize, M::Children)>,
@@ -1126,7 +1141,7 @@ fn put_record<'a, M: Node<'a>>(
 /// Writes a record written into a flat arena, with the identifier `xref`.
 fn put_flat(
     out: &mut Emitter<'_, '_>,
-    xrefs: &mut XrefMap<'_>,
+    xrefs: &mut dyn Pointers,
     xref: Option<&str>,
     root: FlatRef<'_>,
 ) -> Result<(), WriteError> {
@@ -1160,7 +1175,7 @@ fn put_flat(
 /// Writes the line of a record, with the identifier `xref`.
 fn put_record_line<'a, M: Node<'a>>(
     out: &mut Emitter<'_, '_>,
-    xrefs: &mut XrefMap<'_>,
+    xrefs: &mut dyn Pointers,
     xref: Option<&str>,
     record: M,
 ) -> Result<(), WriteError> {
@@ -1187,7 +1202,7 @@ fn put_record_line<'a, M: Node<'a>>(
 /// Writes one structure with its pointer mapped.
 fn put_node(
     out: &mut Emitter<'_, '_>,
-    xrefs: &mut XrefMap<'_>,
+    xrefs: &mut dyn Pointers,
     level: usize,
     xref: Option<&str>,
     tag: &str,
@@ -1271,7 +1286,7 @@ fn put_clean(out: &mut Emitter<'_, '_>, root: &Structure) -> Result<(), WriteErr
 }
 
 /// Maps every pointer of an owned structure.
-fn map_pointers(root: &mut Structure, xrefs: &mut XrefMap<'_>) {
+fn map_pointers(root: &mut Structure, xrefs: &mut dyn Pointers) {
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
         if let crate::tree::Payload::Pointer(p) = &node.payload {
