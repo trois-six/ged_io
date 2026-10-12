@@ -101,7 +101,7 @@ impl Node {
             Value::None => FlatPayload::None,
             Value::Pointer(p) => FlatPayload::Pointer(Cow::Borrowed(store.xref(*p)), Some(*p)),
             Value::Text(t) if t.is_empty() => FlatPayload::None,
-            Value::Text(t) => FlatPayload::Text(t.to_str(store)),
+            Value::Text(t) => FlatPayload::Text(t.to_str(store), t.special()),
         }
     }
 

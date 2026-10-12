@@ -613,8 +613,8 @@ impl Typing {
                 Kind::NullablePointer => true,
                 kind => payload::empty_is_valid(kind),
             },
-            FlatPayload::Text(_) if claim != Some(kind) => false,
-            FlatPayload::Text(t) => match kind {
+            FlatPayload::Text(..) if claim != Some(kind) => false,
+            FlatPayload::Text(t, _) => match kind {
                 Kind::Enum | Kind::ListEnum => {
                     let family = if self.v7 { Family::V7 } else { Family::V551 };
                     self.schema.enum_set(arg).is_some_and(|set| {
@@ -653,17 +653,17 @@ impl Typing {
                 return match payload {
                     FlatPayload::None => Some(kind == Kind::NullablePointer),
                     FlatPayload::Pointer(..) => None,
-                    FlatPayload::Text(_) => Some(false),
+                    FlatPayload::Text(..) => Some(false),
                 };
             }
             FlatPayload::Pointer(..) => return Some(false),
-            FlatPayload::Text(t) if claim == Some(kind) => {
+            FlatPayload::Text(t, _) if claim == Some(kind) => {
                 if self.trusts(ty, payload, claim) {
                     return Some(true);
                 }
                 t
             }
-            FlatPayload::Text(t) => t,
+            FlatPayload::Text(t, _) => t,
             FlatPayload::None => "",
         };
         // Any text without a banned character is a text; nearly every

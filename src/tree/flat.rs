@@ -31,6 +31,22 @@ use crate::writer::{emit_typed, special_bytes, LineSink};
 /// The type of a structure not typed ([`Flat::open`]).
 const UNTYPED: StructId = StructId::MAX;
 
+/// [`FlatPayload::Text`] of a text whose [`special_bytes`] are not known
+/// yet.
+pub(crate) const UNKNOWN: u8 = 0x80;
+
+/// The [`special_bytes`] of `text`, known as `special` unless
+/// [`UNKNOWN`].
+#[inline]
+fn special_of(text: &str, special: u8) -> u8 {
+    if special == UNKNOWN {
+        special_bytes(text)
+    } else {
+        debug_assert_eq!(special, special_bytes(text), "{text:?}");
+        special
+    }
+}
+
 /// A payload in a [`Flat`] arena.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) enum FlatPayload<'s> {
@@ -40,8 +56,9 @@ pub(crate) enum FlatPayload<'s> {
     /// A pointer, delimiters included, with its id in the store of the
     /// dataset it was written from, when it has one.
     Pointer(Cow<'s, str>, Option<XrefId>),
-    /// Text, unescaped, continuations joined.
-    Text(Cow<'s, str>),
+    /// Text, unescaped, continuations joined, with its [`special_bytes`]
+    /// when known ([`UNKNOWN`] otherwise).
+    Text(Cow<'s, str>, u8),
 }
 
 impl From<Payload> for FlatPayload<'_> {
@@ -49,7 +66,7 @@ impl From<Payload> for FlatPayload<'_> {
         match p {
             Payload::None => FlatPayload::None,
             Payload::Pointer(x) => FlatPayload::Pointer(Cow::Owned(x.as_str().to_string()), None),
-            Payload::Text(t) => FlatPayload::Text(Cow::Owned(t.into_string())),
+            Payload::Text(t) => FlatPayload::Text(Cow::Owned(t.into_string()), UNKNOWN),
         }
     }
 }
@@ -285,7 +302,7 @@ impl<'s> Stream<'s> {
         };
         let payload = match payload {
             FlatPayload::None => PayloadRef::None,
-            FlatPayload::Text(t) => PayloadRef::Text(t),
+            FlatPayload::Text(t, _) => PayloadRef::Text(t),
             FlatPayload::Pointer(p, _) => PayloadRef::Pointer(p),
         };
         if emit_typed(
@@ -371,7 +388,7 @@ impl<'s> Flat<'s> {
         checks.iter().map(|(p, ty, _)| {
             let id = match p {
                 FlatPayload::Pointer(_, id) => *id,
-                FlatPayload::None | FlatPayload::Text(_) => None,
+                FlatPayload::None | FlatPayload::Text(..) => None,
             };
             (payload_ref(p), id, *ty)
         })
@@ -623,7 +640,7 @@ impl<'s> Flat<'s> {
         ty: StructId,
     ) -> usize {
         let special = match &payload {
-            FlatPayload::Text(t) => special_bytes(t),
+            FlatPayload::Text(t, special) => special_of(t, *special),
             FlatPayload::None | FlatPayload::Pointer(..) => 0,
         };
         self.nodes.push(FlatNode {
@@ -713,7 +730,7 @@ impl<'s> Flat<'s> {
             return;
         };
         let special = match &payload {
-            FlatPayload::Text(t) => special_bytes(t),
+            FlatPayload::Text(t, special) => special_of(t, *special),
             FlatPayload::None | FlatPayload::Pointer(..) => 0,
         };
         if !typing.v7() {
@@ -723,7 +740,7 @@ impl<'s> Flat<'s> {
         let empty = match &payload {
             FlatPayload::None => true,
             FlatPayload::Pointer(..) => false,
-            FlatPayload::Text(t) => t.is_empty(),
+            FlatPayload::Text(t, _) => t.is_empty(),
         };
         match st.open.last_mut() {
             Some(p) => {
@@ -801,8 +818,8 @@ impl<'s> Flat<'s> {
             return;
         }
         let special = match &payload {
-            FlatPayload::Text(t) => {
-                let special = special_bytes(t);
+            FlatPayload::Text(t, special) => {
+                let special = special_of(t, *special);
                 if crate::spec::payload::has_banned_known(t, special, rules) {
                     st.spoiled = true;
                     return;
@@ -889,7 +906,7 @@ impl<'s> Flat<'s> {
             let empty = match &node.payload {
                 FlatPayload::None => true,
                 FlatPayload::Pointer(..) => false,
-                FlatPayload::Text(t) => t.is_empty(),
+                FlatPayload::Text(t, _) => t.is_empty(),
             };
             let record = self.open.is_empty();
             if !record && empty && node.end as usize == at + 1 {
@@ -957,7 +974,7 @@ fn size_bound(
     let tag = standard.map_or(tag.len(), |_| 6);
     let payload = match payload {
         FlatPayload::None => 0,
-        FlatPayload::Pointer(p, _) | FlatPayload::Text(p) => p.len(),
+        FlatPayload::Pointer(p, _) | FlatPayload::Text(p, _) => p.len(),
     };
     8 + tag + xref.map_or(0, str::len) + 13 * payload
 }
@@ -967,7 +984,7 @@ fn size_bound(
 fn payload_ref<'a>(payload: &'a FlatPayload<'_>) -> PayloadRef<'a> {
     match payload {
         FlatPayload::Pointer(p, _) => PayloadRef::Pointer(p),
-        FlatPayload::Text(t) => PayloadRef::Text(t),
+        FlatPayload::Text(t, _) => PayloadRef::Text(t),
         FlatPayload::None => PayloadRef::None,
     }
 }
