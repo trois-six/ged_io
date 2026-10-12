@@ -28,7 +28,7 @@ reporting each repair.
 | **Three versions** | GEDCOM 5.5.1, 7.0 and 7.1, read and written; every structure of each has a type |
 | **Conversion** | 5.5.1 to 7.x and back, following the FamilySearch migration guide: multimedia and source records, roles, translations, languages, media types and file URIs, identifiers, dates and ages |
 | **Read & write** | A lossless, lenient reader, and a writer conformant by construction; data that does not fit a type is kept, in place, and written back |
-| **Streaming parser** | One record at a time, in any encoding and with any line terminators, memory bounded by the largest record |
+| **Streaming** | Read and write one record at a time, in any encoding and with any line terminators, memory bounded by the largest record |
 | **Indexed lookups** | Records by identifier and families from individuals in constant time |
 | **GEDZIP** | Read and write `.gdz` archives bundling a GEDCOM 7.x dataset with its media files, converting 5.5.1 (feature `gedzip`) |
 | **Encodings** | UTF-8, UTF-16 LE/BE (with or without BOM), ANSEL (to Unicode NFC), ASCII, Windows-1252 (`ANSI`), ISO-8859-1, ISO-8859-15, IBM PC (cp437), Macintosh; decoding never fails; in memory and streaming |
@@ -36,7 +36,7 @@ reporting each repair.
 | **Type safe** | A Rust type per structure, enumerations whose unknown values keep their text, typed identifiers and pointers |
 | **Validation** | The 5.5.1, 7.0 and 7.1 specification tables: every deviation of a file with its line, an opt-in strict mode, and a repair pass that makes any tree conformant without losing data |
 | **Values** | Date, age and time grammars of both versions, conversions between versions, and calendar arithmetic (feature `calendar`) |
-| **Fast** | 1.7 to 4 times as fast as 0.17 to read, at less than three times the input's size in memory (see [Performance](#performance)) |
+| **Fast** | 1.3 to 4 times as fast as 0.17 to read and up to 4 times as fast to write, at less than three times the input's size in memory (see [Performance](#performance)) |
 
 ---
 
@@ -334,6 +334,42 @@ structures instead; for a whole file as structures, nothing interpreted,
 use `ged_io::tree::Tree` (in memory) or `ged_io::tree::TreeReader`
 (streaming).
 
+`GedcomStreamWriter` writes the other way: a header, then each record as
+it is given (from a `GedcomStreamParser`, or a dataset), repaired and
+converted for the target version as `GedcomWriter` does, in memory bounded
+by one record and the identifiers written:
+
+```rust,no_run
+use ged_io::model::{Header, RecordRef};
+use ged_io::{GedcomStreamParser, GedcomStreamWriter, GedcomVersion, WriterConfig};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let input = std::io::BufReader::new(std::fs::File::open("huge.ged")?);
+    let output = std::io::BufWriter::new(std::fs::File::create("huge-7.ged")?);
+    let mut records = GedcomStreamParser::new(input)?;
+    let head = records.next().ok_or("empty file")??;
+    let default = Header::default();
+    let header = match head.record() {
+        RecordRef::Header(h) => h,
+        _ => &default,
+    };
+    let config = WriterConfig { version: Some(GedcomVersion::V7_0), ..WriterConfig::default() };
+    let mut writer = GedcomStreamWriter::new(output, config, header, &head)?;
+    for record in records {
+        let record = record?;
+        writer.write_record(record.record(), &record)?;
+    }
+    let (_, report) = writer.finish()?;
+    eprintln!("{} repairs", report.repairs.len());
+    Ok(())
+}
+```
+
+Knowing one record at a time, it writes what `GedcomWriter` writes of the
+same records but where the records to come would change it (a later
+record named as an earlier one, the records a conversion adds, the
+extension tags a 7.x header declares); its documentation lists each case.
+
 ---
 
 ## GEDZIP
@@ -508,30 +544,46 @@ ged-io --write 7.0 --keep-obsolete family.ged > family70.ged
 
 ## Performance
 
-Measured with `tools/differential` (`perf`: one crate and one operation per
-process, median of 30 runs on one core of an Intel Core Ultra 7 265H,
-release build), against the published 0.17.0 on the same files:
+Measured against the published 0.17.0 with `tools/differential` (`perf`:
+one crate and one operation per process, release build, on a performance
+core of an Intel Core Ultra 7 265H). Small files: CPU cycles per
+operation (`perf stat`, steady state over thousands of runs: free of the
+clock's changes), instructions in parentheses:
 
 | Input | Read 0.17 | Read 0.18 | Write 0.17 | Write 0.18 |
 |-------|----------:|----------:|-----------:|-----------:|
-| `tests/fixtures/sample.ged` (2 KB) | 0.032 ms | 0.023 ms | 0.011 ms | 0.018 ms |
-| `tests/fixtures/conformance/maximal551.ged` (10 KB) | 0.19 ms | 0.084 ms | 0.032 ms | 0.066 ms |
-| `tests/fixtures/washington.ged` (234 KB) | 2.0 ms | 0.90 ms | 0.51 ms | 0.75 ms |
-| generated, 20,000 individuals (9.4 MB) | 154 ms (61 MB/s) | 47 ms (200 MB/s) | 65 ms | 60 ms |
-| generated, 172,000 individuals (82 MB) | 1.28 s (64 MB/s) | 0.26 s (316 MB/s) | 0.57 s | 0.54 s |
+| `tests/fixtures/simple.ged` (47 lines) | 27.0k (115k) | 20.0k (91k) | 10.7k (52k) | 9.4k (45k) |
+| `tests/fixtures/sample.ged` (96 lines) | 53.5k (231k) | 34.7k (166k) | 18.8k (94k) | 20.5k (97k) |
+| `tests/fixtures/conformance/maximal551.ged` (704 lines) | 500k (1.69M) | 305k (1.26M) | 123k (608k) | 128k (642k) |
+| `tests/fixtures/washington.ged` (234 KB) | 8.37M (31.0M) | 4.43M (17.5M) | 2.36M (10.9M) | 2.23M (10.3M) |
+| generated, 1,000 individuals (457 KB) | 14.8M (51.4M) | 5.71M (26.0M) | 3.72M (17.8M) | 3.02M (15.5M) |
 
-Memory, reading the 82 MB file (`cargo bench --bench memory` with
-`MODEL_RSS`; Linux peak resident set):
+0.17 writes 653 lines of `maximal551.ged`, 0.18 the 700 it holds; written
+in the other version family (`dataset-converted`), 0.18 converts and
+repairs what 0.17 writes as it is: a dataset that needs nothing converted
+costs no more than its write (generated: 14.6M instructions), one that
+does several times more (`washington.ged`, whose individuals carry
+`_UID` and `_FSFTID`: 43M).
 
-| | 0.17 | 0.18 |
+Large files, wall time (median of 5) and peak resident set (Linux
+`VmHWM`), with `tools/perf`:
+
+| Generated input | Read 0.17 | Read 0.18 | Write 0.17 | Write 0.18 |
+|-------|----------:|----------:|-----------:|-----------:|
+| 20,000 individuals (9.4 MB) | 89 ms (106 MB/s) | 28 ms (333 MB/s) | 45 ms | 13 ms |
+| 172,000 individuals (82 MB) | 1.10 s (75 MB/s) | 0.25 s (332 MB/s) | 0.48 s | 0.12 s |
+
+| Peak memory, 82 MB input | 0.17 | 0.18 |
 |---|---:|---:|
-| In memory (`GedcomBuilder::build_from_bytes`) | 1.9 GB (23× the input) | 232 MB (2.8×) |
-| Streaming (`GedcomStreamParser`) | — (UTF-8 only) | 5 MB, any encoding |
+| In memory (`GedcomBuilder::build_from_bytes`) | 1.9 GB (23× the input) | 231 MB (2.8×) |
+| Streaming read (`GedcomStreamParser`) | — (UTF-8 only) | 4.4 MB, any encoding |
+| Streaming write (`GedcomStreamParser` into `GedcomStreamWriter`, 140 MB/s) | — | 23 MB |
 
 A dataset keeps the decoded input once and points into it: about 2.6
-times the input in all. Writing a small dataset costs more than in 0.17
-(every output is checked and repaired for its version), and the first
-write of a version builds its specification tables once (under 1 ms).
+times the input in all, the rest of the peak being the allocator's. A
+written file is checked and repaired for its version as it is written,
+one record at a time; the specification tables are built at compile time.
+`tools/perf check` runs every pipeline against the limits the CI checks;
 Criterion benchmarks: `cargo bench --bench read`, `--bench write`,
 `--bench memory`.
 
