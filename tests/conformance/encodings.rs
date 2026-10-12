@@ -476,7 +476,10 @@ fn ansel_repertoire() {
     }
     for &(m, _, _) in MARKS {
         let words: Vec<&str> = COMPOSED.iter().filter(|r| r.0 == m).map(|r| r.2).collect();
-        let line = format!("mark {m:02X}: {}", words.join(" "));
+        // Commas, not spaces: in ANSEL a mark comes before its base, so a
+        // long line of one-letter words would have no place to continue
+        // with `CONC` (it never splits at a space) and break at a space.
+        let line = format!("mark {m:02X}: {}", words.join(","));
         body += &format!("1 NOTE {line}\n");
         expect.push((format!("mark-{m:02X}"), line));
     }

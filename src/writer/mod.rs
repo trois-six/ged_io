@@ -216,7 +216,9 @@ pub enum RepairKind {
     Empty,
     /// (h) An identifier renamed or left out.
     Xref,
-    /// (h) Banned characters left out (5.5.1 tabs written as spaces).
+    /// (h) Banned characters left out (5.5.1 tabs written as spaces, and a
+    /// space written as a line break where a 5.5.1 line has no place to
+    /// continue with `CONC`).
     Characters,
     /// (h) A structure nested deeper than the version allows, written at
     /// the deepest level.

@@ -18,7 +18,8 @@
 //! - in 5.5.1, a line longer than the limit — level, identifier, tag,
 //!   delimiters and terminator included — is continued with `CONC`, split
 //!   between two characters that are not spaces and never before a
-//!   combining mark; 7.x has no limit and no `CONC`;
+//!   combining mark (text with no such place in reach has a space written
+//!   as a line break, `CONT`, instead); 7.x has no limit and no `CONC`;
 //! - banned characters are removed.
 //!
 //! Each such rewrite is reported as a [`Repair`].
@@ -700,21 +701,55 @@ fn wrapped(
         return Ok(());
     }
     let mut pos = 0;
+    let mut broken = 0_usize;
     loop {
         let room = max
             .saturating_sub(sink.line_len() + 1 + sink.eol.len())
             .max(1);
         let ansel = sink.encoding == OutputEncoding::Ansel;
         let cut = cut_point(rules.at_escape, part, pos, room, ansel);
-        sink.text.push(' ');
-        escape_into(rules.at_escape, &part[pos..cut], &mut sink.text);
+        // A `CONC` line never starts or ends with a space (readers trim
+        // them). Text with no two characters in reach that are not spaces
+        // (`a b c …`, a run of spaces) has no such cut: a space next to the
+        // cut is written as a line break instead (`CONT`).
+        let space = if cut == part.len() {
+            None
+        } else if part[..cut].ends_with(' ') {
+            Some(cut - 1)
+        } else if part[cut..].starts_with(' ') {
+            Some(cut)
+        } else {
+            None
+        };
+        let end = space.unwrap_or(cut);
+        if end > pos {
+            sink.text.push(' ');
+            escape_into(rules.at_escape, &part[pos..end], &mut sink.text);
+        }
         if cut == part.len() {
-            return Ok(());
+            break;
         }
         sink.end_line()?;
-        sink.start(level + 1, None, "CONC");
-        pos = cut;
+        if let Some(space) = space {
+            broken += 1;
+            sink.start(level + 1, None, "CONT");
+            pos = space + 1;
+        } else {
+            sink.start(level + 1, None, "CONC");
+            pos = cut;
+        }
+        if pos == part.len() {
+            break;
+        }
     }
+    if broken > 0 {
+        let detail = format!(
+            "output line {}: {broken} space(s) written as line breaks, the text having no place to continue with CONC",
+            sink.line_no()
+        );
+        sink.repair_here(RepairKind::Characters, detail)?;
+    }
+    Ok(())
 }
 
 /// The end of the next piece of `s` from `pos`: the whole rest when its
@@ -1089,6 +1124,36 @@ mod tests {
             .map(|l| l.splitn(3, ' ').nth(2).unwrap_or(""))
             .collect();
         assert_eq!(joined, text.trim_end());
+    }
+
+    #[test]
+    fn text_with_no_place_for_conc_breaks_at_a_space() {
+        // Single letters between spaces, then a run of spaces: no two
+        // characters in reach of a cut are both other than spaces.
+        for text in [
+            "a ".repeat(200),
+            format!("x{}y", " ".repeat(600)),
+            format!("{}@{}", " ".repeat(300), " ".repeat(300)),
+        ] {
+            let mut sink = LineSink::buffer(&V551, RepairPolicy::Repair);
+            emit(&V551, &mut sink, 0, None, "NOTE", PayloadRef::Text(&text)).unwrap();
+            let repairs = sink.repairs.len();
+            let out = sink.into_string();
+            let mut previous = "";
+            for line in out.lines() {
+                assert!(line.len() < 255, "{line}");
+                if let Some(piece) = line.strip_prefix("1 CONC ") {
+                    assert!(!piece.starts_with(' ') && !previous.ends_with(' '), "{out}");
+                }
+                previous = line;
+            }
+            assert_eq!(repairs, 1, "{out}");
+            // Every space the text keeps is still there: the ones written as
+            // line breaks are the only change.
+            let back = crate::tree::Tree::parse(out.clone()).to_structures();
+            let value = back[0].text().unwrap_or("");
+            assert_eq!(value.replace('\n', " "), text, "{out}");
+        }
     }
 
     #[test]
