@@ -1158,15 +1158,30 @@ fn write_direct<'n>(
         } else {
             None
         };
-        let Some(place) = direct.record(i, record, built) else {
+        // A record that writes itself streams its lines right after the
+        // output, kept when they are its own (`Place::Lines`).
+        let lent = match (record.is_built(), direct.lines()) {
+            (true, Some(lines)) => {
+                out.sink.lend(lines);
+                true
+            }
+            _ => false,
+        };
+        let place = direct.record(i, record, built);
+        if lent {
+            if let Some(lines) = direct.lines() {
+                let keep = place == Some(Place::Lines);
+                #[cfg(debug_assertions)]
+                if keep {
+                    assert_lines(rules, &out, &mut xrefs, record, i - 1, lines);
+                }
+                out.sink.take_back(lines, keep);
+            }
+        }
+        let Some(place) = place else {
             return Ok(None);
         };
         if place == Place::Lines {
-            if let Some(lines) = direct.lines() {
-                #[cfg(debug_assertions)]
-                assert_lines(rules, &out, &mut xrefs, record, i - 1, lines);
-                out.sink.append(lines)?;
-            }
             continue;
         }
         let xref = xrefs.record(i - 1, record.xref());

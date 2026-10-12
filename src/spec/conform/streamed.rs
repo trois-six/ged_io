@@ -49,7 +49,7 @@ pub(crate) struct Streamed {
 
 /// A record as [`Streamed::record`] leaves it.
 pub(crate) enum Outcome<'r> {
-    /// Written as lines ([`Streamed::lines`]).
+    /// Written as lines, at the end of the sink.
     Lines,
     /// As it wrote itself, typed, in this arena.
     Clean(Box<Flat<'r>>),
@@ -122,7 +122,7 @@ impl Streamed {
     }
 
     /// Writes `record` typed and checks it; repairs it when it needs it.
-    /// It is first written as lines, as `sink` writes them, with the
+    /// It is first written as lines at the end of `sink`, with the
     /// identifier `xref` ([`Outcome::Lines`]); when that needs the
     /// structures, it is written into an arena. `fresh` makes the
     /// identifier of a `NOTE` record a note moves to. With `watch`, a
@@ -131,33 +131,44 @@ impl Streamed {
         &mut self,
         record: &dyn Build<'r>,
         xref: Option<Cow<'r, str>>,
-        sink: &LineSink<'_>,
+        sink: &mut LineSink<'_>,
         fresh: &mut dyn FnMut() -> String,
         watch: Option<&Rc<Watch>>,
     ) -> Outcome<'r> {
         let mut c = self.conformer();
         let typing = Typing::of(self.version);
-        if c.aliases.structs.is_empty() && c.aliases.words.is_empty() {
-            let buffers = self
+        // Lines go straight to UTF-8 output; another encoding encodes them
+        // from the structures.
+        let utf8 = sink.encoding() == crate::writer::OutputEncoding::Utf8;
+        if utf8 && c.aliases.structs.is_empty() && c.aliases.words.is_empty() {
+            let mut buffers = self
                 .buffers
                 .take()
                 .unwrap_or_else(|| StreamBuffers::new(sink.record_lines()));
+            // The record's lines go right after the output, kept when
+            // they are its own.
+            sink.lend(buffers.lines_mut());
             let mut flat = Flat::default();
             flat.set_typing(Some(typing));
             flat.set_stream(Some(Stream::with_buffers(c.rules, buffers, None)));
             flat.set_stream_watch(watch.cloned());
             flat.begin_stream(xref);
             record.build(&mut flat);
-            if flat.stream_converts() {
-                self.buffers = flat.take_stream().map(Stream::into_buffers);
+            let converts = flat.stream_converts();
+            let mut walk = Walk::default();
+            let clean = !converts
+                && !flat.spoiled()
+                && c.is_clean_streamed(&flat, &mut walk)
+                && (c.family != Family::V551 || walk.size <= MAX_RECORD_BYTES);
+            let keep = clean && self.count(&c, walk.rtype);
+            self.buffers = flat.take_stream().map(Stream::into_buffers);
+            if let Some(b) = &mut self.buffers {
+                sink.take_back(b.lines_mut(), keep);
+            }
+            if converts {
                 return Outcome::Convert;
             }
-            let mut walk = Walk::default();
-            let clean = !flat.spoiled()
-                && c.is_clean_streamed(&flat, &mut walk)
-                && !(c.family == Family::V551 && walk.size > MAX_RECORD_BYTES);
-            self.buffers = flat.take_stream().map(Stream::into_buffers);
-            if clean && self.count(&c, walk.rtype) {
+            if keep {
                 return Outcome::Lines;
             }
         }
@@ -195,11 +206,6 @@ impl Streamed {
         let notes = Self::notes(&mut c, &mut s, fresh);
         self.repairs.append(&mut c.repairs);
         Outcome::Repaired(s, notes)
-    }
-
-    /// The lines of the last record left as [`Outcome::Lines`].
-    pub(crate) fn lines(&self) -> Option<&LineSink<'static>> {
-        self.buffers.as_ref().map(StreamBuffers::lines)
     }
 
     /// Counts a clean record of type `rtype` towards the records of its

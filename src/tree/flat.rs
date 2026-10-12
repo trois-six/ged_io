@@ -160,9 +160,9 @@ impl StreamBuffers {
         }
     }
 
-    /// The lines of the last record written.
-    pub(crate) fn lines(&self) -> &LineSink<'static> {
-        &self.lines
+    /// The sink of the lines of the record being written.
+    pub(crate) fn lines_mut(&mut self) -> &mut LineSink<'static> {
+        &mut self.lines
     }
 }
 
