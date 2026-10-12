@@ -19,9 +19,26 @@ keeps all data; writing is conformant to GEDCOM 5.5.1, 7.0 or 7.1.
   (`Unknown(Text)`) and 7.x `PHRASE`s (`Phrased`). Texts are spans of the
   decoded input (`Text`, `Store`), identifiers interned (`XrefId`).
 - `Dataset::parse`, `Dataset::from_bytes`, `Dataset::new`, `Dataset::push`;
-  lookups `find*` by text or `XrefId`; navigation (`families_as_spouse`,
-  `families_as_child`, `parents`, `children`, `spouse`,
-  `search_individuals`); `dangling_references()`.
+  lookups `find*` by text or `XrefId`, in constant time; navigation
+  (`families_as_spouse`, `families_as_child`, `parents`, `children`,
+  `spouse`, `search_individuals`); `dangling_references()`.
+- Referential integrity and editing (`ged_io::model`, README "Editing"):
+  `Handle<T>` and `RecordHandle`, valid across every edit until their
+  record is removed (`handle`, `handles`, `handle_at`, `record_handle`,
+  `get`, `get_any`, `position`, `records_with_handles`); `add` (refuses a
+  duplicate identifier, pointers to no record and ids of another store;
+  gives a record without identifier a free one), `remove` with `Removal`
+  (`Refuse` while referenced, `Detach` the structures pointing to it,
+  `LeaveDangling`), `rename` (every pointer follows, in constant time),
+  `redirect`, `detach`; `link`/`unlink` of every pointer kind (`Link`:
+  family links, aliases, associations, citations, notes, media,
+  repositories, submitters, interests, the header's submission,
+  extension structures), `link_child`/`link_spouse` and their unlinks
+  both ways; `get_mut`, `get_mut_at`, `header_mut` and `edit_all` lend
+  records (`RecordMut`) whose pointers are counted again when the loan
+  ends; `references` (constant time), `referrers`, `pointer`;
+  `EditError`. The counts and handles are built the first time they are
+  asked for: reading and writing never pay for them.
 - `ged_io::tree`: a lossless tree of any file (`Tree`, `parse_tree`,
   `TreeReader`, `Structure`, `Xref`, `Tag`).
 - `ged_io::spec`: the 5.5.1, 7.0 and 7.1 specification tables, a validator
@@ -36,8 +53,8 @@ keeps all data; writing is conformant to GEDCOM 5.5.1, 7.0 or 7.1.
   (`GedzipReader::read_dataset`).
 - `GedcomStreamParser::nodes`; `Dataset: FromIterator<StreamedRecord> +
   Extend<StreamedRecord>`.
-- `IndexedDataset`: constant-time lookups of every record type (shared notes
-  included) and of families from individuals; `data_mut` reindexes.
+- `IndexedDataset`: constant-time lookups of the families of individuals
+  (records are found by the dataset itself); `data_mut` reindexes.
 - `GedcomWriter::write` to any `io::Write`, `write_tree`,
   `write_structures`, `write_to_string_with_report`; `WriteReport` of the
   repairs; `RepairPolicy`; `OutputEncoding` (5.5.1 in ANSEL, ASCII,
@@ -79,6 +96,13 @@ keeps all data; writing is conformant to GEDCOM 5.5.1, 7.0 or 7.1.
 
 ### Changed
 
+- A dataset's records are read through accessors (`individuals()`,
+  `families()`, …, `extra()`, `header()`, `all::<T>()`) and changed
+  through its editing methods, which keep its references whole; its record
+  lists are no longer public fields.
+- `ThinVec` gains `remove`, `retain` and `retain_mut`.
+- A dataset whose identifiers are valid and unique is written without a
+  look at every record's identifier: its index vouches for them.
 - `GedcomBuilder` returns a `Dataset`, takes `&self` and has two options,
   `strict` and `max_file_size`; `build_from_str` and `build_from_bytes`
   keep an owned `String` or UTF-8 `Vec<u8>` as the dataset's text, without
