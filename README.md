@@ -215,14 +215,18 @@ assert_eq!(data.dangling_references().len(), 1);
 `find`, `find_individual`, `find_family`, `find_source`,
 `find_repository`, `find_multimedia`, `find_submitter` and `find_note`
 take an identifier as text or as an `XrefId`; when several records have
-one, the first is found. They search linearly; `IndexedDataset` finds
-records and families in constant time:
+one, the first is found. They take constant time: a dataset knows the
+record of each identifier. `families_as_spouse` and `families_as_child`
+search the families; `IndexedDataset` finds them in constant time too:
 
 ```rust
 use ged_io::{Dataset, IndexedDataset};
 
-let indexed = IndexedDataset::new(Dataset::parse("0 HEAD\n0 @I1@ INDI\n0 TRLR\n"));
+let indexed = IndexedDataset::new(Dataset::parse(
+    "0 HEAD\n0 @I1@ INDI\n0 @F1@ FAM\n1 CHIL @I1@\n0 TRLR\n",
+));
 assert!(indexed.find_individual("@I1@").is_some());
+assert_eq!(indexed.families_as_child("@I1@").count(), 1);
 ```
 
 ---
