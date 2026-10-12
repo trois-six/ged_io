@@ -3,12 +3,14 @@
 //! process (so that each peak resident set is its own):
 //!
 //! ```sh
-//! perf <old|new> <read|write> <file> [iterations]
+//! perf <old|new> <read|write|convert> <file> [iterations]
 //! perf generate <individuals> <file>
 //! ```
 //!
 //! `read` reads the file's bytes into the model; `write` reads it once, then
-//! writes the model to a string. Each prints the median and the minimum
+//! writes the model to a string; `convert` writes it in a version of the
+//! other family (7.0 for a 5.5.1 file, 5.5.1 for a 7.x one), which 0.17
+//! writes as it writes any version. Each prints the median and the minimum
 //! time of `iterations` runs (default 10), the throughput and the peak
 //! resident set of the process (Linux `VmHWM`), as one tab-separated line.
 //! Run under `valgrind --tool=cachegrind` with one iteration to count
@@ -87,7 +89,7 @@ fn main() {
         return;
     }
     let [krate, op, path, rest @ ..] = args.as_slice() else {
-        eprintln!("perf <old|new> <read|write> <file> [iterations]");
+        eprintln!("perf <old|new> <read|write|convert> <file> [iterations]");
         std::process::exit(2);
     };
     let iterations: usize = rest.first().and_then(|n| n.parse().ok()).unwrap_or(10);
@@ -133,15 +135,40 @@ fn main() {
                 times.push(t.elapsed().as_secs_f64());
             }
         }
+        (_, "convert") => {
+            let new = new_read(&bytes);
+            let to = if new.version().is_v7() {
+                ged_io::GedcomVersion::V5_5_1
+            } else {
+                ged_io::GedcomVersion::V7_0
+            };
+            let old = (krate == "old").then(|| old_read(&bytes));
+            for _ in 0..iterations {
+                let t = Instant::now();
+                let out = match &old {
+                    Some(data) => ged_io_published::GedcomWriter::new()
+                        .gedcom_version(&to.to_string())
+                        .write_to_string(black_box(data))
+                        .expect("0.17 writes"),
+                    None => ged_io::GedcomWriter::new()
+                        .gedcom_version(to)
+                        .write_to_string(black_box(&new))
+                        .expect("writes"),
+                };
+                out_len = out.len();
+                black_box(out);
+                times.push(t.elapsed().as_secs_f64());
+            }
+        }
         _ => {
-            eprintln!("perf <old|new> <read|write> <file> [iterations]");
+            eprintln!("perf <old|new> <read|write|convert> <file> [iterations]");
             std::process::exit(2);
         }
     }
     times.sort_by(f64::total_cmp);
     let median = times[times.len() / 2];
     let min = times[0];
-    let size = if op == "write" { out_len } else { bytes.len() };
+    let size = if op != "read" { out_len } else { bytes.len() };
     let name = path.rsplit('/').next().unwrap_or(path);
     println!(
         "{krate}\t{op}\t{name}\t{:.3} ms\t{:.3} ms\t{:.1} MB/s\t{:.1} MB\t{:.2}x",

@@ -93,6 +93,19 @@ fn streamed(data: &Dataset, version: GedcomVersion) -> String {
     String::from_utf8(bytes).expect("UTF-8")
 }
 
+/// The records of `out` (the lines of each), sorted.
+fn sorted_records(out: &str) -> Vec<Vec<&str>> {
+    let mut records: Vec<Vec<&str>> = Vec::new();
+    for line in out.lines() {
+        match records.last_mut() {
+            Some(r) if !line.starts_with("0 ") => r.push(line),
+            _ => records.push(vec![line]),
+        }
+    }
+    records.sort();
+    records
+}
+
 /// The number of level-0 lines.
 fn records(out: &str) -> usize {
     out.split_terminator('\n')
@@ -149,8 +162,10 @@ fuzz_target!(|data: &[u8]| {
             let once = streamed(&model, version);
             check_lines(&once, version);
             let twice = streamed(&Dataset::parse(once.as_str()), version);
+            // Converted, a record a conversion adds comes right after its
+            // source, which a dataset read back puts with its type.
             assert!(
-                twice == once,
+                twice == once || (converted && sorted_records(&twice) == sorted_records(&once)),
                 "{version}: streaming not stable\n{once}\n{twice}"
             );
             for encoding in [

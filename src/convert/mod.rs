@@ -64,13 +64,12 @@ mod text;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use crate::model::driver::WriteCx;
-use crate::model::{Dataset, RecordRef};
+use crate::model::Dataset;
 use crate::spec::conform::{model_order, record_rank, Build, FieldOrder, Rec};
-use crate::tree::{Flat, Node, Structure, Xref};
+use crate::tree::{Flat, Node, PayloadRef, Structure, Xref, STANDARD_TAGS};
 use crate::{GedcomVersion, GedcomWriter};
-pub(crate) use rules::Converter;
-use rules::{Direction, Fate, Fresh, Out};
+use rules::Direction;
+pub(crate) use rules::{Converter, Fate, Fresh, Out, NONE, POINTER, TEXT};
 
 /// How a conversion between 5.5.1 and 7.x treats the data the target
 /// version has no place for.
@@ -220,10 +219,22 @@ impl Fresh for Replay<'_> {
 enum Action {
     /// Written as it is.
     Keep,
-    /// Converted (each time it is written), handed these identifiers.
-    Convert(Box<[Box<str>]>),
+    /// Converted, handed these identifiers: kept so while the records kept
+    /// converted are few ([`KEEP_CONVERTED`]), else converted anew each
+    /// time it is written.
+    Convert(Box<[Box<str>]>, Option<Box<Structure>>),
     /// Left out.
     Remove,
+}
+
+/// The most structures of records a plan keeps converted (about 6 MB): a
+/// small dataset is converted once, a large one again each time a record
+/// is written, so that its memory stays bounded.
+const KEEP_CONVERTED: usize = 1 << 16;
+
+/// The structures of `s`, itself included.
+fn size(s: &Structure) -> usize {
+    1 + s.substructures.iter().map(size).sum::<usize>()
 }
 
 /// The conversion of one dataset: what becomes of each record, the
@@ -245,7 +256,9 @@ pub(crate) struct Plan {
 impl Plan {
     /// Plans the conversion of `n` records, `tag`, `xref` and `owned` giving
     /// each one's tag, identifier and structures. `None` when the versions
-    /// need none.
+    /// need none. Without `scan`, the records are not looked at (the header
+    /// only is converted); without `maybe_void`, no record is named
+    /// `@VOID@`.
     #[allow(clippy::too_many_arguments)]
     fn new<'a>(
         n: usize,
@@ -258,6 +271,8 @@ impl Plan {
         options: ConversionOptions,
         values: bool,
         order: Option<&'static FieldOrder>,
+        scan: bool,
+        maybe_void: bool,
     ) -> Option<Self> {
         let mut conv = Converter::new(from, to, options, values)?;
         let gather = |set: &mut HashSet<Box<str>>| {
@@ -268,7 +283,7 @@ impl Plan {
             next: HashMap::new(),
             gather: &gather,
         };
-        let void = (0..n).any(|i| xref(i) == Some(Xref::VOID));
+        let void = maybe_void && (0..n).any(|i| xref(i) == Some(Xref::VOID));
         let head_at = (0..n).find(|&i| tag(i) == "HEAD");
         let mut head = head_at.map(|i| (i, head_of(i)));
         if let Some((_, h)) = &head {
@@ -277,10 +292,13 @@ impl Plan {
         if void && conv.direction == Direction::Up {
             conv.rename_void(alloc.fresh("VOID_"));
         }
-        let mut actions = Vec::with_capacity(n);
+        let mut actions = Vec::with_capacity(if scan { n } else { 0 });
         let mut added = Vec::new();
         let mut known = BTreeSet::new();
-        for i in 0..n {
+        // The structures of the records kept converted.
+        let mut kept = 0;
+        // Without a scan, no record is looked at: none has an action.
+        for i in (0..n).filter(|_| scan) {
             if Some(i) == head_at || tag(i) == "TRLR" {
                 actions.push(Action::Keep);
                 continue;
@@ -299,7 +317,18 @@ impl Plan {
             let names = fresh.names;
             actions.push(match fate {
                 Fate::Remove => Action::Remove,
-                Fate::Keep if out.changed => Action::Convert(names.into_boxed_slice()),
+                Fate::Keep if out.changed => {
+                    let n = size(&s);
+                    let keep = kept + n <= KEEP_CONVERTED;
+                    let converted = keep.then(|| {
+                        kept += n;
+                        if let Some(order) = order {
+                            model_order(&mut s, to, order);
+                        }
+                        Box::new(s)
+                    });
+                    Action::Convert(names.into_boxed_slice(), converted)
+                }
                 Fate::Keep => Action::Keep,
             });
             known.append(&mut out.known);
@@ -351,26 +380,27 @@ impl Plan {
             options,
             values,
             order,
+            true,
+            true,
         )
     }
 
     /// Plans the conversion of the records of `data` to `to`, `built` (the
     /// records as they write themselves, then the trailer), whose values
     /// are converted already. Which records need a look is found from the
-    /// records written as they are, without converting their values.
+    /// records written once each, and only those are copied.
+    ///
+    /// Without `scan`, no record is looked at: the plan converts the
+    /// header only, for a writer that finds whether a record needs
+    /// converting as it writes it ([`Watch`]).
     pub(crate) fn of_dataset<'d, B: Build<'d>>(
         data: &'d Dataset,
         built: &[B],
         to: GedcomVersion,
         options: ConversionOptions,
         order: Option<&'static FieldOrder>,
+        scan: bool,
     ) -> Option<Self> {
-        let cx = WriteCx {
-            store: data.store(),
-            version: to,
-            convert: false,
-        };
-        let records: Vec<RecordRef<'d>> = data.records().collect();
         let mut scratch = Flat::default();
         Self::new(
             built.len(),
@@ -378,16 +408,17 @@ impl Plan {
             |i| built.get(i).and_then(Build::xref),
             |i| built.get(i).map(built_structure).unwrap_or_default(),
             |i, conv| {
-                let (r, b) = (records.get(i)?, built.get(i)?);
+                // Written once, looked at, copied only when it needs it.
                 scratch.clear();
-                r.to_flat(&cx, &mut scratch);
-                if conv.needs(scratch.root()?) {
-                    return Some(built_structure(b));
+                built.get(i)?.build(&mut scratch);
+                let root = scratch.root()?;
+                if conv.needs(root) {
+                    return Some(root.to_owned_structure());
                 }
                 debug_assert!(
-                    !conv.changes(&built_structure(b)),
+                    !conv.changes(&root.to_owned_structure()),
                     "a conversion needs() missed: {:?}",
-                    built_structure(b)
+                    root.to_owned_structure()
                 );
                 None
             },
@@ -396,14 +427,51 @@ impl Plan {
             options,
             false,
             order,
+            scan,
+            data.store().find_xref(Xref::VOID).is_some(),
         )
+    }
+
+    /// The look for the records this plan would convert, for a writer
+    /// that writes them as they are ([`Plan::of_dataset`] without a scan).
+    pub(crate) fn watch(&self) -> Watch {
+        Watch::new(self.conv.clone())
+    }
+
+    /// The header converted, and its index among the records, when the
+    /// conversion changes it.
+    pub(crate) fn head(&self) -> Option<(usize, &Structure)> {
+        self.head.as_ref().map(|(i, h)| (*i, h))
+    }
+
+    /// Whether the plan converts no record and adds none (its header
+    /// aside).
+    #[cfg(debug_assertions)]
+    pub(crate) fn converts_no_record(&self) -> bool {
+        self.added.is_empty() && self.actions.iter().all(|a| matches!(a, Action::Keep))
+    }
+
+    /// The records the plan converts, as they are written (tests).
+    #[cfg(debug_assertions)]
+    pub(crate) fn debug_converted<'a, B: Build<'a>>(&self, built: &[B]) -> Vec<Structure> {
+        self.actions
+            .iter()
+            .zip(built)
+            .filter(|(a, _)| !matches!(a, Action::Keep))
+            .map(|(_, b)| built_structure(b))
+            .chain(self.added.iter().cloned())
+            .collect()
     }
 
     /// Converts record `index` (anew), as planned.
     fn convert(&self, index: usize, s: &mut Structure) {
-        let Some(Action::Convert(names)) = self.actions.get(index) else {
+        let Some(Action::Convert(names, converted)) = self.actions.get(index) else {
             return;
         };
+        if let Some(c) = converted {
+            s.clone_from(c);
+            return;
+        }
         let mut fresh = Replay {
             names: names.iter(),
         };
@@ -466,7 +534,7 @@ impl Plan {
     /// conversion makes an extension record, which a typed model writes
     /// after the others.
     fn becomes_extension(&self, index: usize, tag: &str) -> bool {
-        matches!(self.actions.get(index), Some(Action::Convert(_)))
+        matches!(self.actions.get(index), Some(Action::Convert(..)))
             && !tag.starts_with('_')
             && self
                 .conv
@@ -487,7 +555,7 @@ impl Plan {
                         r = h.clone();
                     }
                 }
-                Some(Action::Convert(_)) => {
+                Some(Action::Convert(..)) => {
                     let ext = self.order.is_some() && self.becomes_extension(i, r.tag.as_str());
                     self.convert(i, &mut r);
                     if ext {
@@ -516,7 +584,7 @@ impl Plan {
                         kept.push(Rec::owned(h.clone()));
                     }
                 }
-                Some(Action::Convert(_)) => {
+                Some(Action::Convert(..)) => {
                     let ext = self.order.is_some() && self.becomes_extension(i, r.tag());
                     let mut s = r.to_owned_structure();
                     self.convert(i, &mut s);
@@ -546,11 +614,14 @@ impl Plan {
                         kept.push(Entry::Owned(h));
                     }
                 }
-                Some(Action::Convert(_)) => {
-                    let e = Entry::Converted {
-                        record: r,
-                        plan: self,
-                        index: i,
+                Some(Action::Convert(_, converted)) => {
+                    let e = match converted {
+                        Some(c) => Entry::Owned(c),
+                        None => Entry::Converted {
+                            record: r,
+                            plan: self,
+                            index: i,
+                        },
                     };
                     if self.becomes_extension(i, r.tag()) {
                         last.push(e);
@@ -580,6 +651,111 @@ fn ranks<'t>(tags: impl ExactSizeIterator<Item = &'t str>) -> Vec<u8> {
         .collect()
 }
 
+/// What a writer looks out for in the records it writes, to find whether a
+/// dataset needs converting without a pass of its own: a dataset that
+/// needs none (nearly every dataset written in its own version family
+/// needs nothing but its header converted) is written as it is, its
+/// records looked at as they are written; one that does is planned
+/// ([`Plan`]) and written again.
+///
+/// Whether a record needs converting is [`Converter::needs`]; the writer
+/// asks it of each structure it writes ([`Watch::typed`]), with a filter
+/// by tag and payload that spares nearly every structure the look.
+pub(crate) struct Watch {
+    conv: Converter,
+    /// By the index of a standard tag: the payloads with which a rule may
+    /// apply to a structure of that tag ([`Converter::may_apply`]).
+    tags: [u8; STANDARD_TAGS.len()],
+    /// [`Converter::special_mask`].
+    special: u8,
+    /// [`Converter::watches_pointers`].
+    pointers: bool,
+}
+
+/// The payload bit of [`Converter::may_apply`] of `payload`.
+pub(crate) fn payload_bit(payload: PayloadRef<'_>) -> u8 {
+    match payload {
+        PayloadRef::None => rules::NONE,
+        PayloadRef::Text(_) => rules::TEXT,
+        PayloadRef::Pointer(_) => rules::POINTER,
+    }
+}
+
+impl Watch {
+    /// The look for what `conv` converts.
+    pub(crate) fn new(conv: Converter) -> Self {
+        let mut tags = [0; STANDARD_TAGS.len()];
+        for (slot, tag) in tags.iter_mut().zip(STANDARD_TAGS.iter()) {
+            *slot = conv.may_apply(tag);
+        }
+        Self {
+            special: conv.special_mask(),
+            pointers: conv.watches_pointers(),
+            conv,
+            tags,
+        }
+    }
+
+    /// Whether a rule may apply to a structure of the standard tag
+    /// `standard` (`None`: any other tag) with a payload of kind `kind`
+    /// (`len` bytes of text with the special bytes `special`): the filter
+    /// of [`Watch::typed`], which spares nearly every structure the look.
+    #[inline]
+    pub(crate) fn may_apply(
+        &self,
+        standard: Option<u16>,
+        kind: u8,
+        len: usize,
+        special: u8,
+    ) -> bool {
+        let kinds = match standard {
+            Some(i) => self.tags.get(usize::from(i)).copied().unwrap_or(0),
+            None => rules::NONE | rules::TEXT | rules::POINTER,
+        };
+        kinds & kind != 0
+            || match kind {
+                rules::TEXT => special & self.special != 0 || self.conv.watches_len(len),
+                rules::POINTER => self.pointers,
+                _ => false,
+            }
+    }
+
+    /// Whether a record tagged `tag` and named `xref` converts as a record
+    /// (retagged, left out or renamed).
+    pub(crate) fn record(&self, tag: &str, xref: Option<&str>) -> bool {
+        self.conv.record_tag(tag) != (None, Fate::Keep) || self.conv.record_xref(xref).is_some()
+    }
+
+    /// Whether a rule applies to a structure tagged `tag` with `payload`
+    /// under structures tagged `parent` and `grand` (`sub`: not the
+    /// record), once [`Watch::may_apply`] says one may:
+    /// [`Converter::triggers_at`].
+    pub(crate) fn typed(
+        &self,
+        tag: &str,
+        payload: PayloadRef<'_>,
+        parent: &str,
+        grand: &str,
+        sub: bool,
+    ) -> bool {
+        self.conv.triggers_at(tag, payload, parent, grand, sub)
+    }
+
+    /// Whether a rule may apply to a structure tagged `tag` with `payload`,
+    /// its superstructures unknown: [`Watch::typed`] without the last look,
+    /// for the record's [`Converter::needs`] to tell.
+    #[inline(never)]
+    pub(crate) fn may(&self, tag: &str, payload: PayloadRef<'_>, special: u8) -> bool {
+        self.conv.may_apply(tag) & payload_bit(payload) != 0
+            || self.conv.may_apply_to(payload, special)
+    }
+
+    /// Whether converting record `r` may change it ([`Converter::needs`]).
+    pub(crate) fn needs<'n, N: Node<'n>>(&self, r: N) -> bool {
+        self.conv.needs(r)
+    }
+}
+
 /// The structures of record `r`, when converting it may change something
 /// ([`Converter::needs`]).
 fn needed<'n, N: Node<'n>>(conv: &Converter, r: N) -> Option<Structure> {
@@ -595,7 +771,7 @@ fn needed<'n, N: Node<'n>>(conv: &Converter, r: N) -> Option<Structure> {
 }
 
 /// The structures of a record that writes itself.
-fn built_structure<'n, B: Build<'n>>(b: &B) -> Structure {
+pub(crate) fn built_structure<'n, B: Build<'n>>(b: &B) -> Structure {
     if let Some(s) = b.owned() {
         return s;
     }
@@ -652,6 +828,39 @@ impl<'a, B: Build<'a>> Build<'a> for Entry<'a, B> {
         }
     }
 
+    fn xref_id(&self) -> Option<crate::model::XrefId> {
+        match self {
+            Entry::Plain(r) => r.xref_id(),
+            Entry::Converted { .. } | Entry::Owned(_) => None,
+        }
+    }
+
+    fn standard_tag(&self) -> Option<u16> {
+        match self {
+            Entry::Plain(r) => r.standard_tag(),
+            Entry::Converted { .. } | Entry::Owned(_) => crate::tree::standard_index(self.tag()),
+        }
+    }
+
+    fn typed_head(&self) -> Option<&'a crate::model::Header> {
+        match self {
+            Entry::Plain(r) => r.typed_head(),
+            Entry::Converted { .. } | Entry::Owned(_) => None,
+        }
+    }
+
+    fn build_completed_head(
+        &self,
+        out: &mut Flat<'a>,
+        rules: &crate::version::VersionRules,
+        submitter: crate::tree::FlatPayload<'a>,
+    ) -> bool {
+        match self {
+            Entry::Plain(r) => r.build_completed_head(out, rules, submitter),
+            Entry::Converted { .. } | Entry::Owned(_) => false,
+        }
+    }
+
     fn build(&self, out: &mut Flat<'a>) {
         match self {
             Entry::Plain(r) => r.build(out),
@@ -664,7 +873,7 @@ impl<'a, B: Build<'a>> Build<'a> for Entry<'a, B> {
                 plan.convert(*index, &mut s);
                 out.push_structure(s);
             }
-            Entry::Owned(s) => out.push_structure((*s).clone()),
+            Entry::Owned(s) => out.push_typed(s),
         }
     }
 
