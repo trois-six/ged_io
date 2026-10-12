@@ -161,7 +161,9 @@ fn gedzip_feature(id: &str, model: &adapter::Model, failures: &mut Vec<Failure>,
                     ));
                 }
             }
-            if adapter::record_count(&back) != adapter::record_count(model) {
+            // An archive holds 7.x: a 5.5.1 dataset converted, records
+            // added or left out as converting says.
+            if adapter::record_count(&back) != adapter::record_count(&adapter::as_archived(model)) {
                 failures.push(Failure::new(
                     id,
                     "records",

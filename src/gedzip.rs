@@ -6,10 +6,16 @@
 //! # GEDZIP Format
 //!
 //! A GEDZIP file is a ZIP archive (ISO/IEC 21320-1:2015) containing:
-//! - `gedcom.ged` - The main GEDCOM 7.0 data stream
+//! - `gedcom.ged` - The main GEDCOM 7.x data stream
 //! - Media files referenced by FILE structures in the GEDCOM
 //!
 //! GEDZIP files should use the `.gdz` file extension.
+//!
+//! An archive's dataset is GEDCOM 7.x: [`GedzipWriter::write_dataset`]
+//! writes a 5.5.1 dataset as 7.0, converting it ([`crate::convert`]), in
+//! UTF-8 with a byte order mark. Media names follow the GEDZIP rules: the
+//! names a reader uses for itself (`gedcom.ged`, `META-INF/…`,
+//! `MANIFEST.MF`) are refused, and the names of directories are not media.
 //!
 //! # Example
 //!
@@ -53,7 +59,7 @@ use zip::CompressionMethod;
 
 use crate::model::Dataset;
 use crate::writer::{GedcomWriter, WriteError};
-use crate::{GedcomBuilder, GedcomError};
+use crate::{GedcomBuilder, GedcomError, GedcomVersion};
 
 /// The required filename for the GEDCOM data stream within a GEDZIP archive.
 pub const GEDCOM_FILENAME: &str = "gedcom.ged";
@@ -80,6 +86,10 @@ pub enum GedzipError {
     Io(std::io::Error),
     /// Writing the dataset failed.
     Write(WriteError),
+    /// A media file cannot take this name: `gedcom.ged`, a name under
+    /// `META-INF/` or `MANIFEST.MF`, which GEDZIP reserves (§2.12, §4), or
+    /// the name of a directory.
+    ReservedName(String),
 }
 
 impl std::fmt::Display for GedzipError {
@@ -93,6 +103,7 @@ impl std::fmt::Display for GedzipError {
             }
             Self::Io(e) => write!(f, "I/O error: {e}"),
             Self::Write(e) => write!(f, "{e}"),
+            Self::ReservedName(name) => write!(f, "a media file cannot be named {name}"),
         }
     }
 }
@@ -103,7 +114,10 @@ impl std::error::Error for GedzipError {
             Self::Zip(e) => Some(e),
             Self::Io(e) => Some(e),
             Self::Write(e) => Some(e),
-            Self::MissingGedcom | Self::MissingMedia(_) | Self::EntryTooLarge { .. } => None,
+            Self::MissingGedcom
+            | Self::MissingMedia(_)
+            | Self::EntryTooLarge { .. }
+            | Self::ReservedName(_) => None,
         }
     }
 }
@@ -237,19 +251,25 @@ impl<R: Read + Seek> GedzipReader<R> {
     /// The name of the archive entry a `FILE` reference points at, if the
     /// archive holds it.
     ///
-    /// The exact name is preferred. Otherwise the reference is matched the
-    /// way producers write it: with backslashes or forward slashes, a leading
-    /// `./` or `/`, percent-encoded (GEDCOM 7.0 `FILE` values are URI
-    /// references, so a space is `%20`), and in any letter case.
+    /// GEDZIP names are case-sensitive (§4), so the exact name comes first,
+    /// then the name the reference gives once decoded (GEDCOM 7.x `FILE`
+    /// values are URI references, so a space is `%20`). Producers that do
+    /// not follow the rules are read too: with backslashes or forward
+    /// slashes, a leading `./` or `/`, and in any letter case. The names of
+    /// directories are no entries.
     #[must_use]
     pub fn find_entry(&self, file_ref: &str) -> Option<&str> {
-        if let Some(name) = self.file_names.iter().find(|n| *n == file_ref) {
+        let files = || self.file_names.iter().filter(|n| !is_directory(n));
+        if let Some(name) = files().find(|n| *n == file_ref) {
             return Some(name);
         }
         let wanted = entry_key(file_ref);
-        self.file_names
-            .iter()
-            .find(|n| entry_key(n) == wanted)
+        if let Some(name) = files().find(|n| entry_key(n) == wanted) {
+            return Some(name);
+        }
+        let wanted = wanted.to_lowercase();
+        files()
+            .find(|n| entry_key(n).to_lowercase() == wanted)
             .map(String::as_str)
     }
 
@@ -293,12 +313,13 @@ impl<R: Read + Seek> GedzipReader<R> {
         &self.file_names
     }
 
-    /// Returns a list of media file names (all files except `gedcom.ged`).
+    /// Returns a list of media file names: every entry but `gedcom.ged`
+    /// and the directories.
     #[must_use]
     pub fn media_files(&self) -> Vec<&str> {
         self.file_names
             .iter()
-            .filter(|name| *name != GEDCOM_FILENAME)
+            .filter(|name| *name != GEDCOM_FILENAME && !is_directory(name))
             .map(String::as_str)
             .collect()
     }
@@ -406,7 +427,7 @@ impl<W: Write + Seek> GedzipWriter<W> {
     }
 
     /// Writes a dataset to the archive as `gedcom.ged`, with the default
-    /// [`GedcomWriter`].
+    /// [`GedcomWriter`]: as GEDCOM 7.x, a 5.5.1 dataset converted to 7.0.
     ///
     /// This should be called before adding any media files.
     ///
@@ -417,7 +438,11 @@ impl<W: Write + Seek> GedzipWriter<W> {
         self.write_dataset_with(data, &GedcomWriter::new())
     }
 
-    /// Writes a dataset to the archive as `gedcom.ged`, with `writer`.
+    /// Writes a dataset to the archive as `gedcom.ged`, with `writer`, in
+    /// the 7.x version it is configured with, else in the dataset's own
+    /// when it is 7.x, else in 7.0: a GEDZIP archive holds GEDCOM 7.x
+    /// (§4). The bytes are UTF-8, with a byte order mark unless `writer`
+    /// says otherwise.
     ///
     /// # Errors
     ///
@@ -429,8 +454,17 @@ impl<W: Write + Seek> GedzipWriter<W> {
         data: &Dataset,
         writer: &GedcomWriter,
     ) -> Result<(), GedzipError> {
+        let version = writer
+            .config()
+            .version
+            .filter(|v| v.is_v7())
+            .or_else(|| data.version().is_v7().then(|| data.version()))
+            .unwrap_or(GedcomVersion::V7_0);
         let mut bytes = Vec::new();
-        writer.write(&mut bytes, data)?;
+        writer
+            .clone()
+            .gedcom_version(version)
+            .write(&mut bytes, data)?;
         self.write_gedcom_bytes(&bytes)
     }
 
@@ -462,8 +496,13 @@ impl<W: Write + Seek> GedzipWriter<W> {
     ///
     /// # Errors
     ///
-    /// Returns an error if the file cannot be written.
+    /// [`GedzipError::ReservedName`] for a name GEDZIP reserves
+    /// (`gedcom.ged`, `META-INF/…`, `MANIFEST.MF`) or a directory's (ending
+    /// with `/`); otherwise when the file cannot be written.
     pub fn add_media_file(&mut self, name: &str, bytes: &[u8]) -> Result<(), GedzipError> {
+        if is_reserved(name) {
+            return Err(GedzipError::ReservedName(name.to_string()));
+        }
         let options =
             zip::write::FileOptions::<()>::default().compression_method(media_compression(name));
 
@@ -529,6 +568,25 @@ fn media_compression(name: &str) -> CompressionMethod {
 /// The form of an entry name or `FILE` reference used to match one against
 /// the other: forward slashes, no leading `./` or `/`, percent-decoded, lower
 /// case.
+/// Whether an archive entry is a directory.
+fn is_directory(name: &str) -> bool {
+    name.ends_with('/')
+}
+
+/// Whether a media file cannot take `name`: the dataset's own, the names
+/// GEDZIP recommends against because readers of ZIP-based formats use them
+/// (§2.12: `META-INF/…`, `MANIFEST.MF`), and a directory's.
+fn is_reserved(name: &str) -> bool {
+    let key = entry_key(name);
+    key == GEDCOM_FILENAME
+        || key == "MANIFEST.MF"
+        || key.starts_with("META-INF/")
+        || is_directory(name)
+        || key.is_empty()
+}
+
+/// A `FILE` reference or an entry name as a name of the archive: forward
+/// slashes, no leading `./` or `/`, percent-encodings decoded.
 fn entry_key(name: &str) -> String {
     let slashed = name.replace('\\', "/");
     let trimmed = slashed.trim_start_matches("./").trim_start_matches('/');
@@ -548,7 +606,7 @@ fn entry_key(name: &str) -> String {
         decoded.push(bytes[i]);
         i += 1;
     }
-    String::from_utf8_lossy(&decoded).to_lowercase()
+    String::from_utf8_lossy(&decoded).into_owned()
 }
 
 /// Reads a GEDZIP file from bytes and returns the parsed GEDCOM data.

@@ -128,6 +128,21 @@ pub fn write_keeping(m: &Model, target: Target) -> Result<String, String> {
     })
 }
 
+/// The model as an archive holds it: GEDCOM 7.x, a 5.5.1 model converted
+/// to 7.0.
+#[cfg(feature = "gedzip")]
+pub fn as_archived(m: &Model) -> Model {
+    if m.version().is_v7() {
+        m.clone()
+    } else {
+        ged_io::convert::convert_dataset(
+            m,
+            GedcomVersion::V7_0,
+            &ged_io::convert::ConversionOptions::default(),
+        )
+    }
+}
+
 /// Converts the lossless tree of `text` (not the typed model) to `target`
 /// and writes it.
 pub fn write_tree(text: &str, target: Target) -> Result<String, String> {
