@@ -4,6 +4,7 @@
 //!
 //! ```sh
 //! perf <old|new> <read|write|convert> <file> [iterations]
+//! perf <old|new> dump <file>
 //! perf generate <individuals> <file>
 //! ```
 //!
@@ -94,6 +95,20 @@ fn main() {
     };
     let iterations: usize = rest.first().and_then(|n| n.parse().ok()).unwrap_or(10);
     let bytes = std::fs::read(path).expect("read the file");
+    if op == "dump" {
+        // The output of one write, to compare.
+        let out = if krate == "old" {
+            ged_io_published::GedcomWriter::new()
+                .write_to_string(&old_read(&bytes))
+                .expect("0.17 writes")
+        } else {
+            ged_io::GedcomWriter::new()
+                .write_to_string(&new_read(&bytes))
+                .expect("writes")
+        };
+        print!("{out}");
+        return;
+    }
     let mut times = Vec::with_capacity(iterations);
     let mut out_len = 0;
     match (krate.as_str(), op.as_str()) {
