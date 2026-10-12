@@ -289,8 +289,26 @@ pub(crate) trait Build<'n> {
     }
     /// Writes the record, and its substructures, into `out`.
     fn build(&self, out: &mut Flat<'n>);
-    /// The record as an owned structure, for a record the writer copies
-    /// anyway (the header, which it completes): `None` for the others.
+    /// The record, when it is a typed header.
+    fn typed_head(&self) -> Option<&'n crate::model::Header> {
+        None
+    }
+    /// Writes the header ([`Build::typed_head`]) completed for `rules`, with
+    /// the pointer `submitter` as its `SUBM` when it has none
+    /// ([`crate::model::Header::write_completed_flat`]): `false` when it is
+    /// none, or holds structures the completion keeps elsewhere.
+    fn build_completed_head(
+        &self,
+        out: &mut Flat<'n>,
+        rules: &crate::version::VersionRules,
+        submitter: FlatPayload<'n>,
+    ) -> bool {
+        let _ = (out, rules, submitter);
+        false
+    }
+    /// The record as an owned structure, when it has a cheaper way to it
+    /// than its structures written into a flat arena (the header, which
+    /// the writer completes): `None` for the others.
     fn owned(&self) -> Option<Structure> {
         None
     }
@@ -341,12 +359,8 @@ impl<'n, N: Node<'n>> Rec<'n, N> {
         )
     }
 
-    /// A record that writes itself when needed; owned at once when the
-    /// writer copies it anyway ([`Build::owned`]).
+    /// A record that writes itself when needed.
     pub(crate) fn built(record: &'n dyn Build<'n>) -> Self {
-        if let Some(s) = record.owned() {
-            return Self::owned(s);
-        }
         let tag = record.tag();
         let standard = record.standard_tag();
         let mut r = Self::of(tag, record.xref(), standard, Body::Built(record));
@@ -453,6 +467,12 @@ impl<'n, N: Node<'n>> Rec<'n, N> {
 
     /// The record as an owned structure, as it is.
     fn to_structure(&self, arena: &Flat<'n>) -> Structure {
+        if let Some(s) = match self.body {
+            Body::Built(b) => b.owned(),
+            Body::Given(_) | Body::Owned(_) => None,
+        } {
+            return s;
+        }
         let mut scratch = Flat::default();
         with_node!(self.get(arena), scratch, |n| n.to_owned_structure())
     }

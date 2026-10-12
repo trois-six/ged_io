@@ -6,6 +6,7 @@ use std::borrow::Cow;
 
 use crate::spec::conform::Build;
 use crate::tree::{Flat, FlatPayload, Structure};
+use crate::version::VersionRules;
 use crate::writer::GedcomWriter;
 
 use super::dataset::{Dataset, RecordRef};
@@ -62,6 +63,23 @@ impl<'d> Build<'d> for Built<'d> {
             let at = out.open(Cow::Borrowed("TRLR"), None, FlatPayload::None);
             out.close(at);
         }
+    }
+
+    fn typed_head(&self) -> Option<&'d super::Header> {
+        match self.record {
+            Some(RecordRef::Header(h)) => Some(h),
+            _ => None,
+        }
+    }
+
+    fn build_completed_head(
+        &self,
+        out: &mut Flat<'d>,
+        rules: &VersionRules,
+        submitter: FlatPayload<'d>,
+    ) -> bool {
+        self.typed_head()
+            .is_some_and(|h| h.write_completed_flat(&self.cx, out, rules, submitter))
     }
 
     fn owned(&self) -> Option<Structure> {
