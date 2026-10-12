@@ -352,7 +352,10 @@ impl Conformer<'_> {
     /// or will be checked to ([`Walk::pending`]).
     fn names(&self, p: &str, id: Option<XrefId>, want: StructId, walk: &mut Walk<'_>) -> bool {
         if self.trust {
-            return true;
+            // Taken to name a record of its type, when it is a valid
+            // identifier; one the writer would rename needs the record's
+            // structures.
+            return crate::writer::is_valid_pointer(self.rules, p);
         }
         if let (Some(ids), Some(id)) = (&self.ids, id) {
             return match ids.get_id(id, p) {

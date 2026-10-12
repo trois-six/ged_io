@@ -196,3 +196,19 @@ fn streaming_is_idempotent() {
         }
     }
 }
+
+/// A 5.5.1 header whose `SUBM` the repair makes an extension still points
+/// to a submitter, the stub (fuzz case).
+#[test]
+fn a_repaired_header_still_has_a_submitter() {
+    let data = Dataset::from_bytes(&b"0 HEAD\n1 SUBM @\x001@\n0 TRLR\n"[..]);
+    let config = WriterConfig {
+        version: Some(GedcomVersion::V5_5_1),
+        ..WriterConfig::default()
+    };
+    let (once, _) = streamed(&data, config.clone());
+    assert!(once.contains("\n1 SUBM @U1@\n"), "{once}");
+    assert!(once.contains("\n0 @U1@ SUBM\n1 NAME Unknown\n"), "{once}");
+    let (twice, _) = streamed(&Dataset::parse(once.as_str()), config);
+    assert_eq!(once, twice);
+}
