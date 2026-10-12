@@ -27,13 +27,36 @@ fn versions() -> [GedcomVersion; 3] {
     ]
 }
 
+/// Whether `s`, at `level`, holds an inline note (a `NOTE` with a text,
+/// under standard structures only) longer than the pointer line that would
+/// replace it (32 bytes at most).
+fn holds_movable_note(s: &Structure, level: u8, v: GedcomVersion) -> bool {
+    s.substructures.iter().any(|c| {
+        !c.tag.as_str().starts_with('_')
+            && (c.tag == "NOTE"
+                && matches!(c.payload, Payload::Text(_))
+                && c.to_gedcom(level + 1, v).len() > 32
+                || holds_movable_note(c, level + 1, v))
+    })
+}
+
+/// Whether the record of `records` read at `line` is one a 5.5.1 record
+/// over 32K may be: one that holds no note to move out (repair j), a
+/// header (whose note takes no pointer) or an extension record.
+fn is_left(records: &[Structure], line: u32, v: GedcomVersion) -> bool {
+    v == GedcomVersion::V5_5_1
+        && records.iter().filter(|r| r.line == line).any(|r| {
+            r.tag == "HEAD" || r.tag.as_str().starts_with('_') || !holds_movable_note(r, 0, v)
+        })
+}
+
 /// `None` when the property holds for `records`, else what breaks it.
 fn property(name: &str, records: &[Structure]) -> Option<String> {
     for v in versions() {
         let mut t = records.to_vec();
         let repairs = conform(&mut t, v);
         let mut left = validate(&t, v);
-        left.retain(|d| d.kind != DeviationKind::RecordSize);
+        left.retain(|d| !(d.kind == DeviationKind::RecordSize && is_left(&t, d.line, v)));
         if !left.is_empty() {
             let left: Vec<String> = left.iter().take(5).map(ToString::to_string).collect();
             let repairs: Vec<String> = repairs.iter().take(5).map(ToString::to_string).collect();
