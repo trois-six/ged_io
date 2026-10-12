@@ -65,6 +65,13 @@ pub(crate) trait Pointers {
     /// Removes the substructures, at any depth, whose own pointer `cut`
     /// refuses. The value itself stays, whatever its own pointer.
     fn retain(&mut self, _cut: &mut Cut<'_>) {}
+
+    /// Clears the value's own pointer when `cut` refuses it, and it can be
+    /// cleared: an untyped structure's payload (a record's, which no
+    /// structure holds to be cut). Whether it did.
+    fn cut_own(&mut self, _cut: &mut Cut<'_>) -> bool {
+        false
+    }
 }
 
 impl Pointers for XrefId {
@@ -214,6 +221,18 @@ impl Pointers for Node {
     fn retain(&mut self, cut: &mut Cut<'_>) {
         Pointers::retain(&mut self.children, cut);
     }
+
+    fn cut_own(&mut self, cut: &mut Cut<'_>) -> bool {
+        match self.payload {
+            Value::Pointer(p) if !(cut.keep)(p) => {
+                (cut.removed)(p);
+                cut.count += 1;
+                self.payload = Value::None;
+                true
+            }
+            _ => false,
+        }
+    }
 }
 
 impl Pointers for Extra {
@@ -265,6 +284,16 @@ mod tests {
         assert_eq!(cut.count, 1);
         assert_eq!(gone, [a, b]);
         assert_eq!(root.children.len(), 2);
+
+        // A node's own pointer is cleared, the node kept.
+        let mut lone = leaf(a);
+        let mut gone = Vec::new();
+        let mut keep = |p: XrefId| p != a;
+        let mut removed = |p: XrefId| gone.push(p);
+        let mut cut = Cut::new(&mut keep, &mut removed);
+        assert!(lone.cut_own(&mut cut));
+        assert_eq!((cut.count, lone.payload.clone()), (1, Value::None));
+        assert_eq!(gone, [a]);
 
         root.map(&mut |p| if p == b { a } else { p });
         let mut seen = Vec::new();
