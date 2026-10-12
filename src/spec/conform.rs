@@ -53,9 +53,10 @@ const LOOKUP_BATCH: usize = 1 << 16;
 /// Every repair is deterministic and keeps the data: what has no standard
 /// place becomes an extension structure where it was. The [module
 /// documentation](super#conformance-repair) lists every repair. The one
-/// deviation that may remain is a 5.5.1 record over 32K with no inline note
-/// left to move out ([`DeviationKind::RecordSize`]), which 5.5.1 only
-/// recommends against.
+/// deviation that may remain is a 5.5.1 record over 32K made of structures
+/// rather than notes, which nothing can move out of losslessly
+/// ([`DeviationKind::RecordSize`]), and which 5.5.1 only recommends
+/// against.
 ///
 /// [`DeviationKind::RecordSize`]: super::DeviationKind::RecordSize
 pub fn conform(records: &mut Vec<Structure>, version: GedcomVersion) -> Vec<Repair> {
@@ -2265,38 +2266,86 @@ impl<'n> Conformer<'n> {
             // Longest first; between equals, file order.
             notes.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
             let tag = r.tag.as_str().to_string();
+            // The pointers to the further parts of notes split, inserted
+            // after the first part's once every note is moved (last path
+            // first, so that the paths stay right).
+            let mut further: Vec<(Vec<usize>, Vec<Structure>)> = Vec::new();
             for note in &notes {
                 if size <= MAX_RECORD_BYTES {
                     break;
                 }
                 size = size.saturating_sub(saved(note));
-                let xref = self.unique("@N1@", self.record_of("NOTE"));
                 let Some(at) = node_at(r, &note.1) else {
                     continue;
                 };
-                let line = at.line;
-                let moved = Structure {
-                    xref: Some(Xref::new(xref.as_str())),
-                    payload: std::mem::replace(
-                        &mut at.payload,
-                        Payload::Pointer(Xref::new(xref.as_str())),
-                    ),
-                    substructures: std::mem::take(&mut at.substructures),
-                    ..Structure::new("NOTE")
-                };
-                self.repair(
-                    line,
-                    RepairKind::RecordSize,
-                    format!("a {tag} record over 32K: a note moved to the NOTE record {xref}"),
-                );
-                added.push(moved);
+                let pointers = self.move_note(at, &tag, &mut added);
+                if !pointers.is_empty() {
+                    further.push((note.1.clone(), pointers));
+                }
             }
+            insert_after(r, further);
             (rec.clean, rec.size) = (0, u32::MAX);
         }
         self.scratch = scratch;
         if !added.is_empty() {
             insert_records(records, added);
         }
+    }
+
+    /// Moves the inline note `at` of a `tag` record over 32K to new `NOTE`
+    /// records (`added`), one, or several when the note is over 32K itself
+    /// ([`note_parts`]): `at` points to the first, and the pointers to the
+    /// others, to go after it, are returned.
+    fn move_note(
+        &mut self,
+        at: &mut Structure,
+        tag: &str,
+        added: &mut Vec<Structure>,
+    ) -> Vec<Structure> {
+        let line = at.line;
+        let text = match std::mem::take(&mut at.payload) {
+            Payload::Text(t) => t,
+            other => {
+                at.payload = other;
+                return Vec::new();
+            }
+        };
+        let parts = note_parts(&text);
+        let xrefs: Vec<String> = parts
+            .iter()
+            .map(|_| self.unique("@N1@", self.record_of("NOTE")))
+            .collect();
+        let mut substructures = std::mem::take(&mut at.substructures);
+        at.payload = Payload::Pointer(Xref::new(xrefs.first().map_or("@N1@", String::as_str)));
+        for (part, xref) in parts.into_iter().zip(&xrefs) {
+            added.push(Structure {
+                xref: Some(Xref::new(xref.as_str())),
+                payload: Payload::Text(part.into()),
+                // What the note holds goes with its first part.
+                substructures: std::mem::take(&mut substructures),
+                ..Structure::new("NOTE")
+            });
+        }
+        let detail = if xrefs.len() > 1 {
+            format!(
+                "a {tag} record over 32K: a note over 32K moved to the NOTE records {}, split at line breaks",
+                xrefs.join(", ")
+            )
+        } else {
+            format!(
+                "a {tag} record over 32K: a note moved to the NOTE record {}",
+                xrefs.join("")
+            )
+        };
+        self.repair(line, RepairKind::RecordSize, detail);
+        xrefs
+            .iter()
+            .skip(1)
+            .map(|x| Structure {
+                payload: Payload::Pointer(Xref::new(x.as_str())),
+                ..Structure::new("NOTE")
+            })
+            .collect()
     }
 }
 
@@ -2396,6 +2445,79 @@ fn bump(counts: &mut Vec<(u8, u32)>, t: u8) -> u32 {
 }
 
 /// The structure at `path` (indices of substructures) under `r`.
+/// The text of a note, in parts that each fit a 5.5.1 record under 32K
+/// once written (with its continuation lines): split at line breaks, a line
+/// longer than a part between two characters that are not spaces (where
+/// `CONC` would split it too), else between any two characters. A text
+/// that fits is one part.
+fn note_parts(text: &str) -> Vec<String> {
+    /// The bytes of text a part holds: room for the lines `CONT` and `CONC`
+    /// add (about one in twenty bytes) under the limit.
+    const PART: usize = MAX_RECORD_BYTES * 7 / 8;
+    if text.len() <= PART {
+        return vec![text.to_string()];
+    }
+    let mut parts = Vec::new();
+    let mut current: Option<String> = None;
+    for mut line in text.split('\n') {
+        loop {
+            match &mut current {
+                Some(c) if c.len() + 1 + line.len() <= PART => {
+                    c.push('\n');
+                    c.push_str(line);
+                    break;
+                }
+                Some(_) => parts.extend(current.take()),
+                None if line.len() <= PART => {
+                    current = Some(line.to_string());
+                    break;
+                }
+                None => {
+                    let (head, tail) = line.split_at(cut(line, PART));
+                    parts.push(head.to_string());
+                    line = tail;
+                }
+            }
+        }
+    }
+    parts.extend(current);
+    parts
+}
+
+/// Where to cut `line`, longer than `max` bytes: the last character
+/// boundary at most `max` between two characters that are not spaces, else
+/// the last character boundary at most `max` (never 0).
+fn cut(line: &str, max: usize) -> usize {
+    let bytes = line.as_bytes();
+    let boundary = (1..=max.min(line.len()))
+        .rev()
+        .find(|&i| line.is_char_boundary(i))
+        .unwrap_or(line.len());
+    (max / 2..=boundary)
+        .rev()
+        .find(|&i| {
+            line.is_char_boundary(i)
+                && bytes.get(i - 1).is_some_and(|&b| b != b' ')
+                && bytes.get(i).is_some_and(|&b| b != b' ')
+        })
+        .unwrap_or(boundary)
+}
+
+/// Inserts each run of structures of `further` after the structure its path
+/// names in `r`, the last path first, so that the paths stay right.
+fn insert_after(r: &mut Structure, mut further: Vec<(Vec<usize>, Vec<Structure>)>) {
+    further.sort_by(|a, b| b.0.cmp(&a.0));
+    for (path, run) in further {
+        let Some((&last, parent)) = path.split_last() else {
+            continue;
+        };
+        if let Some(p) = node_at(r, parent) {
+            let at = (last + 1).min(p.substructures.len());
+            p.substructures.splice(at..at, run);
+        }
+    }
+}
+
 fn node_at<'s>(r: &'s mut Structure, path: &[usize]) -> Option<&'s mut Structure> {
     let mut cur = r;
     for &i in path {
