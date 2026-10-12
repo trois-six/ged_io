@@ -640,3 +640,23 @@ fn errors_display() {
     };
     assert_eq!(w.to_string(), "@I1@: an individual, not a family");
 }
+
+/// An untyped record whose own payload points to a record removed with
+/// its pointers loses that payload, and keeps the rest (found by fuzzing:
+/// a family pointed to by an unknown record's payload).
+#[test]
+fn detaching_clears_an_untyped_records_payload() {
+    let mut data = Dataset::parse(
+        "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @X1@ _FAMILY_OF @F1@\n1 _NOTE kept\n\
+         0 @F1@ FAM\n0 TRLR\n",
+    );
+    assert_eq!(data.references("@F1@"), 1);
+    let family = data.handle::<Family>("@F1@").unwrap();
+    assert!(data.remove(family, Removal::Refuse).is_err());
+    data.remove(family, Removal::Detach).unwrap();
+    assert!(data.dangling_references().is_empty());
+    assert_eq!(data.references("@F1@"), 0);
+    let out = write(&data);
+    assert!(has(&out, "0 @X1@ _FAMILY_OF\n1 _NOTE kept\n"), "{out}");
+    assert_counts(&data);
+}

@@ -254,7 +254,8 @@ pub enum Removal {
     Refuse,
     /// Remove every structure that points to it, with its substructures
     /// (a family's `CHIL`, an individual's `FAMC`, a citation, an
-    /// extension structure), as [`Dataset::detach`] does.
+    /// extension structure; an untyped record whose payload points to it
+    /// loses its payload), as [`Dataset::detach`] does.
     Detach,
     /// Remove it and leave the pointers to it dangling, as a file may
     /// have them ([`Dataset::dangling_references`] lists them).
@@ -1894,8 +1895,9 @@ impl Dataset {
 
     /// Removes every structure that points to this identifier, with its
     /// substructures, from the header and every record: the number
-    /// removed. Walks the records holding such pointers, unless the counts
-    /// say none.
+    /// removed. An untyped record whose own payload points there keeps its
+    /// substructures and loses its payload. Walks the records holding such
+    /// pointers, unless the counts say none.
     pub fn detach(&mut self, xref: impl XrefKey) -> usize {
         self.settle();
         let Some(id) = xref.id_in(&self.store) else {
@@ -1918,6 +1920,7 @@ impl Dataset {
                     r.each(&mut |p| has |= p == id);
                     if has {
                         r.retain(&mut cut);
+                        r.cut_own(&mut cut);
                     }
                 });
             }
