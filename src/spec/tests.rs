@@ -494,6 +494,11 @@ fn repair_d_payloads() {
     let (k, out) = repair70("0 @N1@ SNOTE x\n1 MIME image/png\n");
     assert_eq!(k, [R::Payload]);
     assert!(out.contains("1 _MIME image/png\n"), "{out}");
+    // An individual's EVEN keeps its 5.5.1 descriptor (551-errata.tsv).
+    let (k, out) =
+        repair551("0 @I1@ INDI\n1 EVEN Appointed chairperson\n2 TYPE Civic appointment\n");
+    assert_eq!(k, []);
+    assert!(out.contains("1 EVEN Appointed chairperson\n"), "{out}");
 }
 
 #[test]
