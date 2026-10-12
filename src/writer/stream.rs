@@ -66,6 +66,11 @@ const STUB: &str = "@U1@";
 /// - **Large records.** The notes moved out of a 5.5.1 record over 32K
 ///   go to `NOTE` records written right after it.
 ///
+/// A record that a repair makes an extension record is kept until the
+/// end and written before the trailer, where [`GedcomWriter`] writes it
+/// too: such records (rare: a record type the version does not have, a
+/// record that cannot be repaired otherwise) are the only ones held.
+///
 /// Under [`RepairPolicy::Error`], the first repair is an error as soon as
 /// it is found; what was written before stays written.
 ///
@@ -105,6 +110,10 @@ pub struct GedcomStreamWriter<W: io::Write> {
     sink: LineSink<'static>,
     conform: Streamed,
     xrefs: StreamXrefs,
+    /// The records a repair made extension records, with the identifiers
+    /// they are written with: written last, as [`GedcomWriter`] writes
+    /// them.
+    held: Vec<(Structure, Option<String>)>,
 }
 
 impl<W: io::Write> std::fmt::Debug for GedcomStreamWriter<W> {
@@ -157,6 +166,7 @@ impl<W: io::Write> GedcomStreamWriter<W> {
             sink,
             conform,
             xrefs: StreamXrefs::new(rules),
+            held: Vec::new(),
         };
         this.repairs_since(0)?;
         let stub = submitter.map(|x| {
@@ -241,6 +251,13 @@ impl<W: io::Write> GedcomStreamWriter<W> {
                         }
                     }
                     Outcome::Repaired(s, notes) => {
+                        let tag = record.tag(store.as_ref(), self.rules.version);
+                        if s.tag.as_str().starts_with('_') && !tag.starts_with('_') {
+                            let xref = self
+                                .record_xref(s.xref.as_ref().map(Xref::as_str), s.tag.as_str())?;
+                            self.held.push((s, xref));
+                            return self.sink.drain_to(&mut self.writer, false);
+                        }
                         self.put_owned(&s, None)?;
                         for note in &notes {
                             let xref = note.xref.as_ref().map(|x| x.as_str().to_string());
@@ -261,6 +278,9 @@ impl<W: io::Write> GedcomStreamWriter<W> {
     ///
     /// [`WriteError::Io`] when the writer fails.
     pub fn finish(mut self) -> Result<(W, WriteReport), WriteError> {
+        for (s, xref) in std::mem::take(&mut self.held) {
+            self.put_owned(&s, xref)?;
+        }
         let mut out = Emitter {
             rules: self.rules,
             sink: &mut self.sink,
