@@ -236,6 +236,32 @@ impl<'a> XrefMap<'a> {
         Self::assign(rules, records, Some(known))
     }
 
+    /// Assigns identifiers to the records without one of a dataset whose
+    /// record identifiers are valid and unique, `known` telling them:
+    /// `missing` lists, in write order, the position and the identifier
+    /// prefix of each standard record without one.
+    pub(crate) fn missing(
+        rules: &'static VersionRules,
+        missing: impl Iterator<Item = (usize, &'static str)>,
+        known: &'a dyn Fn(&str) -> bool,
+    ) -> Self {
+        let mut map = Self::empty(rules, Some(known));
+        map.number(missing.map(|(index, prefix)| (index, Some(prefix), None)));
+        map
+    }
+
+    fn empty(rules: &'static VersionRules, known: Option<&'a dyn Fn(&str) -> bool>) -> Self {
+        Self {
+            rules,
+            taken: XrefIndex::default(),
+            known,
+            made: HashSet::new(),
+            records: HashMap::new(),
+            renamed: HashMap::new(),
+            repairs: Vec::new(),
+        }
+    }
+
     fn assign<I>(
         rules: &'static VersionRules,
         records: I,
@@ -244,15 +270,7 @@ impl<'a> XrefMap<'a> {
     where
         I: Iterator<Item = RecordXref<'a>>,
     {
-        let mut map = Self {
-            rules,
-            taken: XrefIndex::default(),
-            known,
-            made: HashSet::new(),
-            records: HashMap::new(),
-            renamed: HashMap::new(),
-            repairs: Vec::new(),
-        };
+        let mut map = Self::empty(rules, known);
         // One pass: the valid identifiers first, so that a rewritten one
         // never takes them; the other records are handled after it.
         let mut irregular = Vec::new();
@@ -271,6 +289,19 @@ impl<'a> XrefMap<'a> {
                 irregular.push((index, prefix, xref));
             }
         }
+        map.number(irregular.into_iter());
+        map
+    }
+
+    /// Renames the records `irregular` lists — their position, the prefix
+    /// of the identifiers generated for their kind and their identifier —
+    /// in order: an invalid or repeated identifier, or none.
+    fn number(
+        &mut self,
+        irregular: impl Iterator<Item = (usize, Option<&'static str>, Option<&'a str>)>,
+    ) {
+        let rules = self.rules;
+        let map = self;
         let mut seen_invalid: HashSet<&'a str> = HashSet::new();
         let mut counters: HashMap<&'static str, usize> = HashMap::new();
         for (index, prefix, xref) in irregular {
@@ -304,7 +335,6 @@ impl<'a> XrefMap<'a> {
             };
             map.records.insert(index, new.into());
         }
-        map
     }
 
     /// Whether a record already has `xref`.

@@ -6,13 +6,23 @@
 //! types its structures as it goes ([`Flat::open_typed`], [`Typing`]):
 //! when every structure is typed and placed, the check looks only at the
 //! payloads that need it ([`Flat::checks`]) instead of walking the record.
+//!
+//! A [`Flat`] in stream mode ([`Flat::stream`]) keeps no structure: each
+//! line is written as the record writes the structure, into a buffer of
+//! the record's lines, while the structure is typed as above; what the
+//! check must look at is kept aside ([`Flat::checks`]). Anything that would
+//! need the structures — a structure not typed, or not placed, or missing
+//! what its type requires, a line the emitter would repair — spoils the
+//! stream ([`Flat::spoiled`]): the record is then written again as
+//! structures, for the check and the repair to walk.
 
 use std::borrow::Cow;
 
 use super::{Node, Payload, PayloadRef, Structure, Tag, Xref};
 use crate::spec::conform::Typing;
 use crate::spec::schema::{Kind, StructId, DATASET};
-use crate::writer::special_bytes;
+use crate::version::VersionRules;
+use crate::writer::{emit_typed, special_bytes, LineSink};
 
 /// The type of a structure not typed ([`Flat::open`]).
 const UNTYPED: StructId = StructId::MAX;
@@ -60,7 +70,7 @@ struct FlatNode<'s> {
 /// Structures in write order (depth first), each with the end of its
 /// subtree. Cleared and refilled record after record, it keeps its room;
 /// or records are written one after the other ([`Flat::begin`]), and kept.
-#[derive(Clone, Default)]
+#[derive(Default)]
 pub(crate) struct Flat<'s> {
     nodes: Vec<FlatNode<'s>>,
     /// Where the record being written starts.
@@ -87,6 +97,156 @@ pub(crate) struct Flat<'s> {
     extension: Option<u32>,
     /// The extension structures under typed ones, which the check walks.
     extensions: Vec<u32>,
+    /// The state of stream mode, when set.
+    stream: Option<Box<Stream<'s>>>,
+}
+
+/// A structure open in stream mode.
+#[derive(Clone, Copy, Debug)]
+struct Open {
+    /// Its type.
+    ty: StructId,
+    /// The occurrences of the tags (indices into the tables' tags) of its
+    /// typed substructures so far: `len` of them.
+    tags: [u8; OPEN_TAGS],
+    counts: [u8; OPEN_TAGS],
+    len: u8,
+    /// Whether it has a substructure.
+    children: bool,
+    /// Whether its payload is empty.
+    empty: bool,
+    /// Whether a substructure is tagged `MIME` or `LANG`.
+    lang: bool,
+}
+
+/// The distinct tags of typed substructures counted under one structure
+/// in stream mode; a structure with more spoils the stream.
+const OPEN_TAGS: usize = 16;
+
+impl Open {
+    /// The occurrences of `tag` so far.
+    #[inline]
+    fn count(&self, tag: u8) -> u8 {
+        let len = usize::from(self.len);
+        match self
+            .tags
+            .get(..len)
+            .and_then(|t| t.iter().position(|&x| x == tag))
+        {
+            Some(i) => self.counts.get(i).copied().unwrap_or(0),
+            None => 0,
+        }
+    }
+
+    /// Counts one more `tag`; `false` when there is no room.
+    #[inline]
+    fn bump(&mut self, tag: u8) -> bool {
+        let len = usize::from(self.len);
+        if let Some(i) = self
+            .tags
+            .get(..len)
+            .and_then(|t| t.iter().position(|&x| x == tag))
+        {
+            if let Some(n) = self.counts.get_mut(i) {
+                *n = n.saturating_add(1);
+            }
+            return true;
+        }
+        match (self.tags.get_mut(len), self.counts.get_mut(len)) {
+            (Some(t), Some(n)) => {
+                (*t, *n) = (tag, 1);
+                self.len += 1;
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+/// What stream mode keeps of a record: its lines, and what the check must
+/// look at.
+pub(crate) struct Stream<'s> {
+    rules: &'static VersionRules,
+    /// The record's lines, emitted under [`RepairPolicy::Error`]: a line
+    /// the emitter would repair spoils the stream.
+    ///
+    /// [`RepairPolicy::Error`]: crate::writer::RepairPolicy::Error
+    lines: LineSink<'static>,
+    /// The identifier written on the record's line.
+    xref: Option<Cow<'s, str>>,
+    /// The structures open.
+    open: Vec<Open>,
+    /// The depth of the extension structure being written, while one is.
+    extension: Option<u32>,
+    /// Whether the stream is spoiled.
+    spoiled: bool,
+    /// The typed payloads the check looks at, with their types and
+    /// [`special_bytes`].
+    checks: Vec<(FlatPayload<'s>, StructId, u8)>,
+    /// The pointers of extension structures, each to name a record.
+    pointers: Vec<Cow<'s, str>>,
+    /// The type of the record, once typed.
+    root: StructId,
+    /// The structures written.
+    written: usize,
+}
+
+impl Stream<'_> {
+    /// Stream mode for `rules`, with lines as `sink` writes them.
+    pub(crate) fn new(rules: &'static VersionRules, lines: LineSink<'static>) -> Self {
+        Self {
+            rules,
+            lines,
+            xref: None,
+            open: Vec::new(),
+            extension: None,
+            spoiled: false,
+            checks: Vec::new(),
+            pointers: Vec::new(),
+            root: UNTYPED,
+            written: 0,
+        }
+    }
+
+    /// Writes one line: the structure at `level`, its payload's
+    /// [`special_bytes`] given for a text. A line the emitter would repair
+    /// spoils the stream.
+    #[inline]
+    fn line(
+        &mut self,
+        level: u32,
+        tag: &str,
+        standard: bool,
+        payload: &FlatPayload<'_>,
+        special: u8,
+    ) {
+        // Every tag streamed is in the grammar, and only the record has an
+        // identifier (valid: the writer's).
+        let _ = standard;
+        let xref = if level == 0 {
+            self.xref.as_deref()
+        } else {
+            None
+        };
+        let payload = match payload {
+            FlatPayload::None => PayloadRef::None,
+            FlatPayload::Text(t) => PayloadRef::Text(t),
+            FlatPayload::Pointer(p) => PayloadRef::Pointer(p),
+        };
+        if emit_typed(
+            self.rules,
+            &mut self.lines,
+            level as usize,
+            xref,
+            tag,
+            payload,
+            special,
+        )
+        .is_err()
+        {
+            self.spoiled = true;
+        }
+    }
 }
 
 impl std::fmt::Debug for Flat<'_> {
@@ -99,6 +259,74 @@ impl std::fmt::Debug for Flat<'_> {
 }
 
 impl<'s> Flat<'s> {
+    /// Sets stream mode ([`Stream`]), or node mode (`None`), for the
+    /// records written from now on.
+    pub(crate) fn set_stream(&mut self, stream: Option<Box<Stream<'s>>>) {
+        self.stream = stream;
+    }
+
+    /// Whether the arena is in stream mode.
+    pub(crate) fn is_streaming(&self) -> bool {
+        self.stream.is_some()
+    }
+
+    /// The state of stream mode, taken out: the arena is in node mode.
+    pub(crate) fn take_stream(&mut self) -> Option<Box<Stream<'s>>> {
+        self.stream.take()
+    }
+
+    /// Starts a record in stream mode, written with the identifier `xref`
+    /// on its line.
+    pub(crate) fn begin_stream(&mut self, xref: Option<Cow<'s, str>>) {
+        self.clear();
+        if let Some(st) = self.stream.as_deref_mut() {
+            st.lines.clear();
+            st.xref = xref;
+            st.open.clear();
+            st.extension = None;
+            st.spoiled = false;
+            st.checks.clear();
+            st.pointers.clear();
+            st.root = UNTYPED;
+            st.written = 0;
+        }
+    }
+
+    /// Whether the record streamed needs to be written as structures: a
+    /// structure of it is not typed, not placed or incomplete, or one of
+    /// its lines would be repaired.
+    pub(crate) fn spoiled(&self) -> bool {
+        self.stream
+            .as_deref()
+            .is_none_or(|st| st.spoiled || st.written == 0 || !st.open.is_empty())
+    }
+
+    /// The lines of the record streamed.
+    pub(crate) fn stream_lines(&mut self) -> Option<&mut LineSink<'static>> {
+        self.stream.as_deref_mut().map(|st| &mut st.lines)
+    }
+
+    /// What the check of the record streamed looks at: the typed payloads
+    /// with their types and [`special_bytes`], and the pointers of its
+    /// extension structures.
+    pub(crate) fn stream_checks(
+        &self,
+    ) -> (
+        impl Iterator<Item = (PayloadRef<'_>, StructId, u8)>,
+        impl Iterator<Item = &str>,
+    ) {
+        let (checks, pointers): (&[_], &[_]) = match self.stream.as_deref() {
+            Some(st) => (&st.checks, &st.pointers),
+            None => (&[], &[]),
+        };
+        (
+            checks
+                .iter()
+                .map(|(p, ty, special)| (payload_ref(p), *ty, *special)),
+            pointers.iter().map(|p| &**p),
+        )
+    }
+
     /// The number of structures.
     pub(crate) fn len(&self) -> usize {
         self.nodes.len()
@@ -145,11 +373,17 @@ impl<'s> Flat<'s> {
     /// the conformance check then needs to look at [`Flat::checks`] and
     /// [`Flat::extensions`] only.
     pub(crate) fn typed(&self) -> bool {
+        if self.stream.is_some() {
+            return !self.spoiled();
+        }
         self.typing.is_some() && !self.untyped && self.nodes.len() > self.start
     }
 
     /// The type of the record being written, once typed.
     pub(crate) fn root_type(&self) -> Option<StructId> {
+        if let Some(st) = self.stream.as_deref() {
+            return Some(st.root).filter(|&t| t != UNTYPED);
+        }
         self.nodes
             .get(self.start)
             .map(|n| n.ty)
@@ -191,6 +425,9 @@ impl<'s> Flat<'s> {
     /// Something not typed is written: the check walks the record.
     pub(crate) fn untrusted(&mut self) {
         self.untyped = true;
+        if let Some(st) = self.stream.as_deref_mut() {
+            st.spoiled = true;
+        }
     }
 
     /// Whether the next typed structure is one more of a field that holds
@@ -212,6 +449,10 @@ impl<'s> Flat<'s> {
         payload: FlatPayload<'s>,
         claim: Option<Kind>,
     ) -> usize {
+        if self.stream.is_some() {
+            self.stream_typed(tag, standard, xref.as_deref(), payload, claim);
+            return 0;
+        }
         let repeat = std::mem::take(&mut self.repeat);
         let index = self.nodes.len();
         let mut ty = UNTYPED;
@@ -281,6 +522,10 @@ impl<'s> Flat<'s> {
         payload: FlatPayload<'s>,
     ) -> usize {
         self.repeat = false;
+        if self.stream.is_some() {
+            self.stream_standard(&tag, standard, xref.as_deref(), payload);
+            return 0;
+        }
         if !self.untyped && self.typing.is_some() {
             // An extension structure under a typed one (or as the record)
             // is left to the check; anything else untyped is not.
@@ -341,6 +586,10 @@ impl<'s> Flat<'s> {
     /// Ends the structure [`Flat::open`] started at `at`.
     #[inline]
     pub(crate) fn close(&mut self, at: usize) {
+        if self.stream.is_some() {
+            self.stream_close();
+            return;
+        }
         let end = u32::try_from(self.nodes.len()).unwrap_or(u32::MAX);
         if let Some(node) = self.nodes.get_mut(at) {
             node.end = end;
@@ -360,6 +609,178 @@ impl<'s> Flat<'s> {
             if !self.has_required(typing, at) {
                 self.untyped = true;
             }
+        }
+    }
+
+    /// [`Flat::open_typed`] in stream mode.
+    #[inline]
+    fn stream_typed(
+        &mut self,
+        tag: &'static str,
+        standard: Option<u16>,
+        xref: Option<&str>,
+        payload: FlatPayload<'s>,
+        claim: Option<Kind>,
+    ) {
+        let repeat = std::mem::take(&mut self.repeat);
+        let depth = self.depth;
+        self.depth += 1;
+        let (Some(st), Some(typing)) = (self.stream.as_deref_mut(), self.typing.as_ref()) else {
+            return;
+        };
+        if st.spoiled {
+            return;
+        }
+        // Typed under an extension structure, or an identifier below the
+        // record, is for the check's walk.
+        let parent = st.open.last();
+        let sup = match parent {
+            Some(p) => p.ty,
+            None => DATASET,
+        };
+        if st.extension.is_some()
+            || (parent.is_none() && depth > 0)
+            || (xref.is_some() && parent.is_some())
+        {
+            st.spoiled = true;
+            return;
+        }
+        let spec = standard.and_then(|s| typing.spec_tag(s));
+        let count = match (repeat, parent, spec) {
+            (true, Some(p), Some(t)) => u32::from(p.count(t)) + 1,
+            _ => 1,
+        };
+        let is_pointer = matches!(payload, FlatPayload::Pointer(_));
+        let (Some(ty), Some(spec)) = (typing.place(sup, standard, is_pointer, count), spec) else {
+            st.spoiled = true;
+            return;
+        };
+        let special = match &payload {
+            FlatPayload::Text(t) => special_bytes(t),
+            FlatPayload::None | FlatPayload::Pointer(_) => 0,
+        };
+        self.size += size_bound(tag, standard, xref, &payload);
+        st.line(depth, tag, standard.is_some(), &payload, special);
+        if let Some(p) = st.open.last_mut() {
+            p.children = true;
+            p.lang |= matches!(tag, "MIME" | "LANG");
+            if !p.bump(spec) {
+                st.spoiled = true;
+            }
+        } else {
+            st.root = ty;
+        }
+        let empty = match &payload {
+            FlatPayload::None => true,
+            FlatPayload::Pointer(_) => false,
+            FlatPayload::Text(t) => t.is_empty(),
+        };
+        st.open.push(Open {
+            ty,
+            tags: [0; OPEN_TAGS],
+            counts: [0; OPEN_TAGS],
+            len: 0,
+            children: false,
+            empty,
+            lang: false,
+        });
+        if !typing.trusts(ty, &payload, claim) {
+            // A pointer is looked up with the dataset's records later.
+            match typing.is_clean(ty, &payload, special) {
+                Some(true) => {}
+                Some(false) => st.spoiled = true,
+                None => st.checks.push((payload, ty, special)),
+            }
+        }
+        st.written += 1;
+    }
+
+    /// [`Flat::open_standard`] in stream mode: an extension structure, as
+    /// the check walks it (`Conformer::clean_extension`).
+    #[inline]
+    fn stream_standard(
+        &mut self,
+        tag: &str,
+        standard: Option<u16>,
+        xref: Option<&str>,
+        payload: FlatPayload<'s>,
+    ) {
+        let depth = self.depth;
+        self.depth += 1;
+        let Some(st) = self.stream.as_deref_mut() else {
+            return;
+        };
+        if st.spoiled {
+            return;
+        }
+        let rules = st.rules;
+        let top = st.extension.is_none();
+        if top {
+            // An extension structure under a typed one, or as the record,
+            // with a tag in the grammar; anything else is untyped.
+            if !tag.starts_with('_') || !rules.is_valid_tag(tag) {
+                st.spoiled = true;
+                return;
+            }
+            st.extension = Some(depth);
+            if let Some(p) = st.open.last_mut() {
+                p.children = true;
+            }
+        } else if !(standard.is_some() || rules.is_valid_tag(tag)) {
+            st.spoiled = true;
+            return;
+        }
+        // Only a record has an identifier.
+        if xref.is_some() && depth > 0 {
+            st.spoiled = true;
+            return;
+        }
+        let special = match &payload {
+            FlatPayload::Text(t) => {
+                let special = special_bytes(t);
+                if crate::spec::payload::has_banned_known(t, special, rules) {
+                    st.spoiled = true;
+                    return;
+                }
+                special
+            }
+            FlatPayload::None | FlatPayload::Pointer(_) => 0,
+        };
+        self.size += size_bound(tag, standard, xref, &payload);
+        st.line(depth, tag, standard.is_some(), &payload, special);
+        if let FlatPayload::Pointer(p) = payload {
+            st.pointers.push(p);
+        }
+        st.written += 1;
+    }
+
+    /// [`Flat::close`] in stream mode: a typed structure has what its type
+    /// requires ([`Flat::has_required`]).
+    #[inline]
+    fn stream_close(&mut self) {
+        self.depth = self.depth.saturating_sub(1);
+        let (Some(st), Some(typing)) = (self.stream.as_deref_mut(), self.typing.as_ref()) else {
+            return;
+        };
+        if st.spoiled {
+            return;
+        }
+        if let Some(depth) = st.extension {
+            if depth == self.depth {
+                st.extension = None;
+            }
+            return;
+        }
+        let Some(o) = st.open.pop() else {
+            st.spoiled = true;
+            return;
+        };
+        let complete = typing.required(o.ty).all(|(tag, min)| o.count(tag) >= min);
+        let v7_ok = !typing.v7()
+            || ((st.open.is_empty() || !o.empty || o.children)
+                && (!typing.is_note_tran(o.ty) || o.lang));
+        if !complete || !v7_ok {
+            st.spoiled = true;
         }
     }
 

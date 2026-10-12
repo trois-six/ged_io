@@ -17,6 +17,9 @@
 //! identifier names, the renamed identifiers, the aliases) is unchanged.
 
 mod clean;
+mod direct;
+
+pub(crate) use direct::{take_head, Direct, IdTypes, Place};
 
 use clean::Walk;
 
@@ -477,6 +480,9 @@ struct Conformer<'n> {
     /// Every record identifier in use, with the type of the record it
     /// names as the pass found it (`None` for extension records).
     xrefs: XrefIndex<'n, Option<StructId>>,
+    /// The same, by the ids of a typed dataset's store, in place of
+    /// `xrefs` when its records are written one at a time ([`Direct`]).
+    ids: Option<std::rc::Rc<IdTypes<'n>>>,
     /// The new identifier of each identifier that was invalid.
     renamed: HashMap<Box<str>, Box<str>>,
     /// Extension tags of relocated standard structures, with their URIs.
@@ -523,6 +529,7 @@ struct Conformer<'n> {
 #[derive(Clone, Copy)]
 pub(crate) struct Typing {
     picker: Picker,
+    rules: &'static VersionRules,
     schema: &'static Schema,
     tables: &'static SchemaIndex,
     v7: bool,
@@ -534,6 +541,7 @@ impl Typing {
         let rules = version.rules();
         Typing {
             picker: Picker::of(rules),
+            rules,
             schema: rules.spec,
             tables: rules.index,
             v7: Family::of(rules) == Family::V7,
@@ -601,6 +609,40 @@ impl Typing {
         }
     }
 
+    /// Whether a payload the type does not vouch for ([`Typing::trusts`])
+    /// stays as it is in a structure of type `ty`
+    /// ([`Conformer::clean_payload_known`] without documented aliases,
+    /// which stream mode has none of); `None` for a pointer structure,
+    /// whose pointer must name a record.
+    #[inline]
+    pub(crate) fn is_clean(
+        &self,
+        ty: StructId,
+        payload: &FlatPayload<'_>,
+        special: u8,
+    ) -> Option<bool> {
+        if matches!(
+            self.schema.kind(ty).0,
+            Kind::Pointer | Kind::NullablePointer
+        ) {
+            return None;
+        }
+        let raw = match payload {
+            FlatPayload::Pointer(_) => return Some(false),
+            FlatPayload::Text(t) => t,
+            FlatPayload::None => "",
+        };
+        Some(clean::is_clean_value(
+            self.schema,
+            self.tables,
+            self.rules,
+            ty,
+            raw,
+            raw,
+            Some(special),
+        ))
+    }
+
     /// The required substructures of a type: the tag (an index in the
     /// tables' tags) and the fewest occurrences.
     #[inline]
@@ -628,6 +670,10 @@ impl Typing {
         self.tables.is_note_tran(ty)
     }
 }
+
+/// A record an identifier names: its type, `None` for an extension record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Named(pub(crate) Option<StructId>);
 
 /// What becomes of a structure after its repair.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -762,6 +808,7 @@ impl<'n> Conformer<'n> {
             family,
             repairs: Vec::new(),
             xrefs: XrefIndex::default(),
+            ids: None,
             renamed: HashMap::new(),
             schma: Vec::new(),
             path: Vec::new(),
@@ -922,33 +969,7 @@ impl<'n> Conformer<'n> {
                     // A record that writes itself is written once, typed:
                     // when it is so, only what needs a look is looked at.
                     let written =
-                        r.write_typed(&mut arena, |flat| {
-                            let typed = flat
-                                .typed()
-                                .then(|| self.is_clean_typed(flat, &mut walk))
-                                .flatten();
-                            // What the typed record trusts, the walk of any
-                            // record finds so too (its pointers are looked up
-                            // with the others).
-                            #[cfg(debug_assertions)]
-                            if typed == Some(true) {
-                                let mut deferred = Vec::new();
-                                let mut check = Walk {
-                                    pending: Some(&mut deferred),
-                                    ..Walk::default()
-                                };
-                                assert!(
-                                flat.root()
-                                    .is_some_and(|n| self.is_clean_record(n, n.xref(), &mut check)),
-                                "a record of the typed model trusted as written is not clean: {:?}",
-                                flat.root().map(Node::to_owned_structure)
-                            );
-                            }
-                            typed.unwrap_or_else(|| {
-                                flat.root()
-                                    .is_some_and(|n| self.is_clean_record(n, n.xref(), &mut walk))
-                            })
-                        });
+                        r.write_typed(&mut arena, |flat| self.is_clean_written(flat, &mut walk));
                     let clean = written.unwrap_or_else(|| {
                         let xref = r.xref();
                         with_node!(r.get(&arena), *scratch, |n| self
@@ -1067,6 +1088,36 @@ impl<'n> Conformer<'n> {
             "a record found clean is repaired: {:?}",
             self.repairs.get(before..)
         );
+    }
+
+    /// Whether a record of the typed model, just written into `flat`
+    /// (typed as it was written: [`Typing`]), needs no repair: when it is
+    /// typed, only what needs a look is looked at.
+    fn is_clean_written(&self, flat: &Flat<'n>, walk: &mut Walk<'_>) -> bool {
+        let typed = flat
+            .typed()
+            .then(|| self.is_clean_typed(flat, walk))
+            .flatten();
+        // What the typed record trusts, the walk of any record finds so too
+        // (its pointers are looked up with the others).
+        #[cfg(debug_assertions)]
+        if typed == Some(true) {
+            let mut deferred = Vec::new();
+            let mut check = Walk {
+                pending: Some(&mut deferred),
+                ..Walk::default()
+            };
+            assert!(
+                flat.root()
+                    .is_some_and(|n| self.is_clean_record(n, n.xref(), &mut check)),
+                "a record of the typed model trusted as written is not clean: {:?}",
+                flat.root().map(Node::to_owned_structure)
+            );
+        }
+        typed.unwrap_or_else(|| {
+            flat.root()
+                .is_some_and(|n| self.is_clean_record(n, n.xref(), walk))
+        })
     }
 
     /// (i) Completes the header as the writer does for the version
@@ -1500,9 +1551,15 @@ impl<'n> Conformer<'n> {
         if self.family == Family::V7 && p == "@VOID@" || is_external_pointer(&p, self.family) {
             return Ok(None);
         }
-        match self.xrefs.get(p.as_str()) {
-            Some(ty) => Ok(*ty),
-            None => Err(()),
+        self.target(&p).map(|n| n.0).ok_or(())
+    }
+
+    /// The record `xref` names, if one does.
+    #[inline]
+    fn target(&self, xref: &str) -> Option<Named> {
+        match &self.ids {
+            Some(ids) => ids.get(xref),
+            None => self.xrefs.get(xref).map(|&ty| Named(ty)),
         }
     }
 
