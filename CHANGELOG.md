@@ -112,3 +112,7 @@ keeps all data; writing is conformant to GEDCOM 5.5.1, 7.0 or 7.1.
 - The date, age and time grammars no longer allocate to check a value.
 - No panic or hang from any input (Hebrew dates, levels over 255, the
   `Display` of notes, version detection).
+- A dual year converted to 7.x takes the later year only for a date from
+  January to March (`30 JAN 1648/49` is `30 JAN 1649`), keeps the year
+  written otherwise and before the common era, and converts back to the
+  5.5.1 date it came from.

@@ -1139,10 +1139,14 @@ impl DateTexts {
     ///   extension calendar `_ROMAN`), `B.C.` becomes `BCE`, `INT date
     ///   (phrase)` the date with the phrase as `PHRASE`, and `(phrase)` an
     ///   empty payload with the `PHRASE`. A dual year becomes one year (the
-    ///   later one when it is the year that follows, as in `1648/49`, the
-    ///   year written otherwise), or a `BET … AND …` range for a year alone,
+    ///   later one when it is the year that follows, as in `30 JAN 1648/49`,
+    ///   and the date falls from January to March; the year written
+    ///   otherwise, before the common era too), or a
+    ///   `BET … AND …` range for a year alone,
     ///   and the original wording becomes the `PHRASE`;
-    /// - to GEDCOM 5.5.1, keywords become escapes, `BCE` becomes `B.C.`, and
+    /// - to GEDCOM 5.5.1, a `PHRASE` that is the 5.5.1 date the payload was
+    ///   converted from (a dual year) becomes the payload again; otherwise
+    ///   keywords become escapes, `BCE` becomes `B.C.`, and
     ///   the `PHRASE` moves into the payload, as `INT date (phrase)` after a
     ///   single date or `(phrase)` alone. Next to a range or a period it
     ///   stays in [`phrase`](Self::phrase), which 5.5.1 cannot write.
@@ -1207,6 +1211,13 @@ impl DateTexts {
                 }
             }
             Grammar::V551 => {
+                if let Some(original) = converted_from(raw, phrase) {
+                    return DateTexts {
+                        value: Some(original.to_string()),
+                        time,
+                        phrase: None,
+                    };
+                }
                 let value = match raw {
                     None => DateValue::Empty,
                     Some(raw) => {
@@ -1310,10 +1321,24 @@ fn convert_time(raw: &str, grammar: Grammar) -> String {
     Time::parse(raw).map_or_else(|| raw.to_string(), |time| time.format(grammar))
 }
 
+/// The 5.5.1 date a 7.x date (`raw`, `phrase`) was converted from, when
+/// its phrase is that date: a dual year (`1699/00` became
+/// `BET 1699 AND 1700` with the phrase `1699/00`).
+fn converted_from<'p>(raw: Option<&str>, phrase: Option<&'p str>) -> Option<&'p str> {
+    let original = phrase.filter(|p| DateValue::is_strict(p, Grammar::V551))?;
+    let back = DateTexts {
+        value: Some(original.to_string()),
+        time: None,
+        phrase: None,
+    }
+    .convert(Grammar::V7);
+    (back.value.as_deref() == raw && back.phrase.as_deref() == Some(original)).then_some(original)
+}
+
 /// Replaces dual years, which GEDCOM 7.0 does not have: a `single` date
 /// that is a year alone becomes the range of its two years; otherwise the
-/// later year is kept when it is the year that follows (`1648/49`, the
-/// change of new year), and the year written when it is not.
+/// later year is kept where the migration guide takes it
+/// ([`takes_later_year`]), and the year written elsewhere.
 fn resolve_dual_years(value: DateValue, single: bool) -> DateValue {
     if let (DateValue::Date(date), true) = (&value, single) {
         if let (None, None, None, Some(dual)) = (date.day, &date.month, &date.epoch, date.dual_year)
@@ -1332,12 +1357,28 @@ fn resolve_dual_years(value: DateValue, single: bool) -> DateValue {
     let mut value = value;
     for date in value.dates_mut() {
         if let Some(dual) = date.dual_year.take() {
-            if date.year.and_then(|year| year.checked_add(1)) == Some(dual) {
+            if takes_later_year(date, dual) {
                 date.year = Some(dual);
             }
         }
     }
     value
+}
+
+/// Whether a date with a dual year is the later of its years in 7.x (the
+/// migration guide: `30 JAN 1648/49` is `30 JAN 1649`): when the dual year
+/// is the year that follows (the old and the new style of counting from
+/// 25 March) and the date falls where the two differ, from January to
+/// March. A year alone, a year counted before the common era, or a dual
+/// year of any other shape keeps the year written: what the slash meant is
+/// the `PHRASE`'s to say.
+fn takes_later_year(date: &CalendarDate, dual: u32) -> bool {
+    date.year.and_then(|year| year.checked_add(1)) == Some(dual)
+        && date.epoch.is_none()
+        && date
+            .month
+            .as_ref()
+            .is_some_and(|m| matches!(m, Month::Jan | Month::Feb | Month::Mar))
 }
 
 #[cfg(test)]
@@ -1742,6 +1783,20 @@ mod texts_tests {
                 Some("30 JAN 1648/49"),
             ),
             ("8 MAR 1401/8", Some("8 MAR 1401"), Some("8 MAR 1401/8")),
+            // Outside January to March, both styles count the same year;
+            // before the common era, or for a year alone, the year written.
+            ("NOV 1042/43", Some("NOV 1042"), Some("NOV 1042/43")),
+            (
+                "21 FEB 366/7 B.C.",
+                Some("21 FEB 366 BCE"),
+                Some("21 FEB 366/7 B.C."),
+            ),
+            ("ABT 1648/49", Some("ABT 1648"), Some("ABT 1648/49")),
+            (
+                "FROM 2 FEB 1700/01 TO 1710",
+                Some("FROM 2 FEB 1701 TO 1710"),
+                Some("FROM 2 FEB 1700/01 TO 1710"),
+            ),
             ("1699/00", Some("BET 1699 AND 1700"), Some("1699/00")),
             ("1401/8 B.C.", Some("1401 BCE"), Some("1401/8 B.C.")),
             (
@@ -1798,6 +1853,20 @@ mod texts_tests {
         let range = with_phrase(Some("BET 1820 AND 1825"), "in his youth").to_version(V551);
         assert_eq!(range.value.as_deref(), Some("BET 1820 AND 1825"));
         assert_eq!(range.phrase.as_deref(), Some("in his youth"));
+        // A dual year converted to 7.x converts back.
+        for dual in ["1699/00", "30 JAN 1648/49", "FROM 2 FEB 1700/01 TO 1710"] {
+            let v7 = date(dual).to_version(V7);
+            let back = with_phrase(v7.value.as_deref(), v7.phrase.as_deref().unwrap_or(""))
+                .to_version(V551);
+            assert_eq!(
+                (back.value.as_deref(), back.phrase),
+                (Some(dual), None),
+                "{dual}"
+            );
+        }
+        // A phrase that is a date, but not the one converted, stays a phrase.
+        let other = with_phrase(Some("BET 1699 AND 1700"), "1650/51").to_version(V551);
+        assert_eq!(other.phrase.as_deref(), Some("1650/51"));
     }
 
     #[test]
