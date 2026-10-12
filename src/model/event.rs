@@ -59,11 +59,14 @@ gedcom_struct! {
             /// What kind of event or fact it is, in words (`TYPE`); `EVEN`
             /// and `FACT` require it.
             "TYPE" => classification: Option<Text>,
-            /// The individual's age (`AGE`).
+            /// The individual's age at the event (`AGE`), best one a cited
+            /// source gives (7.0.17).
             "AGE" => age: Option<Age>,
-            /// The husband's age at a family event (`HUSB`).
+            /// At a family event, what concerns the partner the family's
+            /// `HUSB` names: their age (`HUSB`).
             "HUSB" => husband: Option<EventSpouse>,
-            /// The wife's age at a family event (`WIFE`).
+            /// At a family event, what concerns the partner the family's
+            /// `WIFE` names: their age (`WIFE`).
             "WIFE" => wife: Option<EventSpouse>,
             /// The family a child was born into or adopted by (`FAMC` of
             /// `BIRT`, `CHR` or `ADOP`).
@@ -184,8 +187,9 @@ impl Event {
 }
 
 gedcom_struct! {
-    /// A spouse at a family event (`HUSB` or `WIFE` under it) and their age
-    /// then.
+    /// A partner at a family event (`HUSB` or `WIFE` under it: the one the
+    /// family's `HUSB` or `WIFE` names) and their age then (7.0.17:
+    /// `MARR` / `HUSB` / `AGE 32y`).
     pub struct EventSpouse {
         /// The age (`AGE`).
         "AGE" => age: Option<Age>,
