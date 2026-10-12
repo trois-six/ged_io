@@ -61,7 +61,7 @@ Real-world GEDCOM files are messy: reading never fails and keeps their data; con
 ### GEDCOM Version Conversion
 - ✅ `GedcomVersion` (5.5.1, 7.0, 7.1) with a `VersionRules` table per version — `src/version.rs`
 - ✅ Values converted between versions when written (dates, ages, times, enumeration spellings); structures the target does not permit kept as extensions
-- Dataset-level conversion following the migration guides (inline `OBJE` to records, `SNOTE` ↔ `NOTE` record, `SUBN`, `ASSO.RELA` ↔ `ROLE`, media types and file URIs, language tags)
+- ✅ Dataset-level conversion following the migration guide (inline `OBJE` to records, `SNOTE` ↔ `NOTE` record, `SUBN`, `ASSO.RELA` ↔ `ROLE`, media types and file URIs, language tags, identifiers) — `src/convert/`
 
 ### Streaming
 - ✅ `GedcomStreamParser`: typed records one at a time, any encoding — `src/stream.rs`

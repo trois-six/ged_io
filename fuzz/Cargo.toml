@@ -51,3 +51,10 @@ path = "fuzz_targets/model.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "convert"
+path = "fuzz_targets/convert.rs"
+test = false
+doc = false
+bench = false

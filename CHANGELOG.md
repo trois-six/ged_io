@@ -54,6 +54,20 @@ keeps all data; writing is conformant to GEDCOM 5.5.1, 7.0 or 7.1.
   type there. 7.x keeps media types.
 - CLI: `ged-io --write <5.5.1|7.0|7.1>` writes a file conformant;
   `--validate` reports every deviation with its line.
+- `ged_io::convert`: conversion between GEDCOM 5.5.1 and 7.x, run by the
+  writer when the target is of the other family, and as functions
+  (`convert_structures`, `convert_dataset`): multimedia links holding files
+  and source citations in words become records, `ASSO.RELA` the `ROLE` it
+  names (`FRIEND`, `GODP`, `NGHBR`, …, else `OTHER`) with a `PHRASE`,
+  `FONE`/`ROMN` `TRAN` with a language, language names BCP 47 tags, file
+  formats media types and file paths URIs, `RIN`/`AFN`/`RFN` `EXID`s of the
+  registered types, escapes in text calendar names, `AGE STILLBORN` a death
+  at `0y`; `SUBN`, `HEAD.FILE`, `HEAD.CHAR` and `GEDC.FORM` are left out; a
+  5.5.1 record named `@VOID@` is renamed with its pointers; extension tags
+  of known meaning are declared in `HEAD.SCHMA`. Each is reversed when
+  converting to 5.5.1. `ConversionOptions::keep_obsolete` (writer
+  `conversion`, CLI `--keep-obsolete`) keeps what 7.x drops as declared
+  extensions, restored in 5.5.1.
 
 ### Changed
 

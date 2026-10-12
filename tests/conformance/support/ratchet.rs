@@ -252,6 +252,9 @@ mod tests {
             "corpus",
             "fixture",
             "references",
+            "roundtrip",
+            "tree-convert",
+            "downgrade",
         ];
         for g in gaps() {
             let fam = g.id.split('/').next().unwrap_or("");
@@ -262,8 +265,8 @@ mod tests {
             );
             let n: u32 = g.cause[2..].parse().unwrap_or(0);
             assert!(
-                (1..=35).contains(&n),
-                "line {}: cause {} is not TS1–TS35",
+                (1..=37).contains(&n),
+                "line {}: cause {} is not TS1–TS37",
                 g.line,
                 g.cause
             );

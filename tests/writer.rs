@@ -174,18 +174,31 @@ fn at_signs_are_escaped_per_version() {
     );
     // A description that looks like a pointer is still text.
     assert!(v5.contains("1 SOUR @@S9@@\n"), "{v5}");
-    let v7 = write(&data, GedcomVersion::V7_0);
+    // 7.x data: a leading `@` doubled, an escape is text.
+    let mut data7 = read("0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 NOTE x\n0 TRLR");
+    data7.individuals[0].notes[0] = Note::text(note);
+    let v7 = write(&data7, GedcomVersion::V7_0);
     assert!(
         v7.contains("1 NOTE mail a@b.example\n2 CONT @@#DJULIAN@ and @#open\n"),
         "{v7}"
     );
-    // 7.0 has no source description: it is kept as an extension.
-    assert!(v7.contains("1 _SOUR @@S9@\n"), "{v7}");
-
     for written in [v5, v7] {
         let back = read(&written);
         assert_eq!(note_text(&back, &back.individuals[0].notes[0]), note);
     }
+
+    // The 5.5.1 data converted: 7.x has no escapes, a calendar's is its
+    // name; a source description is the note of a source record.
+    let converted = write(&data, GedcomVersion::V7_0);
+    assert!(
+        converted.contains("1 NOTE mail a@b.example\n2 CONT JULIAN and @#open\n"),
+        "{converted}"
+    );
+    assert!(converted.contains("1 SOUR @S1@\n"), "{converted}");
+    assert!(
+        converted.contains("0 @S1@ SOUR\n1 NOTE @@S9@\n"),
+        "{converted}"
+    );
 }
 
 #[test]

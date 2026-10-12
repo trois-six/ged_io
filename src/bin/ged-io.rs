@@ -5,6 +5,7 @@ use std::fs;
 use std::io::{self, Write as _};
 use std::process::ExitCode;
 
+use ged_io::convert::ConversionOptions;
 use ged_io::model::{Dataset, Event, Individual, RecordRef, Sex};
 use ged_io::{GedcomBuilder, GedcomError, GedcomVersion, GedcomWriter, WriteError};
 
@@ -17,7 +18,7 @@ USAGE:
   ged-io --individual-lastname <LASTNAME> <file.ged>
   ged-io --individual-firstname <FIRSTNAME> <file.ged>
   ged-io --validate [--validation-level <LEVEL>] <file.ged>
-  ged-io --write <VERSION> <file.ged>
+  ged-io --write <VERSION> [--keep-obsolete] <file.ged>
 
 OPTIONS:
   -h, --help                         Print this help
@@ -32,7 +33,10 @@ OPTIONS:
   --validation-level <LEVEL>         strict: deviations are errors (exit code 2);
                                      lenient (default): they are warnings (exit code 0)
   --write <VERSION>                  Write the file to standard output as conformant GEDCOM
-                                     5.5.1, 7.0 or 7.1, and list the repairs on standard error
+                                     5.5.1, 7.0 or 7.1, and list the repairs on standard error;
+                                     a 5.5.1 file is converted to 7.x and back
+  --keep-obsolete                    With --write 7.0 or 7.1: keep the 5.5.1 structures 7.x
+                                     drops (SUBN, HEAD.FILE, escapes) as declared extensions
 
 NOTES:
   Any encoding is read. If both --individual-lastname and --individual-firstname are set,
@@ -51,6 +55,7 @@ struct Args {
     validate: bool,
     strict: Option<bool>,
     write: Option<GedcomVersion>,
+    keep_obsolete: bool,
     help: bool,
 }
 
@@ -107,6 +112,7 @@ fn parse_args(command_line: &[String]) -> Result<Args, CliError> {
             "--individual-lastname" => args.lastname = Some(value(arg, "a LASTNAME")?),
             "--individual-firstname" => args.firstname = Some(value(arg, "a FIRSTNAME")?),
             "--validate" => args.validate = true,
+            "--keep-obsolete" => args.keep_obsolete = true,
             "--validation-level" => {
                 args.strict = Some(match value(arg, "strict or lenient")?.as_str() {
                     "strict" => true,
@@ -171,6 +177,9 @@ fn run(command_line: &[String]) -> Result<ExitCode, CliError> {
     if args.strict.is_some() && !args.validate {
         return Err(usage("--validation-level requires --validate"));
     }
+    if args.keep_obsolete && args.write.is_none() {
+        return Err(usage("--keep-obsolete requires --write"));
+    }
     if [args.validate, filters, args.write.is_some()]
         .iter()
         .filter(|&&b| b)
@@ -190,8 +199,10 @@ fn run(command_line: &[String]) -> Result<ExitCode, CliError> {
         .map_err(CliError::Read)?;
     let mut out = io::stdout().lock();
     if let Some(version) = args.write {
+        let conversion = ConversionOptions::default().keep_obsolete(args.keep_obsolete);
         let report = GedcomWriter::new()
             .gedcom_version(version)
+            .conversion(conversion)
             .write(&mut out, &data)
             .map_err(CliError::Write)?;
         for repair in &report.repairs {

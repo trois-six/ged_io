@@ -133,9 +133,10 @@ fn every_record_survives_a_round_trip() {
     assert_eq!(data.submitters.len(), 1);
 
     round_trip(&data, V551);
-    // 7.0 gives the file a media type, the 5.5.1 format kept after it.
+    // 7.0 gives the file the media type of its format.
     let out = write_stable(&data, V70);
-    assert_has(&out, "1 FILE photo.jpg\n2 FORM image/jpeg\n2 _FORM jpg\n");
+    assert_has(&out, "1 FILE photo.jpg\n2 FORM image/jpeg\n");
+    assert!(!out.contains("_FORM"), "{out}");
     let back = Dataset::parse(out);
     assert_eq!(back.record_count(), data.record_count());
     assert_eq!(
@@ -287,10 +288,21 @@ fn individual_and_family_identifiers_round_trip() {
     ] {
         assert_has(&out, expected);
     }
-    // 7.0 has no AFN nor RIN: they are kept as extensions.
+    // 7.0 has no AFN nor RIN: they are external identifiers of the types
+    // the migration guide names, a RIN of the system the header names.
     assert_has(&out, "1 ANCI @U1@\n1 DESI @U1@\n");
-    assert_has(&out, "1 _AFN 1A2B-3C4\n1 _RIN 101\n");
-    assert_has(&out, "1 _RIN 201\n");
+    assert_has(
+        &out,
+        "1 EXID 1A2B-3C4\n2 TYPE https://gedcom.io/terms/v7/AFN\n",
+    );
+    assert_has(
+        &out,
+        "1 EXID 101\n2 TYPE https://gedcom.io/terms/v7/RIN#SAMPLE\n",
+    );
+    assert_has(
+        &out,
+        "1 EXID 201\n2 TYPE https://gedcom.io/terms/v7/RIN#SAMPLE\n",
+    );
 }
 
 #[test]
@@ -387,20 +399,19 @@ fn association_role_per_version() {
         assert_has(&out, expected);
     }
 
-    // 5.5.1 has no ROLE: the role is kept as an extension.
+    // 5.5.1 has no ROLE: the role is the relation, in words.
     let out = write_stable(&data, V551);
-    // The relation 5.5.1 requires comes first, as the model writes it.
-    assert_has(&out, "1 ASSO @I2@\n2 RELA Unknown\n2 _ROLE GODP\n");
+    assert_has(&out, "1 ASSO @I2@\n2 RELA godparent\n");
     assert_has(
         &out,
-        "1 ASSO @I3@\n2 RELA Unknown\n2 SOUR @S1@\n3 PAGE Folio 3\n2 _ROLE OTHER\n3 PHRASE Best man\n",
+        "1 ASSO @I3@\n2 RELA Best man\n2 SOUR @S1@\n3 PAGE Folio 3\n",
     );
     // Nor an association with no individual.
     assert!(
         out.contains("_ASSO") && out.contains("2 PHRASE Unnamed neighbour\n"),
         "{out}"
     );
-    assert!(!out.contains("\n2 ROLE GODP"), "{out}");
+    assert!(!out.contains("ROLE"), "{out}");
 }
 
 #[test]
@@ -418,12 +429,10 @@ fn association_relation_per_version() {
     let out = round_trip(&data, V551);
     assert_has(&out, "1 ASSO @I2@\n2 RELA Godfather\n");
 
-    // 7.0 has no RELA: the relation is kept as an extension.
+    // 7.0 has no RELA: the relation is the role it names, in its words.
     let out = write_stable(&data, V70);
-    assert_has(&out, "1 ASSO @I2@\n");
-    assert_has(&out, "2 _RELA Godfather\n");
-    assert_has(&out, "2 ROLE OTHER\n");
-    assert!(!out.contains(" RELA "), "{out}");
+    assert_has(&out, "1 ASSO @I2@\n2 ROLE GODP\n3 PHRASE Godfather\n");
+    assert!(!out.contains("RELA"), "{out}");
 }
 
 #[test]
@@ -660,8 +669,11 @@ fn source_record_round_trips() {
         &out,
         "1 DATA\n2 EVEN BIRT, DEAT\n3 DATE FROM 1850 TO 1900\n3 PLAC Sampleton\n2 EVEN MARR\n",
     );
-    // 7.0 has no RIN.
-    assert_has(&out, "1 _RIN 42\n");
+    // 7.0 has no RIN: an external identifier.
+    assert_has(
+        &out,
+        "1 EXID 42\n2 TYPE https://gedcom.io/terms/v7/RIN#SAMPLE\n",
+    );
     assert_has(
         &out,
         "1 TEXT First line of the transcript\n2 CONT second line\n",
@@ -800,10 +812,11 @@ fn call_number_medium_per_version() {
         assert_has(&out, expected);
     }
 
-    // 5.5.1 has no medium but its own: the others are kept as extensions.
+    // 5.5.1 has no medium but its own: the others, in words, are kept as
+    // extensions.
     let out = write_stable(&data, V551);
     for expected in [
-        "2 CALN 111\n3 _MEDI OTHER\n4 PHRASE Parish register\n",
+        "2 CALN 111\n3 _MEDI Parish register\n",
         "2 CALN 222\n3 _MEDI Microfilm reel\n",
         "2 CALN 333\n3 MEDI book\n",
     ] {

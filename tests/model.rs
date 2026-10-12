@@ -720,13 +720,19 @@ fn repairs_follow_the_order_of_the_model() {
         let out = assert_idempotent(input, v551);
         assert!(out.contains("0 @U1@ SUBM\n1 NAME "), "{out}");
     }
-    // A 5.5.1 relation, which 7.0 has not, goes after the role.
+    // A 5.5.1 relation is a 7.0 role; beside a role, which 7.0 has not, it
+    // goes after it.
     let out = assert_idempotent(
         "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 ASSO @I2@\n2 RELA friend\n0 @I2@ INDI\n0 TRLR\n",
         GedcomVersion::V7_0,
     );
+    assert!(out.contains("1 ASSO @I2@\n2 ROLE FRIEND\n0 "), "{out}");
+    let out = assert_idempotent(
+        "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 ASSO @I2@\n2 RELA friend\n2 ROLE WITN\n0 @I2@ INDI\n0 TRLR\n",
+        GedcomVersion::V7_0,
+    );
     assert!(
-        out.contains("1 ASSO @I2@\n2 ROLE OTHER\n2 _RELA friend\n"),
+        out.contains("1 ASSO @I2@\n2 ROLE WITN\n2 _RELA friend\n"),
         "{out}"
     );
     // A value with an extension substructure is kept aside: `SCHMA`, which

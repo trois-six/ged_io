@@ -165,6 +165,7 @@ mod tests {
                     .write_model_structures(
                         &mut owned,
                         &data.to_structures_for(version),
+                        data.version(),
                         super::super::field_order,
                     )
                     .unwrap();
