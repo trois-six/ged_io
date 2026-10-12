@@ -64,7 +64,9 @@ gedcom_struct! {
 
 gedcom_struct! {
     /// The coordinates of a place (`MAP`), as written (`N18.150944`,
-    /// `E168.150944`).
+    /// `E168.150944`): in 7.x, the `Latitude` and `Longitude` data types
+    /// (7.0.17), decimal degrees up to 90 and 180 after `N`/`S` and
+    /// `E`/`W`.
     pub struct Map {
         /// Latitude (`LATI`).
         "LATI" => latitude: Option<Text>,

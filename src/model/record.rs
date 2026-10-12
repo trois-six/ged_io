@@ -79,7 +79,9 @@ gedcom_struct! {
             "NO" => non_events: Vec<NonEvent>,
             /// Associated individuals (`ASSO`).
             "ASSO" => associations: Vec<Association>,
-            /// Other records of the same individual (`ALIA`).
+            /// Other records of the same individual (`ALIA`); in 7.x never
+            /// this record itself, which the writer writes as `_ALIA`
+            /// (7.0.17).
             "ALIA" => aliases: Vec<IndividualRef>,
             /// Submitters of the record (`SUBM`).
             "SUBM" => submitters: Vec<XrefId>,
@@ -488,7 +490,9 @@ gedcom_struct! {
         @payload
         /// The text.
         text: Text;
-        /// The media type of the text (7.x `MIME`).
+        /// The media type of the text (7.x `MIME`): `text/plain` or
+        /// `text/html`, or another `text/` type, an extension that needs no
+        /// extension tag (7.0.17).
         "MIME" => mime: Option<Text>,
         /// The language of the text (7.x `LANG`).
         "LANG" => language: Option<Text>,

@@ -260,8 +260,9 @@ gedcom_struct! {
 }
 
 gedcom_struct! {
-    /// The extension tags a file uses (7.x `SCHMA`): each `TAG` names a tag
-    /// and its URI (`_LOC http://…`).
+    /// The extension tags a file uses (7.x `SCHMA`): each `TAG` is a tag
+    /// definition (the `TagDef` data type, 7.0.17), an extension tag, a
+    /// space and a URI reference (`_LOC http://…`).
     pub struct Schema {
         /// The tags and their URIs (`TAG`).
         "TAG" => tags: Vec<Text>,

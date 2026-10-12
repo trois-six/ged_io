@@ -34,7 +34,8 @@ gedcom_struct! {
         @payload
         /// The identifier.
         value: Text;
-        /// The issuer's URI (`TYPE`).
+        /// The issuer's URI (`TYPE`), an RFC 3986 URI reference (the `URI`
+        /// data type, 7.0.17).
         "TYPE" => kind: Option<Text>,
     }
     spec {

@@ -130,7 +130,9 @@ gedcom_struct! {
         /// What few notes have besides their text: a media type, a
         /// language, translations, sources and kinds.
         NoteDetail {
-            /// The media type of the text (`MIME`), `text/plain` when absent.
+            /// The media type of the text (`MIME`), `text/plain` when absent;
+            /// besides `text/html`, another `text/` type is an extension that
+            /// needs no extension tag (7.0.17).
             "MIME" => mime: Option<Text>,
             /// The language of the text (`LANG`).
             "LANG" => language: Option<Text>,

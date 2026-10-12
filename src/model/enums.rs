@@ -560,7 +560,7 @@ gedcom_enum! {
         Book = "book" / "BOOK",
         /// Card file.
         Card = "card" / "CARD",
-        /// Electronic.
+        /// A digital artifact, such as a computer file or a scan.
         Electronic = "electronic" / "ELECTRONIC",
         /// Microfiche.
         Fiche = "fiche" / "FICHE",

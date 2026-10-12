@@ -47,7 +47,9 @@ fn a_minimal_file_is_read_as_7_0() {
 
 #[test]
 fn versions_are_detected_from_the_header() {
-    for vers in ["7.0", "7.0.0", "7.0.1", "7.0.14", "7.0.16"] {
+    for vers in [
+        "7.0", "7.0.0", "7.0.1", "7.0.14", "7.0.16", "7.0.17", "7.0.18",
+    ] {
         let content = format!("0 HEAD\n1 GEDC\n2 VERS {vers}\n0 TRLR");
         assert_eq!(detect_version(&content), GedcomVersion::V7_0, "{vers}");
         assert_eq!(Dataset::parse(content).declared_version(), Some(vers));
@@ -773,4 +775,58 @@ fn pointer_cycles_7_0_17_are_read_and_cut_on_write() {
         out.contains("1 ALIA @I1@\n") && !out.contains("_ALIA"),
         "{out}"
     );
+}
+
+/// The examples 7.0.17 added: the ages of the partners at a family event
+/// (`HUSB.AGE`, `WIFE.AGE`, §HUSB, §WIFE), a `PHRASE` beside a value other
+/// than `OTHER` (§NAME-TYPE: a pen name), a note in a `text/` media type
+/// of its own (§MIME: an extension that needs no extension tag), and the
+/// coordinates and tag definitions of the new data types. Each is read
+/// typed and written as it was, and validates.
+#[test]
+fn the_7_0_17_examples_read_and_write_as_they_are() {
+    use ged_io::model::NameType;
+    use ged_io::spec::validate_text;
+    let input = v7(
+        "0 @I1@ INDI\n1 NAME Mark /Twain/\n2 TYPE PROFESSIONAL\n3 PHRASE Pen\n\
+         1 RESI\n2 PLAC Sampletown\n3 MAP\n4 LATI N18.150944\n4 LONG E168.150944\n\
+         1 EXID 123\n2 TYPE https://registry.example.invalid/ids\n\
+         0 @I2@ INDI\n\
+         0 @F1@ FAM\n1 HUSB @I1@\n1 WIFE @I2@\n1 MARR\n2 HUSB\n3 AGE 32y\n\
+         0 @N1@ SNOTE # Census\n1 MIME text/markdown\n",
+    )
+    .replace(
+        "2 VERS 7.0\n",
+        "2 VERS 7.0\n1 SCHMA\n2 TAG _SKYPEID http://xmlns.com/foaf/0.1/skypeID\n",
+    );
+    assert!(
+        validate_text(&input).is_empty(),
+        "{:?}",
+        validate_text(&input)
+    );
+    let data = Dataset::parse(&input);
+    let name = &data.find_individual("@I1@").unwrap().names[0];
+    let kind = name.detail().kind.as_ref().unwrap();
+    assert_eq!(kind.value, NameType::Professional);
+    assert_eq!(text(&data, kind.phrase.as_ref().unwrap()), "Pen");
+    let marriage = &data.find_family("@F1@").unwrap().events[0];
+    let husband = marriage.detail().husband.as_ref().unwrap();
+    assert_eq!(text(&data, &husband.age.as_ref().unwrap().value), "32y");
+    assert!(marriage.detail().wife.is_none());
+    let note = &data.notes()[0];
+    assert_eq!(text(&data, note.mime.as_ref().unwrap()), "text/markdown");
+    let (out, report) = GedcomWriter::new()
+        .write_to_string_with_report(&data)
+        .unwrap();
+    assert!(report.repairs.is_empty(), "{:?}", report.repairs);
+    for lines in [
+        "1 NAME Mark /Twain/\n2 TYPE PROFESSIONAL\n3 PHRASE Pen\n",
+        "3 MAP\n4 LATI N18.150944\n4 LONG E168.150944\n",
+        "1 EXID 123\n2 TYPE https://registry.example.invalid/ids\n",
+        "1 MARR\n2 HUSB\n3 AGE 32y\n",
+        "0 @N1@ SNOTE # Census\n1 MIME text/markdown\n",
+        "2 TAG _SKYPEID http://xmlns.com/foaf/0.1/skypeID\n",
+    ] {
+        assert!(out.contains(lines), "{lines:?} in {out}");
+    }
 }
