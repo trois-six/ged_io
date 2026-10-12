@@ -70,7 +70,7 @@ use xref::XrefMap;
 
 pub(crate) use emit::{
     emit_typed, extension_tag, is_valid_pointer, new_xref, special_bytes, LineSink, CONTROL,
-    MAYBE_BANNED, TAB,
+    LINE_FEED, MAYBE_BANNED, TAB,
 };
 pub(crate) use head::{complete as complete_head, needs_submitter, stub_submitter, PLACEHOLDER};
 pub use stream::GedcomStreamWriter;

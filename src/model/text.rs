@@ -8,6 +8,7 @@ use std::hash::{Hash, Hasher};
 use std::num::NonZeroU32;
 
 use crate::tree::{TagHasher, TextPiece, STANDARD_TAGS};
+use crate::writer::{special_bytes, LINE_FEED};
 
 /// Text of the model: a payload, a value, a phrase.
 ///
@@ -43,22 +44,28 @@ pub struct Text(Repr);
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum Repr {
-    /// A span of the decoded input.
-    Input { start: u32, len: u32 },
-    /// `count` pieces of the store, from `start`.
-    Pieces { start: u32, count: u32 },
+    /// A span of the decoded input, with the [`special_bytes`] of its
+    /// characters.
+    Input { start: u32, len: u32, special: u8 },
+    /// `count` pieces of the store, from `start`, with the
+    /// [`special_bytes`] of the characters they join.
+    Pieces { start: u32, count: u32, special: u8 },
     /// Characters of its own. Boxed twice so that a text stays two words
     /// with a spare niche: `Option<Text>` is 16 bytes too.
     Owned(Box<Owned>),
 }
 
-/// The characters of an owned [`Text`].
+/// The characters of an owned [`Text`], with their [`special_bytes`].
 #[derive(Clone, PartialEq, Eq, Hash)]
-struct Owned(Box<str>);
+struct Owned(Box<str>, u8);
 
 impl Default for Repr {
     fn default() -> Self {
-        Repr::Input { start: 0, len: 0 }
+        Repr::Input {
+            start: 0,
+            len: 0,
+            special: 0,
+        }
     }
 }
 
@@ -70,7 +77,8 @@ impl Text {
         if text.is_empty() {
             Self::default()
         } else {
-            Self(Repr::Owned(Box::new(Owned(text))))
+            let special = special_bytes(&text);
+            Self(Repr::Owned(Box::new(Owned(text, special))))
         }
     }
 
@@ -78,7 +86,11 @@ impl Text {
     /// not fit in 32 bits.
     pub(crate) fn input(input: &str, start: usize, len: usize) -> Self {
         match (u32::try_from(start), u32::try_from(len)) {
-            (Ok(start), Ok(len)) if len > 0 => Self(Repr::Input { start, len }),
+            (Ok(start), Ok(len)) if len > 0 => Self(Repr::Input {
+                start,
+                len,
+                special: special_bytes(span(input, start, len)),
+            }),
             _ if len == 0 => Self::default(),
             _ => Self::new(input.get(start..start + len).unwrap_or_default()),
         }
@@ -96,7 +108,15 @@ impl Text {
             }
             Some(run) => {
                 if let (Ok(start), Ok(count)) = (u32::try_from(at), u32::try_from(run.len())) {
-                    Self(Repr::Pieces { start, count })
+                    let special = run.iter().fold(0, |f, p| {
+                        let newline = if p.newline() { LINE_FEED } else { 0 };
+                        f | newline | special_bytes(span(input, p.start(), p.len()))
+                    });
+                    Self(Repr::Pieces {
+                        start,
+                        count,
+                        special,
+                    })
                 } else {
                     let text = join(input, run);
                     pieces.truncate(at);
@@ -112,7 +132,7 @@ impl Text {
     pub fn to_str<'a, S: AsRef<Store> + ?Sized>(&'a self, store: &'a S) -> Cow<'a, str> {
         let store = store.as_ref();
         match &self.0 {
-            Repr::Input { start, len } => Cow::Borrowed(span(&store.input, *start, *len)),
+            Repr::Input { start, len, .. } => Cow::Borrowed(span(&store.input, *start, *len)),
             Repr::Owned(owned) => Cow::Borrowed(&owned.0),
             Repr::Pieces { .. } => Cow::Owned(join(&store.input, self.pieces(store))),
         }
@@ -126,7 +146,7 @@ impl Text {
     ) -> impl Iterator<Item = &'a str> + 'a {
         let store = store.as_ref();
         let (single, pieces): (Option<&str>, &[TextPiece]) = match &self.0 {
-            Repr::Input { start, len } => (Some(span(&store.input, *start, *len)), &[]),
+            Repr::Input { start, len, .. } => (Some(span(&store.input, *start, *len)), &[]),
             Repr::Owned(owned) => (Some(&owned.0), &[]),
             Repr::Pieces { .. } => (None, self.pieces(store)),
         };
@@ -157,7 +177,7 @@ impl Text {
 
     fn pieces<'a>(&self, store: &'a Store) -> &'a [TextPiece] {
         match &self.0 {
-            Repr::Pieces { start, count } => {
+            Repr::Pieces { start, count, .. } => {
                 let start = *start as usize;
                 store
                     .pieces
@@ -175,6 +195,16 @@ impl Text {
             Repr::Owned(owned) => Some(&owned.0),
             Repr::Input { len: 0, .. } => Some(""),
             _ => None,
+        }
+    }
+
+    /// The [`special_bytes`] of the characters: found once, when the text
+    /// is made.
+    #[inline]
+    pub(crate) fn special(&self) -> u8 {
+        match &self.0 {
+            Repr::Input { special, .. } | Repr::Pieces { special, .. } => *special,
+            Repr::Owned(owned) => owned.1,
         }
     }
 
@@ -239,8 +269,8 @@ impl super::relocate::Relocate for Text {
 impl fmt::Debug for Text {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.0 {
-            Repr::Input { start, len } => write!(f, "Text(input {start}+{len})"),
-            Repr::Pieces { start, count } => write!(f, "Text(pieces {start}+{count})"),
+            Repr::Input { start, len, .. } => write!(f, "Text(input {start}+{len})"),
+            Repr::Pieces { start, count, .. } => write!(f, "Text(pieces {start}+{count})"),
             Repr::Owned(owned) => write!(f, "Text({:?})", owned.0),
         }
     }
@@ -621,7 +651,11 @@ mod tests {
             TextPiece::new(16, 2, false),
             TextPiece::new(7, 4, true),
         ]);
-        let joined = Text(Repr::Pieces { start: 0, count: 3 });
+        let joined = Text(Repr::Pieces {
+            start: 0,
+            count: 3,
+            special: LINE_FEED,
+        });
         assert_eq!(joined.to_str(&store), "ab@cd\nINDI");
         assert_eq!(joined.len(&store), 10);
         assert!(joined.eq_str(&store, "ab@cd\nINDI"));
@@ -642,7 +676,14 @@ mod tests {
         pieces.push(TextPiece::new(1, 3, false));
         let t = Text::from_pieces(input, pieces, 0);
         assert!(pieces.is_empty());
-        assert_eq!(t, Text(Repr::Input { start: 1, len: 3 }));
+        assert_eq!(
+            t,
+            Text(Repr::Input {
+                start: 1,
+                len: 3,
+                special: 0
+            })
+        );
         assert_eq!(Text::from_pieces(input, pieces, 0), Text::default());
     }
 

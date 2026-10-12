@@ -377,7 +377,7 @@ impl<'a> WriteCx<'a> {
         if text.is_empty() {
             FlatPayload::None
         } else {
-            FlatPayload::Text(text.to_str(self.store))
+            FlatPayload::Text(text.to_str(self.store), text.special())
         }
     }
 
@@ -391,7 +391,7 @@ impl<'a> WriteCx<'a> {
         if s.is_empty() {
             FlatPayload::None
         } else {
-            FlatPayload::Text(Cow::Borrowed(s))
+            FlatPayload::Text(Cow::Borrowed(s), crate::tree::UNKNOWN)
         }
     }
 
