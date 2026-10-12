@@ -593,7 +593,13 @@ impl<'n> Conformer<'n> {
                 continue;
             };
             let ty = self.record_type_of(r.tag(), r.standard_tag());
-            if xref_error(x, self.rules).is_some() || !ids.take(x, r.id, ty) {
+            // Valid as the store found it, for an identifier of the store.
+            let valid = match r.id {
+                Some(id) => ids.store.is_valid_xref(id, self.rules),
+                None => xref_error(x, self.rules).is_none(),
+            };
+            debug_assert_eq!(valid, xref_error(x, self.rules).is_none(), "{x}");
+            if !valid || !ids.take(x, r.id, ty) {
                 renamed.push(i);
             }
         }
