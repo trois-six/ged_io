@@ -20,9 +20,11 @@
 //! pass.
 
 use std::borrow::Cow;
+use std::rc::Rc;
 
 use super::clean::Walk;
 use super::{bump, encoded_len, Aliases, Conformer, Family, StructId, Typing, DATASET};
+use crate::convert::Watch;
 use crate::spec::conform::Build;
 use crate::spec::validate::MAX_RECORD_BYTES;
 use crate::tree::Node;
@@ -53,6 +55,9 @@ pub(crate) enum Outcome<'r> {
     Clean(Box<Flat<'r>>),
     /// Repaired, with the notes moved out of it.
     Repaired(Structure, Vec<Structure>),
+    /// Not written: it needs converting first (see `watch` of
+    /// [`Streamed::record`]).
+    Convert,
 }
 
 impl Streamed {
@@ -120,13 +125,15 @@ impl Streamed {
     /// It is first written as lines, as `sink` writes them, with the
     /// identifier `xref` ([`Outcome::Lines`]); when that needs the
     /// structures, it is written into an arena. `fresh` makes the
-    /// identifier of a `NOTE` record a note moves to.
+    /// identifier of a `NOTE` record a note moves to. With `watch`, a
+    /// record that needs converting is left as it is ([`Outcome::Convert`]).
     pub(crate) fn record<'r>(
         &mut self,
         record: &dyn Build<'r>,
         xref: Option<Cow<'r, str>>,
         sink: &LineSink<'_>,
         fresh: &mut dyn FnMut() -> String,
+        watch: Option<&Rc<Watch>>,
     ) -> Outcome<'r> {
         let mut c = self.conformer();
         let typing = Typing::of(self.version);
@@ -138,8 +145,13 @@ impl Streamed {
             let mut flat = Flat::default();
             flat.set_typing(Some(typing));
             flat.set_stream(Some(Stream::with_buffers(c.rules, buffers, None)));
+            flat.set_stream_watch(watch.cloned());
             flat.begin_stream(xref);
             record.build(&mut flat);
+            if flat.stream_converts() {
+                self.buffers = flat.take_stream().map(Stream::into_buffers);
+                return Outcome::Convert;
+            }
             let mut walk = Walk::default();
             let clean = !flat.spoiled()
                 && c.is_clean_streamed(&flat, &mut walk)
@@ -152,6 +164,11 @@ impl Streamed {
         let mut flat = Flat::default();
         flat.set_typing(Some(typing));
         record.build(&mut flat);
+        if let (Some(w), Some(root)) = (watch, flat.root()) {
+            if w.needs(root) {
+                return Outcome::Convert;
+            }
+        }
         let mut walk = Walk::default();
         let clean = c.is_clean_written(&flat, &mut walk);
         if clean {

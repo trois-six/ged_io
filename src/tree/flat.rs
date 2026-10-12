@@ -19,6 +19,7 @@
 use std::borrow::Cow;
 
 use super::{Node, Payload, PayloadRef, Structure, Tag, Xref};
+use crate::convert::Watch;
 use crate::model::XrefId;
 use std::rc::Rc;
 
@@ -128,6 +129,8 @@ pub(crate) struct Flat<'s> {
 struct Open {
     /// Its type.
     ty: StructId,
+    /// Its tag.
+    tag: &'static str,
     /// Where the occurrences of the tags of its typed substructures start
     /// in [`Stream::counts`].
     counts: u32,
@@ -198,6 +201,12 @@ pub(crate) struct Stream<'s> {
     root: StructId,
     /// The structures written.
     written: usize,
+    /// What a conversion looks for, when the dataset is written in another
+    /// version family without one ([`crate::convert::Watch`]).
+    watch: Option<Rc<Watch>>,
+    /// Whether a structure written needs converting: the stream is
+    /// spoiled.
+    converts: bool,
 }
 
 impl<'s> Stream<'s> {
@@ -220,7 +229,12 @@ impl<'s> Stream<'s> {
     }
 
     /// Counts one more `tag` among the counts from `from` on.
-    #[inline]
+    ///
+    /// Always inlined: once the stream checks conversions too, the
+    /// compiler leaves it outlined, which costs one more call for each
+    /// structure written (measured: 3% of the instructions of a write).
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     fn bump(&mut self, from: u32, tag: u8) {
         match self
             .counts
@@ -277,6 +291,8 @@ impl<'s> Stream<'s> {
             pointers: Vec::new(),
             root: UNTYPED,
             written: 0,
+            watch: None,
+            converts: false,
         }
     }
 
@@ -370,7 +386,22 @@ impl<'s> Flat<'s> {
             st.pointers.clear();
             st.root = UNTYPED;
             st.written = 0;
+            st.converts = false;
         }
+    }
+
+    /// Looks out, as records are streamed, for structures that `watch`
+    /// says need converting ([`Flat::stream_converts`]).
+    pub(crate) fn set_stream_watch(&mut self, watch: Option<Rc<Watch>>) {
+        if let Some(st) = self.stream.as_deref_mut() {
+            st.watch = watch;
+        }
+    }
+
+    /// Whether a structure of the record streamed needs converting (the
+    /// stream is spoiled).
+    pub(crate) fn stream_converts(&self) -> bool {
+        self.stream.as_ref().is_some_and(|st| st.converts)
     }
 
     /// Whether the record streamed needs to be written as structures: a
@@ -741,6 +772,18 @@ impl<'s> Flat<'s> {
             FlatPayload::Text(t, special) => special_of(t, *special),
             FlatPayload::None | FlatPayload::Pointer(..) => 0,
         };
+        if let Some(w) = st.watch.as_deref() {
+            let (kind, len) = match &payload {
+                FlatPayload::None => (crate::convert::NONE, 0),
+                FlatPayload::Text(t, _) => (crate::convert::TEXT, t.len()),
+                FlatPayload::Pointer(..) => (crate::convert::POINTER, 0),
+            };
+            if w.may_apply(standard, kind, len, special) && watched(w, &st.open, tag, &payload) {
+                st.converts = true;
+                st.spoiled = true;
+                return;
+            }
+        }
         if !typing.v7() {
             self.size += size_bound(tag, standard, xref, &payload);
         }
@@ -761,6 +804,7 @@ impl<'s> Flat<'s> {
         }
         st.open.push(Open {
             ty,
+            tag,
             counts: u32::try_from(st.counts.len()).unwrap_or(u32::MAX),
             children: false,
             empty,
@@ -836,6 +880,15 @@ impl<'s> Flat<'s> {
             }
             FlatPayload::None | FlatPayload::Pointer(..) => 0,
         };
+        // Whether it needs converting is for the record's look.
+        if st
+            .watch
+            .as_deref()
+            .is_some_and(|w| w.may(tag, payload_ref(&payload), special))
+        {
+            st.spoiled = true;
+            return;
+        }
         self.size += size_bound(tag, standard, xref, &payload);
         st.line(depth, tag, standard.is_some(), &payload, special);
         if let FlatPayload::Pointer(p, id) = payload {
@@ -946,6 +999,46 @@ impl<'s> Flat<'s> {
         self.close(at);
     }
 
+    /// Writes `s` and its substructures, borrowed, as the typed model
+    /// writes its structures ([`Flat::open_typed`]): typed by their
+    /// standard tags where their types place them, their payloads checked
+    /// and the occurrences of each tag counted. In stream mode, a structure
+    /// converted outside the typed model is so written as lines.
+    pub(crate) fn push_typed(&mut self, s: &'s Structure) {
+        // Apart: the structures of the typed model are written inline.
+        #[inline(never)]
+        fn open<'s>(flat: &mut Flat<'s>, s: &'s Structure) -> usize {
+            let standard = s.tag.standard_index();
+            let xref = s.xref.as_ref().map(|x| Cow::Borrowed(x.as_str()));
+            let payload = match &s.payload {
+                Payload::None => FlatPayload::None,
+                Payload::Text(t) => FlatPayload::Text(Cow::Borrowed(&**t), UNKNOWN),
+                Payload::Pointer(p) => FlatPayload::Pointer(Cow::Borrowed(p.as_str()), None),
+            };
+            match standard.and_then(|i| super::STANDARD_TAGS.get(usize::from(i))) {
+                Some(&tag) => {
+                    // The occurrences of each tag counted, as for a field
+                    // that holds several.
+                    flat.repeat = true;
+                    flat.open_typed(tag, standard, xref, payload, None)
+                }
+                None => flat.open_standard(Cow::Borrowed(s.tag.as_str()), None, xref, payload),
+            }
+        }
+        // Depth first, without recursion.
+        let mut stack = vec![(open(self, s), s.substructures.iter())];
+        while let Some((at, children)) = stack.last_mut() {
+            if let Some(c) = children.next() {
+                let at = open(self, c);
+                stack.push((at, c.substructures.iter()));
+            } else {
+                let at = *at;
+                stack.pop();
+                self.close(at);
+            }
+        }
+    }
+
     /// The record being written (or the last one), with its
     /// substructures.
     pub(crate) fn root(&self) -> Option<FlatRef<'_>> {
@@ -985,6 +1078,17 @@ fn size_bound(
         FlatPayload::Pointer(p, _) | FlatPayload::Text(p, _) => p.len(),
     };
     8 + tag + xref.map_or(0, str::len) + 13 * payload
+}
+
+/// Whether `watch` says that a typed structure tagged `tag` with
+/// `payload`, under the structures `open`, needs converting
+/// ([`Watch::typed`]). Apart, so that stream mode stays small.
+#[inline(never)]
+fn watched(watch: &Watch, open: &[Open], tag: &str, payload: &FlatPayload<'_>) -> bool {
+    let n = open.len();
+    let tag_at = |i: Option<usize>| i.and_then(|i| open.get(i)).map_or("", |o| o.tag);
+    let (parent, grand) = (tag_at(n.checked_sub(1)), tag_at(n.checked_sub(2)));
+    watch.typed(tag, payload_ref(payload), parent, grand, n > 0)
 }
 
 /// A payload, borrowed.
@@ -1092,11 +1196,17 @@ impl<'a> Node<'a> for FlatRef<'a> {
     }
 
     fn to_owned_structure(self) -> Structure {
+        let tag = match self.standard_tag() {
+            Some(i) => Tag::standard(i),
+            None => Tag::new(self.tag()),
+        };
+        let mut substructures = Vec::with_capacity(self.children().count());
+        substructures.extend(self.children().map(Node::to_owned_structure));
         Structure {
-            tag: Tag::new(self.tag()),
+            tag,
             xref: self.xref().map(Xref::new),
             payload: self.payload().to_payload(),
-            substructures: self.children().map(Node::to_owned_structure).collect(),
+            substructures,
             line: 0,
         }
     }

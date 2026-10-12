@@ -55,6 +55,49 @@ fn documented(in_memory: &WriteReport, stream: &WriteReport, stream_text: &str) 
     renamed(in_memory) || renamed(stream) || pointer || relocated || large || stub
 }
 
+/// The records of a written file: the lines of each, from its level-0 line.
+fn records(text: &str) -> Vec<Vec<&str>> {
+    let mut out: Vec<Vec<&str>> = Vec::new();
+    for line in text.lines() {
+        match out.last_mut() {
+            Some(r) if !line.starts_with("0 ") => r.push(line),
+            _ => out.push(vec![line]),
+        }
+    }
+    out
+}
+
+/// [`records`], sorted.
+fn sorted_records(text: &str) -> Vec<Vec<&str>> {
+    let mut r = records(text);
+    r.sort();
+    r
+}
+
+/// Whether `stream`, written converted to the other version family, is
+/// `in_memory` but for what the streaming writer documents of a
+/// conversion: the records a conversion adds come right after their
+/// source record, and the header declares every extension tag of known
+/// meaning (`HEAD.SCHMA`).
+fn converted_alike(in_memory: &str, stream: &str) -> bool {
+    let (mut a, mut b) = (records(in_memory), records(stream));
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    let (head_a, head_b) = (a.remove(0), b.remove(0));
+    // The header's lines, in order, with declarations added.
+    let mut rest = head_b.iter();
+    let kept = head_a.iter().all(|l| {
+        rest.by_ref()
+            .find(|m| *m == l || !(m.starts_with("1 SCHMA") || m.starts_with("2 TAG ")))
+            .is_some_and(|m| m == l)
+    });
+    let added = rest.all(|m| m.starts_with("1 SCHMA") || m.starts_with("2 TAG "));
+    a.sort();
+    b.sort();
+    kept && added && a == b
+}
+
 #[test]
 fn streaming_writes_as_the_in_memory_writer() {
     let mut files = Vec::new();
@@ -63,7 +106,7 @@ fn streaming_writes_as_the_in_memory_writer() {
         &mut files,
     );
     files.sort();
-    let (mut same, mut different) = (0, 0);
+    let (mut same, mut converted, mut different) = (0, 0, 0);
     for path in files {
         let name = path.display();
         let data = Dataset::from_bytes(std::fs::read(&path).unwrap());
@@ -97,6 +140,10 @@ fn streaming_writes_as_the_in_memory_writer() {
                     "{name} as {version}"
                 );
                 same += 1;
+            } else if data.version().is_v7() != version.is_v7()
+                && converted_alike(&in_memory, &stream)
+            {
+                converted += 1;
             } else {
                 assert!(
                     documented(&report, &stream_report, &stream),
@@ -122,7 +169,11 @@ fn streaming_writes_as_the_in_memory_writer() {
             assert!(left.is_empty(), "{name} as {version}: {left:?}\n{stream}");
         }
     }
-    assert!(same > 150 && different < 25, "{same} {different}");
+    eprintln!("{same} the same, {converted} converted alike, {different} documented");
+    assert!(
+        same + converted > 150 && different < 25,
+        "{same} {converted} {different}"
+    );
 }
 
 /// Under the strict policy, the first repair is an error, as soon as the
@@ -192,7 +243,13 @@ fn streaming_is_idempotent() {
             };
             let (once, _) = streamed(&data, config.clone());
             let (twice, _) = streamed(&Dataset::parse(once.as_str()), config);
-            assert!(once == twice, "{name} as {version}:\n{once}\n---\n{twice}");
+            // Converted, a record a conversion adds comes right after its
+            // source, which a dataset read back puts with its type.
+            let converted = data.version().is_v7() != version.is_v7();
+            assert!(
+                once == twice || (converted && sorted_records(&once) == sorted_records(&twice)),
+                "{name} as {version}:\n{once}\n---\n{twice}"
+            );
         }
     }
 }
@@ -211,4 +268,80 @@ fn a_repaired_header_still_has_a_submitter() {
     assert!(once.contains("\n0 @U1@ SUBM\n1 NAME Unknown\n"), "{once}");
     let (twice, _) = streamed(&Dataset::parse(once.as_str()), config);
     assert_eq!(once, twice);
+}
+
+/// Written in the other version family, records are converted as the
+/// in-memory writer converts them: a record a conversion adds comes right
+/// after its source, and the header declares every extension tag of known
+/// meaning.
+#[test]
+fn streaming_converts_to_the_other_family() {
+    let data = Dataset::parse(
+        "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n2 FORM LINEAGE-LINKED\n1 CHAR UTF-8\n1 SUBM @U1@\n\
+         0 @U1@ SUBM\n1 NAME Ann\n\
+         0 @I1@ INDI\n1 NAME Ann /Example/\n1 _UID 0123456789ABCDEF\n1 SOUR A parish register\n\
+         1 OBJE\n2 FILE photo.jpg\n3 FORM jpg\n\
+         0 @I2@ INDI\n1 NAME Bob /Example/\n1 ASSO @I1@\n2 RELA Godfather\n0 TRLR\n",
+    );
+    let config = WriterConfig {
+        version: Some(GedcomVersion::V7_0),
+        bom: Bom::Never,
+        ..WriterConfig::default()
+    };
+    let (stream, _) = streamed(&data, config.clone());
+    let in_memory = GedcomWriter::with_config(config)
+        .write_to_string(&data)
+        .unwrap();
+    assert!(
+        converted_alike(&in_memory, &stream),
+        "{in_memory}\n---\n{stream}"
+    );
+    assert!(stream.contains("1 UID 0123456789ABCDEF\n"), "{stream}");
+    assert!(
+        stream.contains("2 ROLE GODP\n3 PHRASE Godfather\n"),
+        "{stream}"
+    );
+    assert!(
+        stream.contains("2 TAG _LOC http://genealogy.net/GEDCOM#_LOC\n"),
+        "{stream}"
+    );
+    // The records taken out of @I1@ come right after it.
+    let at = |s: &str| stream.find(s).unwrap();
+    assert!(
+        at("0 @I1@ INDI") < at(" SOUR\n1 NOTE A parish register"),
+        "{stream}"
+    );
+    assert!(at(" OBJE\n1 FILE") < at("0 @I2@ INDI"), "{stream}");
+    assert!(validate_text(&stream).iter().all(|d| matches!(
+        d.kind,
+        DeviationKind::PointerTarget | DeviationKind::DanglingPointer
+    )));
+}
+
+/// A 5.5.1 submission kept as an extension record (`keep_obsolete`) is
+/// written last, as in memory.
+#[test]
+fn a_record_a_conversion_makes_an_extension_record_is_written_last() {
+    let data = Dataset::parse(
+        "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n1 SUBM @U1@\n1 SUBN @SN1@\n0 @U1@ SUBM\n1 NAME Ann\n\
+         0 @SN1@ SUBN\n1 FAMF Family file\n0 @I1@ INDI\n1 NAME Ann /Example/\n0 TRLR\n",
+    );
+    let config = WriterConfig {
+        version: Some(GedcomVersion::V7_0),
+        bom: Bom::Never,
+        conversion: ged_io::convert::ConversionOptions::default().keep_obsolete(true),
+        ..WriterConfig::default()
+    };
+    let (stream, _) = streamed(&data, config.clone());
+    let in_memory = GedcomWriter::with_config(config)
+        .write_to_string(&data)
+        .unwrap();
+    assert!(
+        stream.ends_with("0 @SN1@ _SUBMISSION\n1 FAMF Family file\n0 TRLR\n"),
+        "{stream}"
+    );
+    assert!(
+        converted_alike(&in_memory, &stream),
+        "{in_memory}\n---\n{stream}"
+    );
 }

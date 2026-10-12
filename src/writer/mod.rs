@@ -69,8 +69,8 @@ use emit::{emit, emit_known, emit_tagged};
 use xref::XrefMap;
 
 pub(crate) use emit::{
-    emit_typed, extension_tag, is_valid_pointer, new_xref, special_bytes, LineSink, CONTROL,
-    LINE_FEED, MAYBE_BANNED, TAB,
+    emit_typed, extension_tag, is_valid_pointer, new_xref, special_bytes, LineSink, AT_SIGN,
+    CONTROL, LINE_FEED, MAYBE_BANNED, TAB,
 };
 pub(crate) use head::{complete as complete_head, needs_submitter, stub_submitter, PLACEHOLDER};
 pub use stream::GedcomStreamWriter;
@@ -500,25 +500,70 @@ impl GedcomWriter {
     /// [`RepairPolicy::Error`].
     pub fn write<W: io::Write>(
         &self,
-        writer: W,
+        mut writer: W,
         data: &Dataset,
     ) -> Result<WriteReport, WriteError> {
         let built = data.built(self);
         let store = Some(data.store());
-        match self.plan_for(data, &built) {
-            Some(plan) => self.write_built(
-                writer,
-                &plan.entries(&built),
-                crate::model::field_order,
-                store,
-            ),
-            None => self.write_built(writer, &built, crate::model::field_order, store),
+        let order = crate::model::field_order;
+        if let Some(plan) = self.plan_for(data, &built, false) {
+            if let Some((sink, report)) = self.unconverted(data, &plan, &built, None)? {
+                writer.write_all(&sink.into_bytes())?;
+                writer.flush()?;
+                return Ok(report);
+            }
+            if let Some(plan) = self.plan_for(data, &built, true) {
+                return self.write_built(writer, &plan.entries(&built), order, store);
+            }
         }
+        self.write_built(writer, &built, order, store)
+    }
+
+    /// `data` written in a version of the other family with its header
+    /// converted and its records as they are, as long as none needs
+    /// converting ([`Plan::of_dataset`] without a scan, `plan`): a held
+    /// sink and the report; `None` when a record needs converting, or the
+    /// direct write gives up. `text`: written as text, of about that size.
+    ///
+    /// A dataset that needs nothing more converted (nearly every dataset
+    /// written in its own version family but for the header, and many
+    /// across) is so written without a pass of its own: each record is
+    /// looked at as it is written ([`crate::convert::Watch`]).
+    fn unconverted<'d>(
+        &self,
+        data: &'d Dataset,
+        plan: &Plan,
+        built: &'d [crate::model::write::Built<'d>],
+        text: Option<usize>,
+    ) -> Result<Option<(LineSink<'static>, WriteReport)>, WriteError> {
+        let watch = std::rc::Rc::new(plan.watch());
+        let order = crate::model::field_order;
+        let head = plan.head().map(|(i, h)| (i, h.clone()));
+        let unconverted = Unconverted { watch, head };
+        let out = self.direct_built(built, order, data.store(), text, Some(unconverted))?;
+        #[cfg(debug_assertions)]
+        if out.is_some() {
+            debug_assert!(
+                self.plan_for(data, built, true)
+                    .is_none_or(|p| p.converts_no_record()),
+                "a record that needs converting was written as it is: {:?}",
+                self.plan_for(data, built, true)
+                    .map(|p| p.debug_converted(built))
+            );
+        }
+        Ok(out)
     }
 
     /// The conversion of `data`, whose records are `built`, to the target
     /// version, when it is of the other version family.
-    fn plan_for<'d, B: Build<'d>>(&self, data: &'d Dataset, built: &[B]) -> Option<Plan> {
+    /// Without `scan`, the plan converts the header only
+    /// ([`Plan::of_dataset`]).
+    fn plan_for<'d, B: Build<'d>>(
+        &self,
+        data: &'d Dataset,
+        built: &[B],
+        scan: bool,
+    ) -> Option<Plan> {
         let to = self.config.version?;
         Plan::of_dataset(
             data,
@@ -526,6 +571,7 @@ impl GedcomWriter {
             to,
             self.config.conversion,
             Some(crate::model::field_order(to)),
+            scan,
         )
     }
 
@@ -554,15 +600,16 @@ impl GedcomWriter {
         let built = data.built(self);
         let size = data.store().input_len();
         let store = Some(data.store());
-        match self.plan_for(data, &built) {
-            Some(plan) => self.write_built_to_string(
-                &plan.entries(&built),
-                crate::model::field_order,
-                size,
-                store,
-            ),
-            None => self.write_built_to_string(&built, crate::model::field_order, size, store),
+        let order = crate::model::field_order;
+        if let Some(plan) = self.plan_for(data, &built, false) {
+            if let Some((sink, report)) = self.unconverted(data, &plan, &built, Some(size))? {
+                return Ok((sink.into_string(), report));
+            }
+            if let Some(plan) = self.plan_for(data, &built, true) {
+                return self.write_built_to_string(&plan.entries(&built), order, size, store);
+            }
         }
+        self.write_built_to_string(&built, order, size, store)
     }
 
     /// Writes a lossless [`Tree`] to `writer` in the target version (the
@@ -680,28 +727,72 @@ impl GedcomWriter {
         order: fn(GedcomVersion) -> &'static FieldOrder,
         store: Option<&'n Store>,
     ) -> Result<WriteReport, WriteError> {
-        let mut records: Vec<Rec<'n, &'n Structure>> =
-            built.iter().map(|r| Rec::built(r)).collect();
-        let rules = self.rules_for_built(&records);
         if let Some(store) = store {
-            let encoding = self.encoding(rules);
-            let mut sink = self.sink(None, rules, encoding, RepairPolicy::Repair);
-            sink.reserve(store.input_len().saturating_add(store.input_len() / 16));
-            if self.wants_bom(rules, encoding, false) {
-                sink.bom();
-            }
-            if let Some(conformed) =
-                write_direct(rules, &mut sink, &mut records, order(rules.version), store)?
-            {
-                let lines = std::mem::take(&mut sink.repairs);
-                let report = self.direct_report(conformed, lines)?;
+            if let Some((sink, report)) = self.direct_built(built, order, store, None, None)? {
                 writer.write_all(&sink.into_bytes())?;
                 writer.flush()?;
                 return Ok(report);
             }
-            records = built.iter().map(|r| Rec::built(r)).collect();
         }
+        let records: Vec<Rec<'n, &'n Structure>> = built.iter().map(|r| Rec::built(r)).collect();
+        let rules = self.rules_for_built(&records);
         self.write_conformed(&mut writer, rules, records, Some(order(rules.version)))
+    }
+
+    /// The records that write themselves (`built`, of the dataset whose
+    /// store is `store`) written one at a time ([`write_direct`]) into a
+    /// sink held whole: the sink and the report; `None` when the dataset
+    /// needs the whole pass, or (with `watch`) converting. `text`: as text
+    /// (UTF-8) of about that size, else in the configured encoding. With
+    /// `watch`, the records are those of a dataset written in a version of
+    /// the other family: the header converted replaces theirs, if given,
+    /// and no other record may need converting
+    /// ([`GedcomWriter::unconverted`]).
+    fn direct_built<'n>(
+        &self,
+        built: &'n [impl Build<'n>],
+        order: fn(GedcomVersion) -> &'static FieldOrder,
+        store: &'n Store,
+        text: Option<usize>,
+        watch: Option<Unconverted>,
+    ) -> Result<Option<(LineSink<'static>, WriteReport)>, WriteError> {
+        let mut records: Vec<Rec<'n, &'n Structure>> =
+            built.iter().map(|r| Rec::built(r)).collect();
+        // The header converted.
+        let watch = watch.map(|Unconverted { watch, head }| {
+            if let Some((at, head)) = head {
+                if let Some(r) = records.get_mut(at) {
+                    *r = Rec::owned(head);
+                }
+            }
+            watch
+        });
+        let rules = self.rules_for_built(&records);
+        let (encoding, room) = match text {
+            // A little more than the input: the header is completed, `@`
+            // doubled.
+            Some(size) => (
+                OutputEncoding::Utf8,
+                size.saturating_add(size / 16).saturating_add(256),
+            ),
+            None => (
+                self.encoding(rules),
+                store.input_len().saturating_add(store.input_len() / 16),
+            ),
+        };
+        let mut sink = self.sink(None, rules, encoding, RepairPolicy::Repair);
+        sink.reserve(room);
+        if self.wants_bom(rules, encoding, text.is_some()) {
+            sink.bom();
+        }
+        let order = order(rules.version);
+        let Some(conformed) = write_direct(rules, &mut sink, &mut records, order, store, watch)?
+        else {
+            return Ok(None);
+        };
+        let lines = std::mem::take(&mut sink.repairs);
+        let report = self.direct_report(conformed, lines)?;
+        Ok(Some((sink, report)))
     }
 
     /// The report of a direct write ([`Self::write_direct`]): the repairs
@@ -734,28 +825,20 @@ impl GedcomWriter {
         size: usize,
         store: Option<&'n Store>,
     ) -> Result<(String, WriteReport), WriteError> {
+        if let Some(store) = store {
+            if let Some((sink, report)) =
+                self.direct_built(built, order, store, Some(size), None)?
+            {
+                return Ok((sink.into_string(), report));
+            }
+            #[cfg(test)]
+            RESTARTS.with(|r| r.set(r.get() + 1));
+        }
         let mut records: Vec<Rec<'n, &'n Structure>> =
             built.iter().map(|r| Rec::built(r)).collect();
         let rules = self.rules_for_built(&records);
         // A little more than the input: the header is completed, `@` doubled.
         let room = size.saturating_add(size / 16).saturating_add(256);
-        if let Some(store) = store {
-            let mut sink = self.sink(None, rules, OutputEncoding::Utf8, RepairPolicy::Repair);
-            sink.reserve(room);
-            if self.wants_bom(rules, OutputEncoding::Utf8, true) {
-                sink.bom();
-            }
-            if let Some(conformed) =
-                write_direct(rules, &mut sink, &mut records, order(rules.version), store)?
-            {
-                let lines = std::mem::take(&mut sink.repairs);
-                let report = self.direct_report(conformed, lines)?;
-                return Ok((sink.into_string(), report));
-            }
-            #[cfg(test)]
-            RESTARTS.with(|r| r.set(r.get() + 1));
-            records = built.iter().map(|r| Rec::built(r)).collect();
-        }
         let mut conformed =
             conform_records(&mut records, rules.version, Some(order(rules.version)));
         let mut repairs = std::mem::take(&mut conformed.repairs);
@@ -794,7 +877,12 @@ impl GedcomWriter {
         &self,
         data: &Dataset,
     ) -> Result<(String, WriteReport), WriteError> {
-        self.write_built_to_string(&data.built(self), crate::model::field_order, 0, None)
+        let built = data.built(self);
+        let order = crate::model::field_order;
+        match self.plan_for(data, &built, true) {
+            Some(plan) => self.write_built_to_string(&plan.entries(&built), order, 0, None),
+            None => self.write_built_to_string(&built, order, 0, None),
+        }
     }
 
     /// [`rules_for_records`](Self::rules_for_records) of records that write
@@ -883,6 +971,14 @@ impl Pointers for XrefMap<'_> {
     fn pointer<'p>(&mut self, pointer: &'p str) -> Cow<'p, str> {
         XrefMap::pointer(self, pointer)
     }
+}
+
+/// A dataset written in a version of the other family as it is
+/// ([`GedcomWriter::unconverted`]): what its records are looked at for,
+/// and its header converted with its index, when the conversion changes it.
+struct Unconverted {
+    watch: std::rc::Rc<crate::convert::Watch>,
+    head: Option<(usize, Structure)>,
 }
 
 /// Whether a record is the trailer the writer replaces by its own: an
@@ -1002,6 +1098,7 @@ fn write_direct<'n>(
     records: &mut Vec<Rec<'n, &'n Structure>>,
     order: &'static FieldOrder,
     store: &'n Store,
+    watch: Option<std::rc::Rc<crate::convert::Watch>>,
 ) -> Result<Option<Vec<Repair>>, WriteError> {
     let utf8 = sink.encoding() == OutputEncoding::Utf8;
     let stream = utf8.then_some(&*sink);
@@ -1009,6 +1106,9 @@ fn write_direct<'n>(
     else {
         return Ok(None);
     };
+    if let Some(watch) = watch {
+        direct.watch(watch);
+    }
     let last = records.len().saturating_sub(1);
     // Identifiers for the standard records without one, avoiding those of
     // the others.
@@ -1071,7 +1171,7 @@ fn write_direct<'n>(
         }
         let xref = xrefs.record(i - 1, record.xref());
         let xref = xref.as_deref();
-        match (place, record.as_owned()) {
+        match (place, record.as_structure()) {
             (Place::Arena, _) => {
                 if let Some(root) = direct.root() {
                     put_flat(&mut out, &mut xrefs, xref, root)?;

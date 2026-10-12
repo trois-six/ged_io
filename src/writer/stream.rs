@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io;
+use std::rc::Rc;
 
 use super::emit::{candidate_xref, is_valid_pointer, new_xref, LineSink};
 use super::head;
@@ -11,13 +12,15 @@ use super::{
     map_pointers, put_flat, put_record, put_structure, record_prefix, Emitter, GedcomWriter,
     Pointers, Repair, RepairKind, RepairPolicy, WriteError, WriteReport, WriterConfig,
 };
+use crate::convert::{built_structure, Converter, Entry, Fate, Fresh, Out, Watch};
 use crate::model::driver::WriteCx;
 use crate::model::write::Built;
 use crate::model::Header;
 use crate::model::{RecordRef, Store};
 use crate::spec::conform::streamed::{Outcome, Streamed};
+use crate::spec::conform::{model_order, FieldOrder};
 use crate::tree::{PayloadRef, Structure, Tag, Xref};
-use crate::version::{VersionRules, XrefGrammar};
+use crate::version::{GedcomVersion, VersionRules, XrefGrammar};
 
 /// The identifier of the stub submitter a 5.5.1 header without one points
 /// to.
@@ -65,11 +68,24 @@ const STUB: &str = "@U1@";
 ///   `HEAD.SCHMA`.
 /// - **Large records.** The notes moved out of a 5.5.1 record over 32K
 ///   go to `NOTE` records written right after it.
+/// - **Conversion.** Records of the other version family (5.5.1 written
+///   as 7.x, or back) are converted as [`GedcomWriter`] converts them
+///   ([`crate::convert`]), each found to need it as it is written. The
+///   header, written first, cannot know which extension tags of known
+///   meaning the records will use: converted to 7.x, it declares them all
+///   in `HEAD.SCHMA` (at most nine `TAG` lines). The records a conversion
+///   takes out of another (multimedia records of inline `OBJE`, source
+///   records of `SOUR` citations in words) are written right after it,
+///   with identifiers not written yet ([`GedcomWriter`] writes them after
+///   the records of their type). A 5.5.1 record named `@VOID@` takes
+///   another identifier, as do the pointers to it written after it; those
+///   written before it stay `@VOID@`, which in 7.x names nothing.
 ///
-/// A record that a repair makes an extension record is kept until the
-/// end and written before the trailer, where [`GedcomWriter`] writes it
-/// too: such records (rare: a record type the version does not have, a
-/// record that cannot be repaired otherwise) are the only ones held.
+/// A record that a repair or a conversion makes an extension record is
+/// kept until the end and written before the trailer, where
+/// [`GedcomWriter`] writes it too: such records (rare: a record type the
+/// version does not have, a record that cannot be repaired otherwise, a
+/// 5.5.1 submission kept in 7.x) are the only ones held.
 ///
 /// Under [`RepairPolicy::Error`], the first repair is an error as soon as
 /// it is found; what was written before stays written.
@@ -114,6 +130,22 @@ pub struct GedcomStreamWriter<W: io::Write> {
     /// they are written with: written last, as [`GedcomWriter`] writes
     /// them.
     held: Vec<(Structure, Option<String>)>,
+    /// The conversion of records of the other version family.
+    convert: Option<StreamConversion>,
+    /// The records the conversion made extension records, with their
+    /// identifiers: repaired and written last, as [`GedcomWriter`] writes
+    /// them.
+    held_converted: Vec<(Structure, Option<String>)>,
+}
+
+/// The conversion of the records a [`GedcomStreamWriter`] writes, when they
+/// are of the other version family than the output ([`crate::convert`]).
+struct StreamConversion {
+    conv: Converter,
+    /// What it looks for in the records written as they are.
+    watch: Rc<Watch>,
+    order: &'static FieldOrder,
+    target: GedcomVersion,
 }
 
 impl<W: io::Write> std::fmt::Debug for GedcomStreamWriter<W> {
@@ -157,6 +189,28 @@ impl<W: io::Write> GedcomStreamWriter<W> {
             convert: true,
         };
         let mut head = RecordRef::Header(header).to_structure(&cx);
+        let from = header
+            .declared_version(store)
+            .map_or_else(GedcomVersion::default, |v| {
+                GedcomVersion::from_version_str(&v)
+            });
+        let convert =
+            Converter::new(from, rules.version, gw.config().conversion, false).map(|mut conv| {
+                conv.read_head(&head);
+                // The records to come may use any extension tag of known
+                // meaning: the header declares them all.
+                let known = conv.declarable();
+                let order = crate::model::field_order(rules.version);
+                if conv.head(&mut head, &known) {
+                    model_order(&mut head, rules.version, order);
+                }
+                StreamConversion {
+                    watch: Rc::new(Watch::new(conv.clone())),
+                    conv,
+                    order,
+                    target: rules.version,
+                }
+            });
         let mut stubbed = false;
         let conform = Streamed::header(rules.version, &mut head, STUB, &mut stubbed);
         let mut this = Self {
@@ -167,6 +221,8 @@ impl<W: io::Write> GedcomStreamWriter<W> {
             conform,
             xrefs: StreamXrefs::new(rules),
             held: Vec::new(),
+            convert,
+            held_converted: Vec::new(),
         };
         this.repairs_since(0)?;
         let stub = stubbed.then(|| {
@@ -238,45 +294,129 @@ impl<W: io::Write> GedcomStreamWriter<W> {
                 let own = record.xref().map(|id| cx.store.xref(id));
                 let tag = record.tag(cx.store, self.rules.version);
                 let xref = self.record_xref(own, tag)?;
+                let mut converts = false;
+                if let Some(c) = &mut self.convert {
+                    if let (true, Some(x)) = (c.conv.names_void(own), &xref) {
+                        // Pointers to it from here on take its name.
+                        c.conv.rename_void(x.as_str().into());
+                        c.watch = Rc::new(Watch::new(c.conv.clone()));
+                    }
+                    converts = c.watch.record(tag, own);
+                }
                 let built = Built::new(record, cx);
-                let xrefs = &mut self.xrefs;
-                let outcome = self.conform.record(
-                    &built,
-                    xref.as_deref().map(|x| Cow::Owned(x.to_string())),
-                    &self.sink,
-                    &mut || xrefs.unique("@N1@"),
-                );
-                self.repairs_since(mark)?;
-                match outcome {
-                    Outcome::Lines => {
-                        if let Some(lines) = self.conform.lines() {
-                            self.sink.append(lines)?;
-                        }
-                    }
-                    Outcome::Clean(flat) => {
-                        if let Some(root) = flat.root() {
-                            let mut out = Emitter {
-                                rules: self.rules,
-                                sink: &mut self.sink,
-                            };
-                            put_flat(&mut out, &mut self.xrefs, xref.as_deref(), root)?;
-                        }
-                    }
-                    Outcome::Repaired(s, notes) => {
-                        if s.tag.as_str().starts_with('_') && !tag.starts_with('_') {
-                            self.held.push((s, xref));
-                            return self.sink.drain_to(&mut self.writer, false);
-                        }
-                        self.put_with(&s, xref.as_deref())?;
-                        for note in &notes {
-                            let xref = note.xref.as_ref().map(Xref::as_str);
-                            self.put_with(note, xref)?;
-                        }
+                if !converts {
+                    let xrefs = &mut self.xrefs;
+                    let outcome = self.conform.record(
+                        &built,
+                        xref.as_deref().map(|x| Cow::Owned(x.to_string())),
+                        &self.sink,
+                        &mut || xrefs.unique("@N1@"),
+                        self.convert.as_ref().map(|c| &c.watch),
+                    );
+                    self.repairs_since(mark)?;
+                    if !matches!(outcome, Outcome::Convert) {
+                        self.put_outcome(outcome, xref, tag)?;
+                        return self.sink.drain_to(&mut self.writer, false);
                     }
                 }
+                self.convert_record(&built, xref, tag)?;
             }
         }
         self.sink.drain_to(&mut self.writer, false)
+    }
+
+    /// Converts `built`, a record tagged `tag` written with the identifier
+    /// `xref`, and writes it, then the records the conversion takes out of
+    /// it (multimedia and source records), right after it.
+    fn convert_record(
+        &mut self,
+        built: &Built<'_>,
+        xref: Option<String>,
+        tag: &str,
+    ) -> Result<(), WriteError> {
+        let Some(c) = &self.convert else {
+            return Ok(());
+        };
+        let mut s = built_structure(built);
+        let mut out = Out::default();
+        let mut fresh = StreamFresh(&mut self.xrefs);
+        if c.conv.record(&mut s, &mut fresh, &mut out) == Fate::Remove {
+            return Ok(());
+        }
+        model_order(&mut s, c.target, c.order);
+        let mut added = std::mem::take(&mut out.records);
+        for r in &mut added {
+            model_order(r, c.target, c.order);
+        }
+        if !tag.starts_with('_') && s.tag.as_str().starts_with('_') {
+            // An extension record now, written last.
+            self.held_converted.push((s, xref));
+        } else {
+            self.put_converted(&s, xref)?;
+        }
+        for r in &added {
+            let xref = r.xref.as_ref().map(|x| x.as_str().to_string());
+            self.put_converted(r, xref)?;
+        }
+        Ok(())
+    }
+
+    /// Writes `s`, a record converted, with the identifier `xref`,
+    /// repaired as any record.
+    fn put_converted(&mut self, s: &Structure, xref: Option<String>) -> Result<(), WriteError> {
+        let mark = self.conform.repairs.len();
+        let xrefs = &mut self.xrefs;
+        let entry = Entry::<Built<'_>>::Owned(s);
+        let outcome = self.conform.record(
+            &entry,
+            xref.as_deref().map(|x| Cow::Owned(x.to_string())),
+            &self.sink,
+            &mut || xrefs.unique("@N1@"),
+            None,
+        );
+        self.repairs_since(mark)?;
+        self.put_outcome(outcome, xref, s.tag.as_str())
+    }
+
+    /// Writes a record tagged `tag` as [`Streamed::record`] left it, with
+    /// the identifier `xref`; one a repair made an extension record is
+    /// held until the end.
+    fn put_outcome(
+        &mut self,
+        outcome: Outcome<'_>,
+        xref: Option<String>,
+        tag: &str,
+    ) -> Result<(), WriteError> {
+        match outcome {
+            Outcome::Lines => {
+                if let Some(lines) = self.conform.lines() {
+                    self.sink.append(lines)?;
+                }
+            }
+            Outcome::Clean(flat) => {
+                if let Some(root) = flat.root() {
+                    let mut out = Emitter {
+                        rules: self.rules,
+                        sink: &mut self.sink,
+                    };
+                    put_flat(&mut out, &mut self.xrefs, xref.as_deref(), root)?;
+                }
+            }
+            Outcome::Repaired(s, notes) => {
+                if s.tag.as_str().starts_with('_') && !tag.starts_with('_') {
+                    self.held.push((s, xref));
+                    return Ok(());
+                }
+                self.put_with(&s, xref.as_deref())?;
+                for note in &notes {
+                    let xref = note.xref.as_ref().map(Xref::as_str);
+                    self.put_with(note, xref)?;
+                }
+            }
+            // Only with a look for conversions, which is acted on first.
+            Outcome::Convert => {}
+        }
+        Ok(())
     }
 
     /// Writes the trailer, hands every byte to the writer and flushes it.
@@ -287,6 +427,9 @@ impl<W: io::Write> GedcomStreamWriter<W> {
     ///
     /// [`WriteError::Io`] when the writer fails.
     pub fn finish(mut self) -> Result<(W, WriteReport), WriteError> {
+        for (s, xref) in std::mem::take(&mut self.held_converted) {
+            self.put_converted(&s, xref)?;
+        }
         for (s, xref) in std::mem::take(&mut self.held) {
             self.put_with(&s, xref.as_deref())?;
         }
@@ -350,7 +493,7 @@ pub(crate) struct StreamXrefs {
     /// The identifier each invalid identifier was first written as.
     renamed: HashMap<Box<str>, Box<str>>,
     /// The last number given to records without an identifier, by prefix.
-    counters: HashMap<&'static str, usize>,
+    counters: HashMap<Box<str>, usize>,
 }
 
 impl StreamXrefs {
@@ -382,8 +525,8 @@ impl StreamXrefs {
     }
 
     /// The first `@<prefix>n@` not written: taken.
-    pub(crate) fn fresh(&mut self, prefix: &'static str) -> String {
-        let n = self.counters.entry(prefix).or_insert(0);
+    pub(crate) fn fresh(&mut self, prefix: &str) -> String {
+        let n = self.counters.entry(prefix.into()).or_insert(0);
         let mut next = *n;
         let new = loop {
             next += 1;
@@ -423,6 +566,16 @@ impl StreamXrefs {
             format!("identifier {x} written as {new}"),
         );
         (Some(new), Some(repair))
+    }
+}
+
+/// The identifiers of the records a conversion adds, the first not
+/// written ([`StreamXrefs::fresh`]).
+struct StreamFresh<'x>(&'x mut StreamXrefs);
+
+impl Fresh for StreamFresh<'_> {
+    fn fresh(&mut self, prefix: &str) -> Box<str> {
+        self.0.fresh(prefix).into()
     }
 }
 

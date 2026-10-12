@@ -266,3 +266,82 @@ fn a_date_phrase_keeps_its_escapes() {
         has(&out, "1 NOTE seen JULIAN x\n");
     }
 }
+
+/// The filter of [`Watch`] lets through every structure a rule applies to:
+/// [`Converter::triggers_at`] is false where neither
+/// [`Converter::may_apply`] (by tag and payload) nor
+/// [`Converter::may_apply_to`] (by payload) say a rule may apply.
+#[test]
+fn the_watch_misses_no_structure_a_rule_applies_to() {
+    use crate::tree::PayloadRef;
+    let extensions = [
+        "_UID",
+        "_EMAIL",
+        "_ASSO",
+        "_FSFTID",
+        "_FID",
+        "_SDATE",
+        "_LANG",
+        "_LOC",
+        "_GOV",
+        "_X",
+        "_SUBN",
+        "_FILE",
+        "_SUBMISSION",
+        "_PHRASE",
+    ];
+    let tags: Vec<&str> = STANDARD_TAGS.iter().copied().chain(extensions).collect();
+    let payloads = [
+        PayloadRef::None,
+        PayloadRef::Text("x"),
+        PayloadRef::Text("OTHER"),
+        PayloadRef::Text("Y"),
+        PayloadRef::Text("a @#DJULIAN@ b"),
+        PayloadRef::Text("STILLBORN"),
+        PayloadRef::Text("0y"),
+        PayloadRef::Text("English"),
+        PayloadRef::Text("en"),
+        PayloadRef::Text("(witness)"),
+        PayloadRef::Text("C:\\photos\\a b.jpg"),
+        PayloadRef::Text("jpg"),
+        PayloadRef::Text("file:///a.jpg"),
+        PayloadRef::Text("image/jpeg"),
+        PayloadRef::Text("kana"),
+        PayloadRef::Pointer("@VOID@"),
+        PayloadRef::Pointer("@I1@"),
+    ];
+    let parents = [
+        "", "INDI", "FAM", "NAME", "PLAC", "FORM", "FILE", "OBJE", "EVEN", "DATE",
+    ];
+    for (from, to) in [(V551, V70), (V70, V551)] {
+        for keep in [false, true] {
+            let options = ConversionOptions::default().keep_obsolete(keep);
+            let mut conv = Converter::new(from, to, options, false).unwrap();
+            for void in [false, true] {
+                if void && from == V551 {
+                    conv.rename_void("@VOID_1@".into());
+                }
+                for tag in &tags {
+                    for payload in payloads {
+                        let special = match payload {
+                            PayloadRef::Text(t) => crate::writer::special_bytes(t),
+                            _ => 0,
+                        };
+                        let may = conv.may_apply(tag) & payload_bit(payload) != 0
+                            || conv.may_apply_to(payload, special);
+                        for parent in parents {
+                            for grand in parents {
+                                for sub in [false, true] {
+                                    assert!(
+                                        may || !conv.triggers_at(tag, payload, parent, grand, sub),
+                                        "{from}->{to} {tag} {payload:?} under {parent} {grand}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

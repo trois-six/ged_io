@@ -33,6 +33,7 @@ use super::{
     bump, encoded_len, extension_tags, insert_records, Aliases, Body, Conformer, Family,
     FieldOrder, Named, Rec, RecRef, RepairKind, StructId, DATASET,
 };
+use crate::convert::Watch;
 use crate::model::{Store, XrefId};
 use crate::spec::validate::{xref_error, MAX_RECORD_BYTES};
 use crate::tree::{Flat, FlatPayload, FlatRef, Node, Stream, Structure, Xref};
@@ -192,6 +193,9 @@ pub(crate) struct Direct<'n> {
     head_lines: bool,
     /// The stub submitter record to write first ([`Direct::take_first`]).
     first: Option<Structure>,
+    /// What a conversion looks for in the records, when the dataset is
+    /// written in another version family without one ([`Direct::watch`]).
+    watch: Option<Rc<Watch>>,
 }
 
 impl<'n> Direct<'n> {
@@ -288,7 +292,16 @@ impl<'n> Direct<'n> {
             relocated,
             head_lines,
             first,
+            watch: None,
         })
+    }
+
+    /// Looks out for records that `watch` says need converting: such a
+    /// record makes [`Direct::record`] answer `None` (the dataset is to be
+    /// converted first).
+    pub(crate) fn watch(&mut self, watch: Rc<Watch>) {
+        self.arena.set_stream_watch(Some(Rc::clone(&watch)));
+        self.watch = Some(watch);
     }
 
     /// The stub submitter record to write first, after the header, when
@@ -340,9 +353,20 @@ impl<'n> Direct<'n> {
             record: u32::try_from(index).unwrap_or(u32::MAX),
             rtype: DATASET,
         };
+        // The record's own conversion: by its tag and identifier as given.
+        if self
+            .watch
+            .as_ref()
+            .is_some_and(|w| w.record(r.tag(), r.xref))
+        {
+            return None;
+        }
         if let (true, Body::Built(b)) = (self.arena.is_streaming(), &r.body) {
             self.arena.begin_stream(xref);
             b.build(&mut self.arena);
+            if self.arena.stream_converts() {
+                return None;
+            }
             let clean = !self.arena.spoiled()
                 && self.c.is_clean_streamed(&self.arena, &mut walk)
                 && !(self.c.family == Family::V551 && walk.size > MAX_RECORD_BYTES);
@@ -401,16 +425,32 @@ impl<'n> Direct<'n> {
             Body::Built(b) => {
                 self.arena.clear();
                 b.build(&mut self.arena);
+                let root = self.arena.root();
+                if let (Some(w), Some(root)) = (&self.watch, root) {
+                    if w.needs(root) {
+                        return None;
+                    }
+                }
                 if self.uses_relocated(r) {
                     return None;
                 }
                 (c.is_clean_written(&self.arena, &mut walk), Place::Arena)
             }
-            Body::Owned(s) => (
-                c.is_clean_record(&**s, s.xref.as_deref(), &mut walk),
-                Place::Record,
-            ),
-            Body::Given(n) => (c.is_clean_record(*n, n.xref(), &mut walk), Place::Record),
+            Body::Owned(s) => {
+                if self.watch.as_ref().is_some_and(|w| w.needs(&**s)) {
+                    return None;
+                }
+                (
+                    c.is_clean_record(&**s, s.xref.as_deref(), &mut walk),
+                    Place::Record,
+                )
+            }
+            Body::Given(n) => {
+                if self.watch.as_ref().is_some_and(|w| w.needs(*n)) {
+                    return None;
+                }
+                (c.is_clean_record(*n, n.xref(), &mut walk), Place::Record)
+            }
         };
         if !matches!(r.body, Body::Built(_)) && self.uses_relocated(r) {
             return None;
@@ -508,6 +548,17 @@ impl<'n, N> Rec<'n, N> {
         match &self.body {
             Body::Owned(s) => Some(s),
             Body::Given(_) | Body::Built(_) => None,
+        }
+    }
+}
+
+impl<'n> Rec<'n, &'n Structure> {
+    /// The record, when it is a structure: owned, or given as one.
+    pub(crate) fn as_structure(&self) -> Option<&Structure> {
+        match &self.body {
+            Body::Owned(s) => Some(s),
+            Body::Given(s) => Some(s),
+            Body::Built(_) => None,
         }
     }
 }

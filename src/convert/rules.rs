@@ -216,8 +216,19 @@ impl Converter {
     /// Whether a rule applies to structure `n` under `parent` and `grand`
     /// (`sub`: a substructure, not a record).
     fn triggers<'n, N: Node<'n>>(&self, n: N, parent: &str, grand: &str, sub: bool) -> bool {
-        let tag = n.tag();
-        let (text, pointer) = match n.payload() {
+        self.triggers_at(n.tag(), n.payload(), parent, grand, sub)
+    }
+
+    /// [`Converter::triggers`] of a structure tagged `tag` with `payload`.
+    pub(crate) fn triggers_at(
+        &self,
+        tag: &str,
+        payload: PayloadRef<'_>,
+        parent: &str,
+        grand: &str,
+        sub: bool,
+    ) -> bool {
+        let (text, pointer) = match payload {
             PayloadRef::Text(t) => (Some(t), None),
             PayloadRef::Pointer(p) => (None, Some(p)),
             PayloadRef::None => (None, None),
@@ -232,7 +243,7 @@ impl Converter {
             Direction::Up => {
                 if pointer.is_some_and(|p| p == Xref::VOID) && self.void.is_some()
                     || text.is_some_and(|t| {
-                        !self.options.keep_obsolete && t.contains("@#") && !is_value(tag, parent)
+                        !self.options.keep_obsolete && has_escape(t) && !is_value(tag, parent)
                     })
                 {
                     return true;
@@ -285,6 +296,96 @@ impl Converter {
                         _ => false,
                     }
             }
+        }
+    }
+
+    /// The payloads ([`NONE`], [`TEXT`], [`POINTER`], as bits) with which
+    /// a rule may apply to a structure tagged `tag`, whatever its
+    /// superstructures: [`Converter::triggers_at`] is false of a structure
+    /// of another tag or payload unless [`Converter::may_apply_to`] its
+    /// payload.
+    pub(crate) fn may_apply(&self, tag: &str) -> u8 {
+        const ANY: u8 = NONE | TEXT | POINTER;
+        if KNOWN_EXTENSIONS.iter().any(|(t, _)| *t == tag)
+            || tag == "_SDATE"
+            || self.values && matches!(tag, "DATE" | "SDATE" | "AGE")
+        {
+            return ANY;
+        }
+        match self.direction {
+            Direction::Up => match tag {
+                "_UID" | "EMAI" | "_EMAIL" | "_ASSO" | "ASSO" | "RIN" | "AFN" | "RFN"
+                | "_FSFTID" | "_FID" | "FSFTID" | "FONE" | "ROMN" | "TYPE" => ANY,
+                "NOTE" => POINTER,
+                "OBJE" | "SOUR" => NONE | TEXT,
+                "ALIA" | "LANG" | "_LANG" | "FILE" | "FORM" | "ROLE" | "AGE" => TEXT,
+                _ => 0,
+            },
+            Direction::Down => match tag {
+                "SNOTE" => POINTER,
+                "EXID" | "ASSO" | "_ASSO" | "TRAN" | "FORM" | "ROLE" => ANY,
+                "LANG" | "_LANG" | "FILE" => TEXT,
+                _ => 0,
+            },
+        }
+    }
+
+    /// Every extension tag of known meaning converting records may use
+    /// ([`Out::known`]): what a header written before the records declares
+    /// to have them declared.
+    pub(crate) fn declarable(&self) -> BTreeSet<&'static str> {
+        let mut tags: BTreeSet<&'static str> = KNOWN_EXTENSIONS.iter().map(|&(t, _)| t).collect();
+        tags.insert(PHRASE_TAG);
+        if self.options.keep_obsolete {
+            tags.insert(SUBMISSION_TAG);
+        }
+        tags
+    }
+
+    /// Whether a record named `xref` is the 5.5.1 record named `@VOID@`
+    /// that takes another identifier in 7.x ([`Converter::rename_void`]),
+    /// and none was given yet.
+    pub(crate) fn names_void(&self, xref: Option<&str>) -> bool {
+        self.direction == Direction::Up && self.void.is_none() && xref == Some(Xref::VOID)
+    }
+
+    /// The [`special_bytes`](crate::writer::special_bytes) of a text with
+    /// which a rule may apply to it whatever its tag
+    /// ([`Converter::may_apply_to`]): an `@` in 5.5.1.
+    pub(crate) fn special_mask(&self) -> u8 {
+        if self.direction == Direction::Up && !self.options.keep_obsolete {
+            crate::writer::AT_SIGN
+        } else {
+            0
+        }
+    }
+
+    /// Whether a rule may apply to a pointer whatever its tag
+    /// ([`Converter::may_apply_to`]): `@VOID@` a record takes the name of.
+    pub(crate) fn watches_pointers(&self) -> bool {
+        self.direction == Direction::Up && self.void.is_some()
+    }
+
+    /// Whether a rule may apply to a text of `len` bytes whatever its tag,
+    /// by its length ([`Converter::may_apply_to`]): `OTHER` and `Y` in 7.x.
+    pub(crate) fn watches_len(&self, len: usize) -> bool {
+        self.direction == Direction::Down && matches!(len, 1 | 5)
+    }
+
+    /// Whether a rule may apply to a structure with `payload` whatever its
+    /// tag (see [`Converter::may_apply`]): in 5.5.1, a text with an `@`
+    /// (`special`, its [`special_bytes`](crate::writer::special_bytes),
+    /// says whether it has one), which may hold an escape, or the
+    /// `@VOID@` pointer a record takes the name of; in 7.x, `OTHER` and
+    /// `Y`.
+    pub(crate) fn may_apply_to(&self, payload: PayloadRef<'_>, special: u8) -> bool {
+        match (self.direction, payload) {
+            (Direction::Up, PayloadRef::Text(_)) => {
+                !self.options.keep_obsolete && special & crate::writer::AT_SIGN != 0
+            }
+            (Direction::Up, PayloadRef::Pointer(p)) => self.void.is_some() && p == Xref::VOID,
+            (Direction::Down, PayloadRef::Text(t)) => t == "OTHER" || t == "Y",
+            (_, PayloadRef::None) | (Direction::Down, PayloadRef::Pointer(_)) => false,
         }
     }
 
@@ -451,15 +552,17 @@ impl Converter {
     /// Converts the substructures of `s` (whose superstructure is tagged
     /// `parent`), and theirs.
     fn children(&self, s: &mut Structure, parent: &str, cx: &mut Cx<'_>) {
-        let tag = s.tag.as_str().to_string();
+        // A standard tag is cloned without a copy of its text.
+        let tag = s.tag.clone();
+        let tag = tag.as_str();
         for c in &mut s.substructures {
-            self.payload(c, &tag, cx);
+            self.payload(c, tag, cx);
             match self.direction {
-                Direction::Up => self.up(c, &tag, parent, cx),
-                Direction::Down => self.down(c, &tag, cx),
+                Direction::Up => self.up(c, tag, parent, cx),
+                Direction::Down => self.down(c, tag, cx),
             }
             if !c.substructures.is_empty() {
-                self.children(c, &tag, cx);
+                self.children(c, tag, cx);
             }
         }
     }
@@ -1125,6 +1228,25 @@ const Y_EVENTS: &[&str] = &[
     "CREM", "DEAT", "DIV", "DIVF", "EMIG", "ENGA", "FCOM", "GRAD", "IMMI", "MARB", "MARC", "MARL",
     "MARR", "MARS", "NATU", "ORDN", "PROB", "RETI", "WILL",
 ];
+
+/// Whether `text` holds `@#`, the start of a 5.5.1 escape.
+fn has_escape(text: &str) -> bool {
+    let mut rest = text;
+    while let Some(at) = rest.find('@') {
+        rest = rest.get(at + 1..).unwrap_or("");
+        if rest.starts_with('#') {
+            return true;
+        }
+    }
+    false
+}
+
+/// [`Converter::may_apply`]: no payload.
+pub(crate) const NONE: u8 = 1;
+/// [`Converter::may_apply`]: a text.
+pub(crate) const TEXT: u8 = 2;
+/// [`Converter::may_apply`]: a pointer.
+pub(crate) const POINTER: u8 = 4;
 
 /// The tag of a phrase where 7.x permits none (a language's name), which
 /// `HEAD.SCHMA` declares as a `PHRASE`.
