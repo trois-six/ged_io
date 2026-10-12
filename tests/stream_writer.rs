@@ -241,13 +241,19 @@ fn streaming_is_idempotent() {
                 bom: Bom::Never,
                 ..WriterConfig::default()
             };
-            let (once, _) = streamed(&data, config.clone());
+            let (once, report) = streamed(&data, config.clone());
             let (twice, _) = streamed(&Dataset::parse(once.as_str()), config);
             // Converted, a record a conversion adds comes right after its
-            // source, which a dataset read back puts with its type.
+            // source, and so do the notes moved out of a 5.5.1 record over
+            // 32K, which a dataset read back puts with their type.
             let converted = data.version().is_v7() != version.is_v7();
+            let moved = report
+                .repairs
+                .iter()
+                .any(|r| r.kind == RepairKind::RecordSize);
             assert!(
-                once == twice || (converted && sorted_records(&once) == sorted_records(&twice)),
+                once == twice
+                    || ((converted || moved) && sorted_records(&once) == sorted_records(&twice)),
                 "{name} as {version}:\n{once}\n---\n{twice}"
             );
         }

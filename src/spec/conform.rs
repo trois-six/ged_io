@@ -49,6 +49,11 @@ use crate::GedcomVersion;
 /// up on records that became extensions.
 const MAX_PASSES: usize = 8;
 
+/// The longest pointer line to a note, as [`encoded_len`] counts it: a
+/// two-digit level, `NOTE`, a 22-character 5.5.1 identifier and a two-byte
+/// terminator. A 5.5.1 note no longer than it stays inline (repair j).
+const POINTER_LINE: usize = 32;
+
 /// The pointers looked up together ([`clean::Walk::pending`]): 2 MB.
 const LOOKUP_BATCH: usize = 1 << 16;
 
@@ -2394,25 +2399,24 @@ impl<'n> Conformer<'n> {
     }
 
     /// (j) Moves inline notes out of `r`, a 5.5.1 record of type `ty` over
-    /// 32K (`size` bytes as written), longest first, until it fits, each to
+    /// 32K (`size` bytes as written), longest first, until it fits or no
+    /// note longer than the pointer line it would leave is left, each to
     /// new `NOTE` records ([`Conformer::move_note`]) whose identifiers
-    /// `fresh` makes: the new records, `None` when moving every note would not bring it under
-    /// the limit (it is left as it is).
+    /// `fresh` makes: the new records. A record still over the limit then
+    /// holds no text whose moving out would shrink it.
     fn move_notes(
         &mut self,
         r: &mut Structure,
         ty: StructId,
         mut size: usize,
         fresh: &mut dyn FnMut(&mut Self) -> String,
-    ) -> Option<Vec<Structure>> {
+    ) -> Vec<Structure> {
         let mut notes = Vec::new();
         movable_notes(self.rules, r, ty, &mut Vec::new(), &mut notes);
-        // The bytes each move saves: the note's lines, less the pointer
-        // line left in its place (`n NOTE @N…@`, at most 32 bytes).
-        let saved = |n: &(usize, Vec<usize>)| n.0.saturating_sub(32);
-        if size.saturating_sub(notes.iter().map(saved).sum()) > MAX_RECORD_BYTES {
-            return None;
-        }
+        // The bytes each move saves at least: the note's lines, less the
+        // pointer line left in its place (`n NOTE @N…@`, at most
+        // `POINTER_LINE` bytes).
+        let saved = |n: &(usize, Vec<usize>)| n.0.saturating_sub(POINTER_LINE);
         // Longest first; between equals, file order.
         notes.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
         let tag = r.tag.as_str().to_string();
@@ -2422,7 +2426,8 @@ impl<'n> Conformer<'n> {
         // that the paths stay right).
         let mut further: Vec<(Vec<usize>, Vec<Structure>)> = Vec::new();
         for note in &notes {
-            if size <= MAX_RECORD_BYTES {
+            // Shorter notes save nothing.
+            if size <= MAX_RECORD_BYTES || note.0 <= POINTER_LINE {
                 break;
             }
             size = size.saturating_sub(saved(note));
@@ -2435,12 +2440,11 @@ impl<'n> Conformer<'n> {
             }
         }
         insert_after(r, further);
-        Some(added)
+        added
     }
 
     /// (j) Moves inline notes out of 5.5.1 records over 32K, longest first,
-    /// until the record fits; a record that moving every note would not
-    /// bring under the limit is left as it is.
+    /// until the record fits or no note whose moving shrinks it is left.
     fn record_sizes<N: Node<'n>>(&mut self, records: &mut Vec<Rec<'n, N>>) {
         let mut over = Vec::new();
         let mut scratch = std::mem::take(&mut self.scratch);
@@ -2474,7 +2478,9 @@ impl<'n> Conformer<'n> {
             let r = rec.make_owned(&self.arena);
             let note_ty = self.record_of("NOTE");
             let moved = self.move_notes(r, ty, size, &mut |c: &mut Self| c.unique("@N1@", note_ty));
-            let Some(moved) = moved else { continue };
+            if moved.is_empty() {
+                continue;
+            }
             added.extend(moved);
             (rec.clean, rec.size) = (0, u32::MAX);
         }

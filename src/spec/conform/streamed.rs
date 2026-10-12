@@ -303,6 +303,5 @@ impl Streamed {
             return Vec::new();
         }
         c.move_notes(s, ty, size, &mut |_| fresh())
-            .unwrap_or_default()
     }
 }

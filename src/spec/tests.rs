@@ -912,6 +912,56 @@ fn repair_j_record_size() {
     let left = validate(&records, GedcomVersion::V5_5_1);
     assert_eq!(left.len(), 1);
     assert_eq!(left[0].kind, K::RecordSize);
+
+    // Its notes move out even so, but those no longer than the pointer
+    // line that would replace them: what stays over the limit holds no
+    // text whose moving out would shrink it.
+    let mut body =
+        String::from("0 @I1@ INDI\n1 NOTE A note longer than a pointer line\n1 NOTE Short note\n");
+    for _ in 0..3000 {
+        body.push_str("1 _X yyyyyyyyyyyy\n");
+    }
+    let mut records = parse_tree(&format!("{H551}{body}0 TRLR\n")).to_structures();
+    let repairs = conform(&mut records, GedcomVersion::V5_5_1);
+    assert_eq!(repairs.len(), 1);
+    assert_eq!(repairs[0].kind, R::RecordSize);
+    let person = records.iter().find(|r| r.tag == "INDI").unwrap();
+    assert_eq!(
+        person.substructures[0].pointer().map(|p| p.as_str()),
+        Some("@N1@")
+    );
+    assert_eq!(person.substructures[1].text(), Some("Short note"));
+    let left = validate(&records, GedcomVersion::V5_5_1);
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].kind, K::RecordSize);
+
+    // Just over the limit, notes that save less than a pointer line's
+    // bound each still bring a record under it: 32 bytes over (as the
+    // limit is checked, with two-byte line terminators), 2 × 22 saved.
+    let size = |r: &Structure| validate::encoded_len(r, 0, payload::Family::V551);
+    let target = validate::MAX_RECORD_BYTES + 32;
+    let line = |tag: &str, text: &str| Structure {
+        payload: Payload::Text(text.into()),
+        ..Structure::new(tag)
+    };
+    let mut person = Structure {
+        xref: Some(Xref::new("@I1@")),
+        ..Structure::new("INDI")
+    };
+    let note = line("NOTE", "A note of twenty-six bytes");
+    person.substructures = vec![note.clone(), note];
+    while size(&person) + 19 + 8 <= target {
+        person.substructures.push(line("_X", "yyyyyyyyyyyy"));
+    }
+    // A last line of `7 + n` bytes for `n` characters.
+    let rest = target - size(&person);
+    person.substructures.push(line("_X", &"y".repeat(rest - 7)));
+    assert_eq!(size(&person), target);
+    let mut records = parse_tree(&format!("{H551}0 TRLR\n")).to_structures();
+    records.insert(records.len() - 1, person);
+    let repairs = conform(&mut records, GedcomVersion::V5_5_1);
+    assert_eq!(repairs.len(), 2, "{repairs:?}");
+    assert!(validate(&records, GedcomVersion::V5_5_1).is_empty());
 }
 
 #[test]

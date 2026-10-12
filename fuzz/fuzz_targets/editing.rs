@@ -5,7 +5,8 @@
 //! agreeing with a search; dangling pointers only come from the edits
 //! that may leave them (a removal that leaves them, an unchecked push, an
 //! identifier set through a lent record); and the dataset is then written
-//! conformant in every version, and stable through a read back.
+//! conformant in every version (but for what the conformance repair
+//! documents it leaves: `common/left.rs`), and stable through a read back.
 #![no_main]
 
 use std::collections::BTreeMap;
@@ -18,6 +19,9 @@ use ged_io::model::{
 use ged_io::tree::{Payload, Structure};
 use ged_io::{GedcomVersion, GedcomWriter};
 use libfuzzer_sys::fuzz_target;
+
+#[path = "common/left.rs"]
+mod left;
 
 /// The edits' bytes, read as small numbers.
 struct Ops<'a>(&'a [u8]);
@@ -331,7 +335,7 @@ fuzz_target!(|bytes: &[u8]| {
         let Ok(out) = writer.write_to_string(&data) else {
             continue;
         };
-        let deviations = ged_io::spec::validate_text(&out);
+        let deviations = left::unexpected(&out, version);
         assert!(deviations.is_empty(), "{version}: {deviations:?}");
         let again = writer
             .write_to_string(&Dataset::parse(out.as_str()))

@@ -76,8 +76,9 @@ fn check_lines(out: &str, version: GedcomVersion) {
 }
 
 /// `data`'s records written one at a time, in the order the in-memory
-/// writer writes them.
-fn streamed(data: &Dataset, version: GedcomVersion) -> String {
+/// writer writes them, and whether notes were moved out of a 5.5.1 record
+/// over 32K.
+fn streamed(data: &Dataset, version: GedcomVersion) -> (String, bool) {
     let config = WriterConfig {
         version: Some(version),
         bom: ged_io::Bom::Never,
@@ -89,8 +90,12 @@ fn streamed(data: &Dataset, version: GedcomVersion) -> String {
     for r in data.records().skip(usize::from(data.header().is_some())) {
         w.write_record(r, data).expect("repairs, never fails");
     }
-    let (bytes, _) = w.finish().expect("writes");
-    String::from_utf8(bytes).expect("UTF-8")
+    let (bytes, report) = w.finish().expect("writes");
+    let moved = report
+        .repairs
+        .iter()
+        .any(|r| r.kind == ged_io::RepairKind::RecordSize);
+    (String::from_utf8(bytes).expect("UTF-8"), moved)
 }
 
 /// The records of `out` (the lines of each), sorted.
@@ -159,13 +164,15 @@ fuzz_target!(|data: &[u8]| {
             let again = writer.write_to_string(&back).expect("repairs, never fails");
             assert!(again == out, "{version}: not stable\n{out}\n{again}");
             // One record at a time: conformant lines, and idempotent.
-            let once = streamed(&model, version);
+            let (once, moved) = streamed(&model, version);
             check_lines(&once, version);
-            let twice = streamed(&Dataset::parse(once.as_str()), version);
+            let (twice, _) = streamed(&Dataset::parse(once.as_str()), version);
             // Converted, a record a conversion adds comes right after its
-            // source, which a dataset read back puts with its type.
+            // source, and so do the notes moved out of a 5.5.1 record over
+            // 32K, which a dataset read back puts with their type.
             assert!(
-                twice == once || (converted && sorted_records(&twice) == sorted_records(&once)),
+                twice == once
+                    || ((converted || moved) && sorted_records(&twice) == sorted_records(&once)),
                 "{version}: streaming not stable\n{once}\n{twice}"
             );
             for encoding in [

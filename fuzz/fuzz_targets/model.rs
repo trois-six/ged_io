@@ -1,14 +1,18 @@
 //! The typed model is total and its output conformant and stable: for any
 //! bytes, reading never panics; for every version, the written output
 //! follows the version's specification (the crate's validator finds
-//! nothing), reads back with every structure the model types read typed
-//! (`ledger::untyped`), and writing what was read back gives the same
-//! bytes: write(read(write(x))) == write(x).
+//! nothing but what the conformance repair documents it leaves: a 5.5.1
+//! record over 32K holding no note to move out), reads back with every structure
+//! the model types read typed (`ledger::untyped`), and writing what was
+//! read back gives the same bytes: write(read(write(x))) == write(x).
 #![no_main]
 
 use ged_io::model::{ledger, Dataset};
 use ged_io::{GedcomVersion, GedcomWriter};
 use libfuzzer_sys::fuzz_target;
+
+#[path = "common/left.rs"]
+mod left;
 
 fuzz_target!(|data: &[u8]| {
     let dataset = Dataset::from_bytes(data);
@@ -23,7 +27,7 @@ fuzz_target!(|data: &[u8]| {
         let Ok(out) = writer.write_to_string(&dataset) else {
             continue;
         };
-        let deviations = ged_io::spec::validate_text(&out);
+        let deviations = left::unexpected(&out, version);
         assert!(deviations.is_empty(), "{version}: {deviations:?}");
         let again = Dataset::parse(out.as_str());
         let untyped = ledger::untyped(&again);
