@@ -1007,7 +1007,8 @@ fn write_direct<'n>(
     let ids = direct.ids();
     let known = move |x: &str| ids.knows(x);
     let mut xrefs = XrefMap::missing(rules, missing.into_iter(), &known);
-    map_pointers(&mut head, &mut xrefs);
+    // The header's pointers name records, whose identifiers the pass made
+    // valid: the map leaves them as they are.
     if head::needs_submitter(&head, rules) {
         return Ok(None);
     }
@@ -1016,7 +1017,7 @@ fn write_direct<'n>(
         direct.stream_into(sink);
     }
     let mut out = Emitter { rules, sink };
-    put_structure(&mut out, &head)?;
+    put_clean(&mut out, &head)?;
     for i in 1..last {
         let Some(record) = records.get_mut(i) else {
             break;
@@ -1235,6 +1236,36 @@ fn put_structure(out: &mut Emitter<'_, '_>, root: &Structure) -> Result<(), Writ
             child.payload.borrowed(),
         )?;
         stack.push((level + 1, child.substructures.iter()));
+    }
+    Ok(())
+}
+
+/// [`put_structure`] of a structure the conformance pass found clean: its
+/// tags are in the grammar, only the record has an identifier and its
+/// pointers name records.
+fn put_clean(out: &mut Emitter<'_, '_>, root: &Structure) -> Result<(), WriteError> {
+    let mut stack = vec![(0_usize, std::slice::from_ref(root).iter())];
+    while let Some((level, children)) = stack.last_mut() {
+        let level = *level;
+        let Some(s) = children.next() else {
+            stack.pop();
+            continue;
+        };
+        let payload = s.payload.borrowed();
+        let special = payload.as_str().map_or(0, special_bytes);
+        debug_assert!(
+            !matches!(payload, PayloadRef::Pointer(p) if !emit::is_valid_pointer(out.rules, p))
+        );
+        emit::emit_typed(
+            out.rules,
+            out.sink,
+            level,
+            s.xref.as_deref(),
+            s.tag.as_str(),
+            payload,
+            special,
+        )?;
+        stack.push((level + 1, s.substructures.iter()));
     }
     Ok(())
 }

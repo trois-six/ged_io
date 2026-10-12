@@ -619,29 +619,49 @@ impl Typing {
         }
     }
 
-    /// Whether a payload the type does not vouch for ([`Typing::trusts`])
-    /// stays as it is in a structure of type `ty`
+    /// Whether the payload of a structure of type `ty`, `claim` its kind
+    /// as the typed model made it valid ([`Typing::trusts`]) and `special`
+    /// the [`special_bytes`] of a text, stays as it is
     /// ([`Conformer::clean_payload_known`] without documented aliases,
-    /// which stream mode has none of); `None` for a pointer structure,
-    /// whose pointer must name a record.
+    /// which stream mode has none of); `None` for a pointer, which must
+    /// name a record.
+    ///
+    /// [`special_bytes`]: crate::writer::special_bytes
     #[inline]
-    pub(crate) fn is_clean(
+    pub(crate) fn check(
         &self,
         ty: StructId,
         payload: &FlatPayload<'_>,
+        claim: Option<Kind>,
         special: u8,
     ) -> Option<bool> {
-        if matches!(
-            self.schema.kind(ty).0,
-            Kind::Pointer | Kind::NullablePointer
-        ) {
-            return None;
-        }
+        let (kind, _) = self.schema.kind(ty);
         let raw = match payload {
+            _ if matches!(kind, Kind::Pointer | Kind::NullablePointer) => {
+                return match payload {
+                    FlatPayload::None => Some(kind == Kind::NullablePointer),
+                    FlatPayload::Pointer(..) => None,
+                    FlatPayload::Text(_) => Some(false),
+                };
+            }
             FlatPayload::Pointer(..) => return Some(false),
+            FlatPayload::Text(t) if claim == Some(kind) => {
+                if self.trusts(ty, payload, claim) {
+                    return Some(true);
+                }
+                t
+            }
             FlatPayload::Text(t) => t,
             FlatPayload::None => "",
         };
+        // Any text without a banned character is a text; nearly every
+        // text has no byte that can start one.
+        if matches!(kind, Kind::Text | Kind::ListText) {
+            return Some(!payload::has_banned_known(raw, special, self.rules));
+        }
+        if raw.is_empty() && payload::empty_is_valid(kind) {
+            return Some(true);
+        }
         Some(clean::is_clean_value(
             self.schema,
             self.tables,
