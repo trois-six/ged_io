@@ -281,3 +281,115 @@ fn errors() {
         Err(GedzipError::MissingMedia(name)) if name == "missing.jpg"
     ));
 }
+
+/// An archive holds GEDCOM 7.x in UTF-8 with a byte order mark: a 5.5.1
+/// dataset is converted to 7.0, whatever version the writer is set to but
+/// a 7.x one.
+#[test]
+fn an_archive_holds_gedcom_7() {
+    let v551 = Dataset::parse(
+        "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n1 CHAR ANSEL\n0 @I1@ INDI\n1 NAME Ann /Example/\n\
+         1 OBJE\n2 FILE media\\portrait.jpg\n3 FORM jpg\n2 TITL Portrait\n0 TRLR\n",
+    );
+    let gedcom = |bytes: Vec<u8>| {
+        let mut reader = GedzipReader::new(Cursor::new(bytes)).unwrap();
+        reader.read_gedcom_bytes().unwrap()
+    };
+    let bytes = gedcom(write_gedzip(&v551).unwrap());
+    assert!(bytes.starts_with("\u{feff}0 HEAD\n1 GEDC\n2 VERS 7.0\n".as_bytes()));
+    let text = String::from_utf8(bytes).unwrap();
+    assert!(text.contains("1 OBJE @M1@\n2 TITL Portrait\n"), "{text}");
+    assert!(
+        text.contains("0 @M1@ OBJE\n1 FILE media/portrait.jpg\n2 FORM image/jpeg\n"),
+        "{text}"
+    );
+    assert!(!text.contains("CHAR"), "{text}");
+    assert!(ged_io::spec::validate_text(&text).is_empty(), "{text}");
+
+    let with = |writer: GedcomWriter, data: &Dataset| {
+        let mut zip = GedzipWriter::new(Cursor::new(Vec::new())).unwrap();
+        zip.write_dataset_with(data, &writer).unwrap();
+        gedcom(zip.finish().unwrap().into_inner())
+    };
+    let v551_writer = GedcomWriter::new().gedcom_version(GedcomVersion::V5_5_1);
+    assert!(with(v551_writer.clone(), &v551)
+        .starts_with("\u{feff}0 HEAD\n1 GEDC\n2 VERS 7.0\n".as_bytes()));
+    let v71 = GedcomWriter::new().gedcom_version(GedcomVersion::V7_1);
+    assert!(with(v71, &v551).starts_with("\u{feff}0 HEAD\n1 GEDC\n2 VERS 7.1\n".as_bytes()));
+    // A 7.1 dataset stays 7.1.
+    let data71 = Dataset::parse("0 HEAD\n1 GEDC\n2 VERS 7.1\n0 TRLR\n");
+    assert!(
+        with(v551_writer, &data71).starts_with("\u{feff}0 HEAD\n1 GEDC\n2 VERS 7.1\n".as_bytes())
+    );
+    // A writer may leave the byte order mark out.
+    let bare = GedcomWriter::new().bom(ged_io::Bom::Never);
+    assert!(with(bare, &v551).starts_with(b"0 HEAD\n"));
+}
+
+/// The names GEDZIP reserves are refused as media names (§2.12, §4).
+#[test]
+fn reserved_names_are_refused() {
+    let mut writer = GedzipWriter::new(Cursor::new(Vec::new())).unwrap();
+    writer.write_dataset(&Dataset::parse(FAMILY)).unwrap();
+    for name in [
+        "gedcom.ged",
+        "./gedcom.ged",
+        "META-INF/container.xml",
+        "MANIFEST.MF",
+        "media/",
+        "",
+    ] {
+        assert!(
+            matches!(writer.add_media_file(name, b"x"), Err(GedzipError::ReservedName(n)) if n == name),
+            "{name}"
+        );
+    }
+    // Names that only look alike are media.
+    writer.add_media_file("media/gedcom.ged.jpg", b"x").unwrap();
+    writer.add_media_file("meta-info/a.jpg", b"x").unwrap();
+    let bytes = writer.finish().unwrap().into_inner();
+    let reader = GedzipReader::new(Cursor::new(bytes)).unwrap();
+    assert_eq!(
+        reader.media_files(),
+        ["media/gedcom.ged.jpg", "meta-info/a.jpg"]
+    );
+}
+
+/// Directories are no media, and an exact name, then a decoded one, wins
+/// over a name in another case.
+#[test]
+fn directories_are_not_media_and_names_are_case_sensitive() {
+    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let options = zip::write::SimpleFileOptions::default();
+    zip.start_file(GEDCOM_FILENAME, options).unwrap();
+    zip.write_all(b"0 HEAD\n1 GEDC\n2 VERS 7.0\n0 TRLR\n")
+        .unwrap();
+    zip.add_directory("media/", options).unwrap();
+    for name in ["media/Photo 1.jpg", "media/photo 1.jpg"] {
+        zip.start_file(name, options).unwrap();
+        zip.write_all(name.as_bytes()).unwrap();
+    }
+    let bytes = zip.finish().unwrap().into_inner();
+    let mut reader = GedzipReader::new(Cursor::new(bytes)).unwrap();
+    assert_eq!(
+        reader.media_files(),
+        ["media/Photo 1.jpg", "media/photo 1.jpg"]
+    );
+    assert_eq!(reader.find_entry("media/"), None);
+    assert_eq!(
+        reader.find_entry("media/photo%201.jpg"),
+        Some("media/photo 1.jpg")
+    );
+    assert_eq!(
+        reader.find_entry("media/Photo%201.jpg"),
+        Some("media/Photo 1.jpg")
+    );
+    assert_eq!(
+        reader.find_entry("MEDIA/PHOTO%201.JPG"),
+        Some("media/Photo 1.jpg")
+    );
+    assert_eq!(
+        reader.read_media_file("media/photo%201.jpg").unwrap(),
+        b"media/photo 1.jpg"
+    );
+}

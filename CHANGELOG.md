@@ -68,6 +68,7 @@ keeps all data; writing is conformant to GEDCOM 5.5.1, 7.0 or 7.1.
   converting to 5.5.1. `ConversionOptions::keep_obsolete` (writer
   `conversion`, CLI `--keep-obsolete`) keeps what 7.x drops as declared
   extensions, restored in 5.5.1.
+- `GedzipError::ReservedName`.
 
 ### Changed
 
@@ -132,3 +133,7 @@ keeps all data; writing is conformant to GEDCOM 5.5.1, 7.0 or 7.1.
   5.5.1 date it came from.
 - A 5.5.1 note over 32K is split at line breaks into consecutive `NOTE`
   records, so that every record it is moved out of fits.
+- GEDZIP: the dataset is always written as GEDCOM 7.x; `add_media_file`
+  refuses `gedcom.ged`, `META-INF/…` and `MANIFEST.MF`; directories are not
+  listed as media; `find_entry` prefers an exact, then a case-sensitive
+  decoded name.

@@ -30,7 +30,7 @@ reporting each repair.
 | **Read & write** | A lossless, lenient reader, and a writer conformant by construction; data that does not fit a type is kept, in place, and written back |
 | **Streaming parser** | One record at a time, in any encoding and with any line terminators, memory bounded by the largest record |
 | **Indexed lookups** | Records by identifier and families from individuals in constant time |
-| **GEDZIP** | Read and write `.gdz` archives bundling a dataset with its media files (feature `gedzip`) |
+| **GEDZIP** | Read and write `.gdz` archives bundling a GEDCOM 7.x dataset with its media files, converting 5.5.1 (feature `gedzip`) |
 | **Encodings** | UTF-8, UTF-16 LE/BE (with or without BOM), ANSEL (to Unicode NFC), ASCII, Windows-1252 (`ANSI`), ISO-8859-1, ISO-8859-15, IBM PC (cp437), Macintosh; decoding never fails; in memory and streaming |
 | **JSON** | `Serialize` and `Deserialize` for the dataset with serde, for JSON and other self-describing formats (feature `serde`) |
 | **Type safe** | A Rust type per structure, enumerations whose unknown values keep their text, typed identifiers and pointers |
@@ -361,6 +361,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+An archive holds GEDCOM 7.x (§4): a 5.5.1 dataset is converted to 7.0 and
+written in UTF-8 with a byte order mark. `add_media_file` refuses the names
+GEDZIP reserves (`gedcom.ged`, `META-INF/…`, `MANIFEST.MF`); `media_files`
+lists files, not directories; `find_entry` matches a `FILE` reference to its
+entry by its exact name first, then decoded (`%20`), then leniently.
 
 ---
 
