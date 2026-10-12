@@ -192,7 +192,7 @@ fn date_age_and_time_cases() {
         }
         // The texts of the dates and ages read.
         let mut texts = Vec::new();
-        for event in &data.individuals[0].events {
+        for event in &data.individuals()[0].events {
             if let Some(date) = &event.date {
                 let (value, time, phrase) = date_texts(date, &data);
                 texts.extend([Some(value), time, phrase].into_iter().flatten());
@@ -348,7 +348,7 @@ fn file_with_dates(version: &str, dates: &[&str]) -> String {
 
 /// The date values of the events of the first individual.
 fn dates_of(data: &Dataset) -> Vec<String> {
-    data.individuals[0]
+    data.individuals()[0]
         .events
         .iter()
         .map(|event| event.date.as_ref().unwrap().value.to_str(data).into_owned())
@@ -648,7 +648,7 @@ fn date_value_samples_through_the_reader_and_writer() {
         assert_eq!(dates_of(&data), samples);
         let written = rewrite(&data, version);
         for (index, sample) in samples.iter().enumerate() {
-            let event = &written.individuals[0].events[index];
+            let event = &written.individuals()[0].events[index];
             let date = event.date.as_ref().unwrap();
             let (value, _, phrase) = date_texts(date, &written);
             if DateValue::parse_strict(sample, version).is_ok() {
@@ -927,7 +927,7 @@ fn age_conversion_matches_the_test_files() {
 
 /// The age values of the events of the first individual.
 fn ages_of(data: &Dataset) -> Vec<Option<String>> {
-    data.individuals[0]
+    data.individuals()[0]
         .events
         .iter()
         .map(|event| opt(event.detail().age.as_ref().map(|age| &age.value), data))
@@ -957,7 +957,7 @@ fn ages_are_kept_by_the_model() {
         some(&["79y", "1y 400d", "1y 30m 100w 400d", ""])
     );
     // GEDCOM 7.0 keeps the text that is not an age in the PHRASE.
-    let text = v7.individuals[0].events[3].detail().age.as_ref().unwrap();
+    let text = v7.individuals()[0].events[3].detail().age.as_ref().unwrap();
     assert_eq!(
         opt(text.phrase.as_ref(), &v7).as_deref(),
         Some("about thirty")
@@ -982,7 +982,7 @@ fn free_text_ages_round_trip() {
                     0 @F1@ FAM\n1 MARR\n2 HUSB\n3 AGE environ 30 ans\n0 TRLR";
     let data = read(original);
     let husband_age = |data: &Dataset| {
-        let detail = data.families[0].events[0].detail();
+        let detail = data.families()[0].events[0].detail();
         let age = detail.husband.as_ref().unwrap().age.as_ref().unwrap();
         age_texts(age, data)
     };
@@ -1005,7 +1005,11 @@ fn free_text_ages_round_trip() {
     assert!(v7.contains("2 AGE\n3 PHRASE majeur\n"), "{v7}");
     assert!(v7.contains("3 AGE\n4 PHRASE environ 30 ans\n"), "{v7}");
     let back = read(&v7);
-    let death = back.individuals[0].events[0].detail().age.clone().unwrap();
+    let death = back.individuals()[0].events[0]
+        .detail()
+        .age
+        .clone()
+        .unwrap();
     assert_eq!(
         age_texts(&death, &back),
         (String::new(), Some("majeur".to_string()))
@@ -1072,7 +1076,7 @@ fn age_phrases_per_version() {
     let back = read(&v7);
     for index in [1, 3] {
         let age = |data: &Dataset| {
-            let age = data.individuals[0].events[index].detail().age.clone();
+            let age = data.individuals()[0].events[index].detail().age.clone();
             age_texts(&age.unwrap(), data)
         };
         assert_eq!(age(&back), age(&data), "event {index}");

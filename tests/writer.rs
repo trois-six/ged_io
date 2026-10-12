@@ -4,7 +4,10 @@
 //! identifiers, levels and banned characters, and the repairs it reports.
 //! Every name and value is fictitious.
 
-use ged_io::model::{Citation, CitationSource, Individual, Node, Note, NoteContent, Value};
+use ged_io::model::{
+    Citation, CitationSource, Individual, Node, Note, NoteContent, Record, SharedNote, Source,
+    Value,
+};
 use ged_io::model::{Text, XrefId};
 use ged_io::tree::{parse_tree, Tree};
 use ged_io::{
@@ -119,8 +122,8 @@ fn text_in_pointer_fields_cannot_inject_lines() {
         let written = write(&data, version);
         assert!(!written.contains("\n0 @I9@"), "{written}");
         let back = read(&written);
-        assert_eq!(back.individuals.len(), 1, "{written}");
-        assert!(back.individuals[0].names.is_empty(), "{written}");
+        assert_eq!(back.individuals().len(), 1, "{written}");
+        assert!(back.individuals()[0].names.is_empty(), "{written}");
         assert_eq!(alias(&back), alias(&data), "{written}");
     }
 }
@@ -135,9 +138,9 @@ fn model_values_cannot_inject_lines() {
     person
         .notes
         .push(Note::text("Y\n0 @I666@ INDI\r1 NAME Injected /Line/"));
-    data.individuals.push(person);
+    data.push(Record::Individual(Box::new(person)));
     let extension = node(&mut data, "_NOTE", Some("first\r\n0 TRLR"));
-    data.extra.push(extension);
+    data.push(Record::Other(Box::new(extension)));
     for version in VERSIONS {
         let written = write(&data, version);
         assert_eq!(
@@ -146,9 +149,9 @@ fn model_values_cannot_inject_lines() {
             "{written}"
         );
         let back = read(&written);
-        assert_eq!(back.individuals.len(), 1, "{written}");
+        assert_eq!(back.individuals().len(), 1, "{written}");
         assert_eq!(
-            note_text(&back, &back.individuals[0].notes[0]),
+            note_text(&back, &back.individuals()[0].notes[0]),
             "Y\n0 @I666@ INDI\n1 NAME Injected /Line/"
         );
     }
@@ -160,12 +163,15 @@ fn model_values_cannot_inject_lines() {
 fn at_signs_are_escaped_per_version() {
     let mut data = read("0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 NOTE x\n0 TRLR");
     let note = "mail a@b.example\n@#DJULIAN@ and @#open";
-    data.individuals[0].notes[0] = Note::text(note);
+    data.get_mut_at::<Individual>(0).unwrap().notes[0] = Note::text(note);
     // A citation whose description looks like a pointer.
-    data.individuals[0].citations.push(Citation {
-        source: CitationSource::Description(Text::new("@S9@")),
-        ..Citation::default()
-    });
+    data.get_mut_at::<Individual>(0)
+        .unwrap()
+        .citations
+        .push(Citation {
+            source: CitationSource::Description(Text::new("@S9@")),
+            ..Citation::default()
+        });
 
     let v5 = write(&data, GedcomVersion::V5_5_1);
     assert!(
@@ -176,7 +182,7 @@ fn at_signs_are_escaped_per_version() {
     assert!(v5.contains("1 SOUR @@S9@@\n"), "{v5}");
     // 7.x data: a leading `@` doubled, an escape is text.
     let mut data7 = read("0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 NOTE x\n0 TRLR");
-    data7.individuals[0].notes[0] = Note::text(note);
+    data7.get_mut_at::<Individual>(0).unwrap().notes[0] = Note::text(note);
     let v7 = write(&data7, GedcomVersion::V7_0);
     assert!(
         v7.contains("1 NOTE mail a@b.example\n2 CONT @@#DJULIAN@ and @#open\n"),
@@ -184,7 +190,7 @@ fn at_signs_are_escaped_per_version() {
     );
     for written in [v5, v7] {
         let back = read(&written);
-        assert_eq!(note_text(&back, &back.individuals[0].notes[0]), note);
+        assert_eq!(note_text(&back, &back.individuals()[0].notes[0]), note);
     }
 
     // The 5.5.1 data converted: 7.x has no escapes, a calendar's is its
@@ -206,7 +212,7 @@ fn line_length_per_version() {
     let mut data = read("0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 NOTE x\n0 TRLR");
     let note = "a reasonably long sentence about a fictitious person ".repeat(20);
     let note = note.trim_end().to_string();
-    data.individuals[0].notes[0] = Note::text(note.as_str());
+    data.get_mut_at::<Individual>(0).unwrap().notes[0] = Note::text(note.as_str());
 
     let v7 = write(&data, GedcomVersion::V7_0);
     assert!(v7.contains(&format!("1 NOTE {note}\n")), "{v7}");
@@ -223,7 +229,7 @@ fn line_length_per_version() {
             assert!(!line.ends_with(' '), "{line:?}");
         }
         let back = read(&v5);
-        assert_eq!(note_text(&back, &back.individuals[0].notes[0]), note);
+        assert_eq!(note_text(&back, &back.individuals()[0].notes[0]), note);
     }
 }
 
@@ -255,11 +261,15 @@ fn whole_line_length_includes_level_xref_tag_and_terminator() {
     let page = long_text(500);
     // A record line carries its xref: `0 @N123456789@ NOTE …`.
     let shared_note = long_text(600);
-    data.individuals[0].notes[0] = Note::text(note.as_str());
-    data.individuals[0].notes.push(Note::text(at_sign.as_str()));
-    data.sources[0].title = Some(Text::new(multi_line.as_str()));
-    data.individuals[0].events[0].citations[0].page = Some(Text::new(page.as_str()));
-    data.notes[0].text = Text::new(shared_note.as_str());
+    data.get_mut_at::<Individual>(0).unwrap().notes[0] = Note::text(note.as_str());
+    data.get_mut_at::<Individual>(0)
+        .unwrap()
+        .notes
+        .push(Note::text(at_sign.as_str()));
+    data.get_mut_at::<Source>(0).unwrap().title = Some(Text::new(multi_line.as_str()));
+    data.get_mut_at::<Individual>(0).unwrap().events[0].citations[0].page =
+        Some(Text::new(page.as_str()));
+    data.get_mut_at::<SharedNote>(0).unwrap().text = Text::new(shared_note.as_str());
 
     for (ending, eol, max) in [
         (LineEnding::Lf, "\n", 255),
@@ -282,11 +292,11 @@ fn whole_line_length_includes_level_xref_tag_and_terminator() {
         }
 
         let back = read(&written);
-        let person = &back.individuals[0];
+        let person = &back.individuals()[0];
         assert_eq!(note_text(&back, &person.notes[0]), note);
         assert_eq!(note_text(&back, &person.notes[1]), at_sign);
         assert_eq!(
-            back.sources[0].title.as_ref().unwrap().to_str(&back),
+            back.sources()[0].title.as_ref().unwrap().to_str(&back),
             multi_line
         );
         assert_eq!(
@@ -297,7 +307,7 @@ fn whole_line_length_includes_level_xref_tag_and_terminator() {
                 .to_str(&back),
             page
         );
-        assert_eq!(back.notes[0].text.to_str(&back), shared_note);
+        assert_eq!(back.notes()[0].text.to_str(&back), shared_note);
     }
 }
 
@@ -324,7 +334,7 @@ fn every_line_ends_with_the_terminator() {
 #[test]
 fn tabs_are_spaces_in_551_and_kept_in_7() {
     let mut data = read("0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 NOTE x\n0 TRLR");
-    data.individuals[0].notes[0] = Note::text("a\tb");
+    data.get_mut_at::<Individual>(0).unwrap().notes[0] = Note::text("a\tb");
     let mut bytes = Vec::new();
     let report = GedcomWriter::new().write(&mut bytes, &data).unwrap();
     assert!(String::from_utf8(bytes).unwrap().contains("1 NOTE a b\n"));
@@ -372,7 +382,12 @@ fn byte_order_marks() {
 #[test]
 fn output_encodings() {
     let data = read("0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 NAME Zoé /Exemple/\n0 TRLR");
-    let name = |data: &Dataset| data.individuals[0].names[0].value.to_str(data).into_owned();
+    let name = |data: &Dataset| {
+        data.individuals()[0].names[0]
+            .value
+            .to_str(data)
+            .into_owned()
+    };
 
     let mut ansel = Vec::new();
     GedcomWriter::new()
@@ -393,7 +408,7 @@ fn output_encodings() {
     let back = GedcomBuilder::new().build_from_bytes(utf16).unwrap();
     assert_eq!(name(&back), "Zoé /Exemple/");
     assert_eq!(
-        back.header
+        back.header()
             .as_ref()
             .unwrap()
             .charset
@@ -470,12 +485,12 @@ fn identifiers_are_valid_and_unique() {
 #[test]
 fn records_without_identifiers_get_one() {
     let mut data = Dataset::default();
-    data.individuals.push(Individual::default());
+    data.push(Record::Individual(Box::default()));
     let xref = xref(&mut data, "@I1@");
-    data.individuals.push(Individual {
+    data.push(Record::Individual(Box::new(Individual {
         xref,
         ..Individual::default()
-    });
+    })));
     let written = write(&data, GedcomVersion::V7_0);
     assert!(written.contains("0 @I2@ INDI\n0 @I1@ INDI\n"), "{written}");
 }
@@ -525,7 +540,7 @@ fn deep_nesting_and_banned_characters() {
         parent.children.push(tag);
         tag = parent;
     }
-    data.extra.push(tag);
+    data.push(Record::Other(Box::new(tag)));
     for version in VERSIONS {
         let mut bytes = Vec::new();
         let report = GedcomWriter::new()
@@ -563,7 +578,7 @@ fn long_tags_fit_the_551_line() {
     let mut data = Dataset::default();
     let mut record = node(&mut data, &"-".repeat(300), Some("value"));
     record.xref = xref(&mut data, "@X1@");
-    data.extra.push(record);
+    data.push(Record::Other(Box::new(record)));
     let written = write(&data, GedcomVersion::V5_5_1);
     let line = written.lines().find(|l| l.starts_with("0 @X1@")).unwrap();
     assert_eq!(line, format!("0 @X1@ _{} value", "_".repeat(30)));
@@ -579,9 +594,9 @@ fn extension_tags_under_record_text_read_back() {
     for version in VERSIONS {
         let written = write(&data, version);
         let back = read(&written);
-        assert_eq!(back.notes.len(), 2, "{written}");
-        assert_eq!(back.notes[0].text.to_str(&back), "A shared note\nmore");
-        assert_eq!(back.notes[1].text.to_str(&back), "Another");
+        assert_eq!(back.notes().len(), 2, "{written}");
+        assert_eq!(back.notes()[0].text.to_str(&back), "A shared note\nmore");
+        assert_eq!(back.notes()[1].text.to_str(&back), "Another");
     }
 }
 

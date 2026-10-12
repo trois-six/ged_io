@@ -17,7 +17,7 @@
 //! let ann = indexed.find_individual("@I1@").unwrap();
 //! let family = indexed.families_as_spouse(ann.xref).next().unwrap();
 //! assert_eq!(indexed.children(family).count(), 1);
-//! assert_eq!(indexed.individuals.len(), 2); // a dataset still
+//! assert_eq!(indexed.individuals().len(), 2); // a dataset still
 //! ```
 
 use std::ops::{Deref, DerefMut};

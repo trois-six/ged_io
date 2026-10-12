@@ -243,16 +243,16 @@ impl Extend<StreamedRecord> for Dataset {
                 Record::Header(header) if self.header.is_some() => {
                     let cx_version = self.version;
                     let node = header_as_node(&header, &mut self.store, cx_version);
-                    self.extra.push(node);
+                    self.push_record(Record::Other(Box::new(node)));
                 }
                 Record::Header(header) => {
                     if self.record_count() == 0 {
                         self.version = version;
                     }
                     self.declared_version = declared;
-                    self.header = Some(*header);
+                    self.set_header(Some(*header));
                 }
-                other => self.push(other),
+                other => self.push_record(other),
             }
         }
     }

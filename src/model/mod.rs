@@ -52,6 +52,55 @@
 //! lists that seldom repeat are [`ThinVec`]s: a dataset takes about 2.5
 //! times the size of its input.
 //!
+//! # Editing
+//!
+//! A dataset is edited through its methods, which keep its references
+//! whole (see [`Dataset`]):
+//!
+//! - every record has a [`Handle`], which stays valid until the record is
+//!   removed, whatever else changes ([`Dataset::handle`] by identifier,
+//!   [`Dataset::handles`] in order, [`Dataset::add`]);
+//! - [`Dataset::add`] refuses an identifier another record has and
+//!   pointers to no record; [`Dataset::remove`] refuses a record other
+//!   structures point to, unless asked to remove them too
+//!   ([`Removal::Detach`]) or to leave them dangling;
+//! - [`Dataset::rename`] gives an identifier a new text, which its record
+//!   and every pointer to it take at once; [`Dataset::redirect`] moves
+//!   pointers from one record to another;
+//! - [`Dataset::link`] and [`Dataset::unlink`] add and remove pointers of
+//!   every kind ([`Link`]: family links, citations, notes, media,
+//!   repositories, submitters, extension structures);
+//!   [`Dataset::link_child`] and [`Dataset::link_spouse`] link a family and
+//!   an individual both ways;
+//! - [`Dataset::get_mut`] lends a record to edit any of its fields, and
+//!   counts its pointers again when the loan ends ([`RecordMut`]);
+//! - [`Dataset::references`] counts the pointers to an identifier in
+//!   constant time, [`Dataset::referrers`] lists their holders and
+//!   [`Dataset::dangling_references`] the pointers to no record.
+//!
+//! ```rust
+//! use ged_io::model::{Dataset, Family, Individual, Link, Removal, Source};
+//! use ged_io::GedcomWriter;
+//!
+//! let mut data = Dataset::parse(
+//!     "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 NAME Ann /Example/\n\
+//!      0 @S1@ SOUR\n1 TITL Parish register\n0 TRLR\n",
+//! );
+//! let ann = data.handle::<Individual>("@I1@").unwrap();
+//! let family = data.add(Family::default()).unwrap(); // given @F1@
+//! data.link_spouse(family, ann).unwrap();
+//! data.link(ann, Link::Citation, "@S1@").unwrap();
+//! assert_eq!(data.references("@S1@"), 1);
+//!
+//! let source = data.handle::<Source>("@S1@").unwrap();
+//! assert!(data.remove(source, Removal::Refuse).is_err()); // still cited
+//! data.rename("@I1@", "@ANN@").unwrap();
+//!
+//! let out = GedcomWriter::new().write_to_string(&data).unwrap();
+//! assert!(out.contains("0 @ANN@ INDI\n1 NAME Ann /Example/\n1 FAMS @F1@\n1 SOUR @S1@\n"));
+//! assert!(out.contains("0 @F1@ FAM\n1 HUSB @ANN@\n"));
+//! ```
+//!
 //! # Writing
 //!
 //! [`GedcomWriter`](crate::GedcomWriter) writes a dataset in its version or
@@ -67,7 +116,7 @@
 //!     "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 NOTE Hello\n2 LANG en\n\
 //!      1 FAMC @F1@\n2 PEDI OTHER\n3 PHRASE Guardianship\n0 @F1@ FAM\n0 TRLR\n",
 //! );
-//! let indi = &data.individuals[0];
+//! let indi = &data.individuals()[0];
 //! let note = &indi.notes[0];
 //! assert!(matches!(&note.content, NoteContent::Text(t) if t.to_str(&data) == "Hello"));
 //! assert_eq!(note.detail().language.as_ref().unwrap().to_str(&data), "en");
@@ -85,6 +134,7 @@ mod address;
 mod citation;
 mod dataset;
 mod date;
+mod edit;
 mod enums;
 mod event;
 mod header;
@@ -98,6 +148,7 @@ mod name;
 mod node;
 mod note;
 mod place;
+pub(crate) mod pointers;
 pub(crate) mod read;
 mod record;
 pub(crate) mod relocate;
@@ -115,6 +166,10 @@ pub use citation::{
 };
 pub use dataset::{DanglingReference, Dataset, Record, RecordRef, XrefKey};
 pub use date::{Age, ChangeDate, CreationDate, Date, DateDetail, ExactDate, Period};
+pub use edit::{
+    EditError, Editable, Handle, Holder, Link, RecordHandle, RecordKind, RecordMut, RecordType,
+    Removal,
+};
 pub use enums::{
     Adoption, BirthKind, Certainty, CharacterSet, ChildStatus, EnumList, EventKind, GedcomForm,
     LdsStatus, Medium, MultimediaFormat, NameType, NoteKind, OrdinanceFlag, OrdinanceStatus,

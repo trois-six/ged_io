@@ -15,46 +15,56 @@ use super::text::{Store, XrefId};
 /// A GEDCOM dataset: its header and records, typed, and the store their
 /// texts and identifiers resolve against.
 ///
-/// Records are kept by type, each type in file order; records of no type
+/// Records are kept by type, each type in file order
+/// ([`Dataset::individuals`], [`Dataset::families`], …); records of no type
 /// the model has (extension and unknown records, a second header, a
-/// trailer with content) are kept in `extra`, in order. The trailer itself
-/// carries nothing and is written by the writer.
+/// trailer with content) are kept in [`Dataset::extra`], in order. The
+/// trailer itself carries nothing and is written by the writer.
+///
+/// A dataset keeps its references whole as it is edited: the records are
+/// read through it and changed through it ([`Dataset::add`],
+/// [`Dataset::remove`], [`Dataset::rename`], [`Dataset::link`],
+/// [`Dataset::get_mut`], …), which knows the record of each identifier and
+/// counts the pointers to it ([`Dataset::references`]). Lookups by
+/// identifier take constant time. See [`crate::model`] (Editing).
 ///
 /// ```rust
 /// use ged_io::model::{Dataset, RecordRef};
 ///
 /// let data = Dataset::parse("0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n0 @F1@ FAM\n1 CHIL @I1@\n0 _LOC Place\n0 TRLR\n");
-/// assert_eq!(data.individuals.len(), 1);
-/// assert_eq!(data.families[0].children.len(), 1);
-/// assert_eq!(data.extra.len(), 1); // the extension record
+/// assert_eq!(data.individuals().len(), 1);
+/// assert_eq!(data.families()[0].children.len(), 1);
+/// assert_eq!(data.extra().len(), 1); // the extension record
 /// assert!(matches!(data.find("@F1@"), Some(RecordRef::Family(_))));
 /// assert_eq!(data.records().count(), 4); // the header, two records, the extension
 /// ```
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Dataset {
     /// The header (`HEAD`), when the file has one.
-    pub header: Option<Header>,
+    pub(crate) header: Option<Header>,
     /// The individuals (`INDI`).
-    pub individuals: Vec<Individual>,
+    pub(crate) individuals: Vec<Individual>,
     /// The families (`FAM`).
-    pub families: Vec<Family>,
+    pub(crate) families: Vec<Family>,
     /// The sources (`SOUR`).
-    pub sources: Vec<Source>,
+    pub(crate) sources: Vec<Source>,
     /// The repositories (`REPO`).
-    pub repositories: Vec<Repository>,
+    pub(crate) repositories: Vec<Repository>,
     /// The multimedia objects (`OBJE`).
-    pub multimedia: Vec<Multimedia>,
+    pub(crate) multimedia: Vec<Multimedia>,
     /// The submitters (`SUBM`).
-    pub submitters: Vec<Submitter>,
+    pub(crate) submitters: Vec<Submitter>,
     /// The submissions (5.5.1 `SUBN`).
-    pub submissions: Vec<Submission>,
+    pub(crate) submissions: Vec<Submission>,
     /// The shared notes (5.5.1 `NOTE`, 7.x `SNOTE`).
-    pub notes: Vec<SharedNote>,
+    pub(crate) notes: Vec<SharedNote>,
     /// The records of no type the model has, in order.
-    pub extra: Extra,
+    pub(crate) extra: Extra,
     pub(crate) store: Store,
     pub(crate) version: GedcomVersion,
     pub(crate) declared_version: Option<Box<str>>,
+    /// Handles, identifiers and pointer counts (see [`super::edit`]).
+    pub(crate) index: super::edit::Index,
 }
 
 impl AsRef<Store> for Dataset {
@@ -274,13 +284,38 @@ pub trait XrefKey: sealed::Sealed {
     fn id_in(self, store: &Store) -> Option<XrefId>;
 }
 
-mod sealed {
-    pub trait Sealed {}
-    impl Sealed for &str {}
-    impl Sealed for String {}
-    impl Sealed for &String {}
-    impl Sealed for super::XrefId {}
-    impl Sealed for Option<super::XrefId> {}
+pub(crate) mod sealed {
+    use super::{Store, XrefId};
+
+    /// The identifier's text, for errors.
+    pub trait Sealed {
+        fn text_in(&self, store: &Store) -> Box<str>;
+    }
+    impl Sealed for &str {
+        fn text_in(&self, _store: &Store) -> Box<str> {
+            (*self).into()
+        }
+    }
+    impl Sealed for String {
+        fn text_in(&self, _store: &Store) -> Box<str> {
+            self.as_str().into()
+        }
+    }
+    impl Sealed for &String {
+        fn text_in(&self, _store: &Store) -> Box<str> {
+            self.as_str().into()
+        }
+    }
+    impl Sealed for XrefId {
+        fn text_in(&self, store: &Store) -> Box<str> {
+            store.xref(*self).into()
+        }
+    }
+    impl Sealed for Option<XrefId> {
+        fn text_in(&self, store: &Store) -> Box<str> {
+            self.map_or_else(Box::default, |id| store.xref(id).into())
+        }
+    }
 }
 
 impl XrefKey for &str {
@@ -379,24 +414,6 @@ impl Dataset {
         &mut self.store
     }
 
-    /// Adds a record whose texts and identifiers are of this dataset (owned
-    /// texts, ids of [`Dataset::store_mut`]). A header replaces the header;
-    /// [`Record::Other`] goes to `extra`.
-    pub fn push(&mut self, record: Record) {
-        match record {
-            Record::Header(r) => self.header = Some(*r),
-            Record::Individual(r) => self.individuals.push(*r),
-            Record::Family(r) => self.families.push(*r),
-            Record::Source(r) => self.sources.push(*r),
-            Record::Repository(r) => self.repositories.push(*r),
-            Record::Multimedia(r) => self.multimedia.push(*r),
-            Record::Submitter(r) => self.submitters.push(*r),
-            Record::Submission(r) => self.submissions.push(*r),
-            Record::Note(r) => self.notes.push(*r),
-            Record::Other(n) => self.extra.push(*n),
-        }
-    }
-
     /// Releases the spare capacity of the lists of records.
     pub(crate) fn shrink(&mut self) {
         self.individuals.shrink_to_fit();
@@ -444,62 +461,60 @@ impl Dataset {
     }
 
     /// The record with this identifier: the first one, when several have
-    /// it. A linear search; [`IndexedDataset`](crate::IndexedDataset) finds
-    /// records in constant time.
+    /// it. Constant time.
     #[must_use]
     pub fn find(&self, xref: impl XrefKey) -> Option<RecordRef<'_>> {
-        let id = xref.id_in(&self.store)?;
-        self.records().find(|r| r.xref() == Some(id))
+        self.find_record(xref.id_in(&self.store)?)
     }
 
     /// The individual with this identifier (the first, when several have
-    /// it).
+    /// it). Constant time, as every `find_*`.
     #[must_use]
     pub fn find_individual(&self, xref: impl XrefKey) -> Option<&Individual> {
-        let id = xref.id_in(&self.store)?;
-        self.individuals.iter().find(|r| r.xref == Some(id))
+        let pos = self.first_of(super::RecordKind::Individual, xref.id_in(&self.store)?)?;
+        self.individuals.get(pos)
     }
 
     /// The family with this identifier.
     #[must_use]
     pub fn find_family(&self, xref: impl XrefKey) -> Option<&Family> {
-        let id = xref.id_in(&self.store)?;
-        self.families.iter().find(|r| r.xref == Some(id))
+        let pos = self.first_of(super::RecordKind::Family, xref.id_in(&self.store)?)?;
+        self.families.get(pos)
     }
 
     /// The source with this identifier.
     #[must_use]
     pub fn find_source(&self, xref: impl XrefKey) -> Option<&Source> {
-        let id = xref.id_in(&self.store)?;
-        self.sources.iter().find(|r| r.xref == Some(id))
+        let pos = self.first_of(super::RecordKind::Source, xref.id_in(&self.store)?)?;
+        self.sources.get(pos)
     }
 
     /// The repository with this identifier.
     #[must_use]
     pub fn find_repository(&self, xref: impl XrefKey) -> Option<&Repository> {
-        let id = xref.id_in(&self.store)?;
-        self.repositories.iter().find(|r| r.xref == Some(id))
+        let pos = self.first_of(super::RecordKind::Repository, xref.id_in(&self.store)?)?;
+        self.repositories.get(pos)
     }
 
     /// The multimedia object with this identifier.
     #[must_use]
     pub fn find_multimedia(&self, xref: impl XrefKey) -> Option<&Multimedia> {
-        let id = xref.id_in(&self.store)?;
-        self.multimedia.iter().find(|r| r.xref == Some(id))
+        let pos = self.first_of(super::RecordKind::Multimedia, xref.id_in(&self.store)?)?;
+        self.multimedia.get(pos)
     }
 
     /// The submitter with this identifier.
     #[must_use]
     pub fn find_submitter(&self, xref: impl XrefKey) -> Option<&Submitter> {
-        let id = xref.id_in(&self.store)?;
-        self.submitters.iter().find(|r| r.xref == Some(id))
+        let pos = self.first_of(super::RecordKind::Submitter, xref.id_in(&self.store)?)?;
+        self.submitters.get(pos)
     }
 
     /// The shared note with this identifier.
     #[must_use]
     pub fn find_note(&self, xref: impl XrefKey) -> Option<&SharedNote> {
-        let id = xref.id_in(&self.store)?;
-        self.notes.iter().find(|r| r.xref == Some(id))
+        let pos = self.first_of(super::RecordKind::Note, xref.id_in(&self.store)?)?;
+        self.notes.get(pos)
     }
 
     /// The families in which this individual is a partner (`HUSB` or

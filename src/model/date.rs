@@ -365,7 +365,7 @@ impl Date {
     /// use ged_io::value::{Approximation, Calendar, DateValue};
     ///
     /// let data = Dataset::parse("0 HEAD\n0 @I1@ INDI\n1 BIRT\n2 DATE ABT @#DJULIAN@ 1700\n0 TRLR\n");
-    /// let date = data.individuals[0].birth().unwrap().date.as_ref().unwrap();
+    /// let date = data.individuals()[0].birth().unwrap().date.as_ref().unwrap();
     /// let DateValue::Approximated(Approximation::About, year) = date.parse(&data) else {
     ///     panic!()
     /// };

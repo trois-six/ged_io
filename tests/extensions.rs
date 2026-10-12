@@ -5,7 +5,7 @@
 
 use std::io::BufReader;
 
-use ged_io::model::{Dataset, Node, OrdinanceStatus, Text, Value};
+use ged_io::model::{Dataset, Individual, Node, OrdinanceStatus, Record, Text, Value};
 use ged_io::tree::Structure;
 use ged_io::{GedcomStreamParser, GedcomVersion, GedcomWriter};
 
@@ -61,7 +61,7 @@ fn unknown_record_tag_keeps_its_substructures() {
          3 PAGE Register, p. 4\n2 OBJE @M1@\n0 @S1@ SOUR\n1 TITL Sample register\n\
          0 @M1@ OBJE\n1 FILE photo.jpg\n0 TRLR",
     );
-    let person = &data.individuals[0];
+    let person = &data.individuals()[0];
 
     // The substructures are not taken for the person's own.
     assert!(person.notes.is_empty());
@@ -99,7 +99,7 @@ fn unknown_family_tag_keeps_its_substructures() {
         "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @F1@ FAM\n1 HUSB @I1@\n1 XMAR Civil\n\
          2 NOTE Not the family's note\n2 SOUR @S1@\n0 TRLR",
     );
-    let family = &data.families[0];
+    let family = &data.families()[0];
     assert!(family.notes.is_empty());
     assert!(family.citations.is_empty());
     assert_eq!(family.extra.len(), 1);
@@ -115,7 +115,7 @@ fn unknown_event_substructure_does_not_overwrite_the_event() {
          2 PLAC Sampletown\n1 OCCU Carpenter\n2 XYZ Other record\n3 DATE 3 MAR 1902\n\
          3 NOTE Not the attribute's note\n0 TRLR",
     );
-    let person = &data.individuals[0];
+    let person = &data.individuals()[0];
 
     let birth = &person.events[0];
     assert_eq!(
@@ -147,7 +147,7 @@ fn unknown_event_substructure_does_not_overwrite_the_event() {
         "{written}"
     );
     let reread = Dataset::parse(written);
-    let birth = &reread.individuals[0].events[0];
+    let birth = &reread.individuals()[0].events[0];
     assert_eq!(
         birth.date.as_ref().unwrap().value.to_str(&reread),
         "1 JAN 1900"
@@ -163,7 +163,7 @@ fn unknown_substructure_of_a_value_structure_stays_with_it() {
         "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 RESN locked\n2 XYZ Other record\n\
          3 NOTE Not the person's note\n1 NAME Ann /Example/\n0 TRLR",
     );
-    let person = &data.individuals[0];
+    let person = &data.individuals()[0];
     assert!(person.notes.is_empty());
     assert_eq!(person.names.len(), 1);
     // A value structure with substructures it has no room for is kept
@@ -192,7 +192,7 @@ fn unknown_tag_under_nested_structures_is_kept_there() {
          3 NOTE Not the data's note\n1 REPO @R1@\n2 CALN 123\n3 XYZ Other record\n\
          4 MEDI Not the call number's medium\n0 @R1@ REPO\n1 NAME Sample archive\n0 TRLR",
     );
-    let person = &data.individuals[0];
+    let person = &data.individuals()[0];
     let refn = &person.detail().refns[0];
     assert_eq!(refn.value.to_str(&data), "42");
     assert!(refn.kind.is_none());
@@ -203,7 +203,7 @@ fn unknown_tag_under_nested_structures_is_kept_there() {
     assert!(status.date.is_none());
     assert_eq!(tag(&data, &status.extra[0]), "XYZ");
 
-    let source = &data.sources[0];
+    let source = &data.sources()[0];
     let source_data = source.data.as_ref().unwrap();
     assert!(source_data.notes.is_empty());
     assert_eq!(tag(&data, &source_data.extra[0]), "XYZ");
@@ -220,13 +220,13 @@ fn unknown_tag_under_crop_is_kept_there() {
          3 XYZ Other record\n4 LEFT 99\n3 LEFT 5\n2 TITL Photo\n0 @M1@ OBJE\n\
          1 FILE photo.jpg\n2 FORM image/jpeg\n0 TRLR\n",
     );
-    let link = &data.individuals[0].detail().multimedia[0];
+    let link = &data.individuals()[0].detail().multimedia[0];
     let crop = link.crop.as_ref().unwrap();
     assert_eq!(crop.top, Some(10));
     assert_eq!(crop.left, Some(5));
     assert_eq!(tag(&data, &crop.extra[0]), "XYZ");
     assert_eq!(link.title.as_ref().unwrap().to_str(&data), "Photo");
-    let file = &data.multimedia[0].files[0];
+    let file = &data.multimedia()[0].files[0];
     assert_eq!(
         file.form.as_ref().unwrap().format.to_str(&data),
         "image/jpeg"
@@ -239,7 +239,7 @@ fn unknown_substructure_of_age_is_kept_there() {
         "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 DEAT\n2 AGE 30y\n3 XYZ Other record\n\
          2 PLAC Sampletown\n0 TRLR",
     );
-    let death = &data.individuals[0].events[0];
+    let death = &data.individuals()[0].events[0];
     let age = death.detail().age.as_ref().unwrap();
     assert_eq!(age.value.to_str(&data), "30y");
     assert_eq!(tag(&data, &age.extra[0]), "XYZ");
@@ -301,12 +301,12 @@ fn extension_tags_round_trip() {
 0 TRLR";
 
     let data1 = Dataset::parse(original);
-    assert_eq!(data1.extra.len(), 2);
-    let loc = &data1.extra[0];
+    assert_eq!(data1.extra().len(), 2);
+    let loc = &data1.extra()[0];
     assert_eq!(loc.xref.map(|x| data1.store().xref(x)), Some("@L1@"));
     assert_eq!(loc.children.len(), 1);
-    assert_eq!(data1.extra[1].children.len(), 1);
-    let person_extra: Vec<&str> = data1.individuals[0]
+    assert_eq!(data1.extra()[1].children.len(), 1);
+    let person_extra: Vec<&str> = data1.individuals()[0]
         .extra
         .iter()
         .map(|n| tag(&data1, n))
@@ -350,8 +350,8 @@ fn extension_tags_round_trip() {
     };
     assert_eq!(records(&data1), records(&data2));
     assert_eq!(
-        structures(&data1, &data1.header.as_ref().unwrap().extra),
-        structures(&data2, &data2.header.as_ref().unwrap().extra)
+        structures(&data1, &data1.header().unwrap().extra),
+        structures(&data2, &data2.header().unwrap().extra)
     );
 }
 
@@ -362,7 +362,7 @@ fn stream_parser_keeps_extension_records_with_identifiers() {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    let record = &data.extra[0];
+    let record = &data.extra()[0];
     assert_eq!(record.xref.map(|x| data.store().xref(x)), Some("@L1@"));
     assert_eq!(tag(&data, record), "_LOC");
     assert_eq!(tag(&data, &record.children[0]), "NAME");
@@ -392,13 +392,13 @@ fn round_trip(data: &Dataset, version: GedcomVersion) -> (String, Dataset) {
 /// as they were set.
 fn assert_same_extensions(data: &Dataset, reread: &Dataset, context: &str) {
     assert_eq!(
-        structures(reread, &reread.individuals[0].extra),
-        structures(data, &data.individuals[0].extra),
+        structures(reread, &reread.individuals()[0].extra),
+        structures(data, &data.individuals()[0].extra),
         "{context}"
     );
     assert_eq!(
-        structures(reread, &reread.extra),
-        structures(data, &data.extra),
+        structures(reread, reread.extra()),
+        structures(data, data.extra()),
         "{context}"
     );
 }
@@ -417,10 +417,10 @@ fn multi_line_extension_value_round_trip() {
             "First line\nSecond line\n\nFourth line",
             vec![child],
         );
-        data.individuals[0].extra.push(x);
+        data.get_mut_at::<Individual>(0).unwrap().extra.push(x);
         let mut record = node(&mut data, "_LOC", "Sampletown\nNorth quarter", vec![]);
         record.xref = data.store_mut().intern_xref("@L1@");
-        data.extra.push(record);
+        data.push(Record::Other(Box::new(record)));
 
         let (written, reread) = round_trip(&data, target);
         for expected in [
@@ -444,10 +444,10 @@ fn long_extension_value_round_trip() {
     let mut data = sample("5.5.1");
     let child = node(&mut data, "_Y", &long, vec![]);
     let x = node(&mut data, "_X", &long, vec![child]);
-    data.individuals[0].extra.push(x);
+    data.get_mut_at::<Individual>(0).unwrap().extra.push(x);
     let mut record = node(&mut data, "_LOC", &long, vec![]);
     record.xref = data.store_mut().intern_xref("@L1@");
-    data.extra.push(record);
+    data.push(Record::Other(Box::new(record)));
 
     let (written, reread) = round_trip(&data, GedcomVersion::V5_5_1);
     assert!(written.contains("\n2 CONC "), "{written}");
@@ -487,7 +487,7 @@ fn extension_value_continuations_are_read_into_the_value() {
 0 TRLR";
 
     let check = |data: &Dataset| {
-        let extra = &data.individuals[0].extra;
+        let extra = &data.individuals()[0].extra;
         let x = &extra[0];
         assert_eq!(tag(data, x), "_X");
         assert_eq!(payload(data, x).as_deref(), Some("First part\nSecond line"));
@@ -511,7 +511,7 @@ fn extension_value_continuations_are_read_into_the_value() {
         assert_eq!(mili.children.len(), 1, "{mili:?}");
         assert_eq!(tag(data, &mili.children[0]), "PLAC");
 
-        let loc = &data.extra[0];
+        let loc = &data.extra()[0];
         assert_eq!(loc.xref.map(|x| data.store().xref(x)), Some("@L1@"));
         assert_eq!(
             payload(data, loc).as_deref(),
@@ -537,7 +537,7 @@ fn valueless_extension_tag_at_end_of_file() {
         "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 _X\n",
     ] {
         let data = Dataset::parse(original);
-        let x = &data.individuals[0].extra[0];
+        let x = &data.individuals()[0].extra[0];
         assert_eq!(tag(&data, x), "_X");
         assert_eq!(payload(&data, x), None);
     }

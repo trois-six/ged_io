@@ -7,7 +7,7 @@
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let text = "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 NAME Ann /Example/\n0 TRLR\n";
 //! let data = GedcomBuilder::new().max_file_size(50_000_000).build_from_str(text)?;
-//! assert_eq!(data.individuals[0].full_name(&data).as_deref(), Some("Ann Example"));
+//! assert_eq!(data.individuals()[0].full_name(&data).as_deref(), Some("Ann Example"));
 //! # Ok(())
 //! # }
 //! ```
@@ -140,7 +140,7 @@ impl GedcomBuilder {
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let data = GedcomBuilder::new()
     ///     .build_from_bytes(b"0 HEAD\r1 CHAR ANSI\r0 @I1@ INDI\r1 NAME Ren\xE9e /Example/\r0 TRLR\r")?;
-    /// assert_eq!(data.individuals[0].full_name(&data).as_deref(), Some("Renée Example"));
+    /// assert_eq!(data.individuals()[0].full_name(&data).as_deref(), Some("Renée Example"));
     /// # Ok(())
     /// # }
     /// ```
@@ -194,7 +194,7 @@ impl GedcomBuilder {
     /// use ged_io::GedcomBuilder;
     ///
     /// let data = GedcomBuilder::new().build_from_gedzip(std::fs::File::open("family.gdz")?)?;
-    /// println!("{} individuals", data.individuals.len());
+    /// println!("{} individuals", data.individuals().len());
     /// # Ok(())
     /// # }
     /// ```

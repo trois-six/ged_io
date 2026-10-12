@@ -55,6 +55,27 @@ impl super::relocate::Relocate for NoteContent {
     }
 }
 
+impl super::pointers::Pointers for NoteContent {
+    fn own(&self) -> Option<XrefId> {
+        match self {
+            NoteContent::Shared(id) => Some(*id),
+            NoteContent::Text(_) => None,
+        }
+    }
+
+    fn each(&self, f: &mut dyn FnMut(XrefId)) {
+        if let NoteContent::Shared(id) = self {
+            f(*id);
+        }
+    }
+
+    fn map(&mut self, f: &mut dyn FnMut(XrefId) -> XrefId) {
+        if let NoteContent::Shared(id) = self {
+            *id = f(*id);
+        }
+    }
+}
+
 #[cfg(feature = "serde")]
 impl super::serde::SerializeIn for NoteContent {
     fn serialize_in<S: ::serde::Serializer>(

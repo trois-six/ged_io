@@ -33,7 +33,7 @@ use crate::writer::{special_bytes, LINE_FEED};
 /// use ged_io::model::{Dataset, Text};
 ///
 /// let data = Dataset::parse("0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @N1@ SNOTE Shared\n1 CONT text\n0 TRLR\n");
-/// let text = &data.notes[0].text;
+/// let text = &data.notes()[0].text;
 /// assert_eq!(text.to_str(&data), "Shared\ntext");
 /// assert_eq!(text.chunks(&data).collect::<Vec<_>>(), ["Shared", "\n", "text"]);
 /// assert_eq!(Text::from("Shared").to_str(&data), "Shared");
@@ -416,6 +416,18 @@ pub(crate) struct XrefTable {
     valid: Vec<u8>,
     /// `0`: empty; otherwise the hash (high half) and the id (low half).
     slots: Vec<u64>,
+    /// The identifiers renamed ([`XrefTable::rename`]), when any is.
+    renamed: Option<Box<Renamed>>,
+}
+
+/// The texts [`XrefTable::rename`] gave identifiers.
+#[derive(Clone, Default)]
+struct Renamed {
+    /// The texts, one after the other.
+    names: String,
+    /// The text of each renamed id, by index, as its span of `names`: the
+    /// others are where [`XrefTable::ends`] says.
+    spans: std::collections::HashMap<u32, (u32, u32)>,
 }
 
 /// [`XrefTable::valid`]: a valid 5.5.1 identifier.
@@ -446,13 +458,36 @@ fn hash(text: &str) -> u32 {
 
 impl XrefTable {
     /// The text of the identifier at `index`.
+    #[inline]
     fn name(&self, index: usize) -> Option<&str> {
+        if let Some(renamed) = &self.renamed {
+            return self.renamed_name(renamed, index);
+        }
+        self.read_name(index)
+    }
+
+    /// The text `index` was read with (or interned with).
+    #[inline]
+    fn read_name(&self, index: usize) -> Option<&str> {
         let end = *self.ends.get(index)? as usize;
         let start = index
             .checked_sub(1)
             .and_then(|i| self.ends.get(i))
             .map_or(0, |&e| e as usize);
         self.names.get(start..end)
+    }
+
+    /// [`XrefTable::name`] once identifiers were renamed.
+    #[cold]
+    #[inline(never)]
+    fn renamed_name<'a>(&'a self, renamed: &'a Renamed, index: usize) -> Option<&'a str> {
+        match u32::try_from(index)
+            .ok()
+            .and_then(|i| renamed.spans.get(&i))
+        {
+            Some(&(start, end)) => renamed.names.get(start as usize..end as usize),
+            None => self.read_name(index),
+        }
     }
 
     /// The slot of `text`: where it is, or the empty slot it would take.
@@ -504,6 +539,83 @@ impl XrefTable {
         Some(id)
     }
 
+    /// Gives id `id` the text `text`, which must differ from its own: the
+    /// index then finds `id` by `text`, no longer by its old text. When
+    /// another id has `text` (the caller makes sure nothing uses it), that
+    /// id is found no more: it keeps its text, but `text` is `id`'s.
+    /// `false` when the table cannot take more text (4 GiB).
+    pub(crate) fn rename(&mut self, id: XrefId, text: &str) -> bool {
+        let Some(old) = self.name(id.index()).map(str::to_owned) else {
+            return false;
+        };
+        let renamed = self.renamed.get_or_insert_with(Box::default);
+        let (Ok(start), Ok(end)) = (
+            u32::try_from(renamed.names.len()),
+            u32::try_from(renamed.names.len() + text.len()),
+        ) else {
+            return false;
+        };
+        let old_hash = hash(&old);
+        if let (at, Some(found)) = self.slot(&old, old_hash) {
+            if found == id {
+                self.remove_slot(at);
+            }
+        }
+        if let Some(renamed) = self.renamed.as_deref_mut() {
+            renamed.names.push_str(text);
+            if let Ok(index) = u32::try_from(id.index()) {
+                renamed.spans.insert(index, (start, end));
+            }
+        }
+        if let Some(v) = self.valid.get_mut(id.index()) {
+            *v = validity(text);
+        }
+        if (self.ends.len() + 1) * 4 > self.slots.len() * 3 {
+            self.grow();
+        }
+        let new_hash = hash(text);
+        let (at, _) = self.slot(text, new_hash);
+        if let Some(slot) = self.slots.get_mut(at) {
+            *slot = (u64::from(new_hash) << 32) | u64::from(id.0.get());
+        }
+        true
+    }
+
+    /// Empties slot `at`, moving back the entries after it that it kept
+    /// from their place (linear probing's deletion).
+    fn remove_slot(&mut self, mut at: usize) {
+        let mask = self.slots.len().wrapping_sub(1);
+        if let Some(s) = self.slots.get_mut(at) {
+            *s = 0;
+        }
+        let mut next = at;
+        loop {
+            next = (next + 1) & mask;
+            let Some(&s) = self.slots.get(next) else {
+                return;
+            };
+            if s == 0 {
+                return;
+            }
+            let home = (s >> 32) as usize & mask;
+            // The entry stays when its home is cyclically in (at, next].
+            let stays = if at <= next {
+                at < home && home <= next
+            } else {
+                at < home || home <= next
+            };
+            if !stays {
+                if let Some(free) = self.slots.get_mut(at) {
+                    *free = s;
+                }
+                if let Some(moved) = self.slots.get_mut(next) {
+                    *moved = 0;
+                }
+                at = next;
+            }
+        }
+    }
+
     /// Doubles the index, at least 64 slots.
     fn grow(&mut self) {
         let len = (self.slots.len() * 2).max(64);
@@ -532,6 +644,10 @@ impl XrefTable {
 
     fn heap_size(&self) -> usize {
         self.names.capacity()
+            + self
+                .renamed
+                .as_ref()
+                .map_or(0, |r| r.names.capacity() + r.spans.capacity() * 12)
             + self.ends.capacity() * 4
             + self.valid.capacity()
             + self.slots.capacity() * 8
@@ -636,6 +752,28 @@ impl Store {
         self.xrefs.intern(xref)
     }
 
+    /// Gives identifier `id` the text `xref` ([`XrefTable::rename`]).
+    pub(crate) fn rename_xref(&mut self, id: XrefId, xref: &str) -> bool {
+        self.xrefs.rename(id, xref)
+    }
+
+    /// Whether `id` is an identifier of this store.
+    pub(crate) fn has_xref(&self, id: XrefId) -> bool {
+        id.index() < self.xrefs.len()
+    }
+
+    /// Whether identifier `id` is valid in 5.5.1 and in 7.x: what
+    /// [`Store::is_valid_xref`] answers for each grammar.
+    pub(crate) fn xref_validity(&self, id: XrefId) -> (bool, bool) {
+        self.xref_validity_at(id.index())
+    }
+
+    /// [`Store::xref_validity`] of the identifier at `index`.
+    pub(crate) fn xref_validity_at(&self, index: usize) -> (bool, bool) {
+        let v = self.xrefs.valid.get(index).copied().unwrap_or(0);
+        (v & VALID_V551 != 0, v & VALID_V7 != 0)
+    }
+
     /// The number of identifiers, pointers to no record included.
     #[must_use]
     pub fn xref_count(&self) -> usize {
@@ -686,10 +824,15 @@ impl Store {
 /// order) and tags: what their texts and ids resolve to.
 impl PartialEq for Store {
     fn eq(&self, other: &Self) -> bool {
+        let same_xrefs = if self.xrefs.renamed.is_none() && other.xrefs.renamed.is_none() {
+            self.xrefs.names == other.xrefs.names && self.xrefs.ends == other.xrefs.ends
+        } else {
+            self.xrefs.len() == other.xrefs.len()
+                && (0..self.xrefs.len()).all(|i| self.xrefs.name(i) == other.xrefs.name(i))
+        };
         self.input == other.input
             && self.pieces == other.pieces
-            && self.xrefs.names == other.xrefs.names
-            && self.xrefs.ends == other.xrefs.ends
+            && same_xrefs
             && self.tags == other.tags
     }
 }
@@ -795,6 +938,37 @@ mod tests {
         let made = store.intern_xref("@NEW@").unwrap();
         assert_eq!(store.xref(made), "@NEW@");
         assert_eq!(store.intern_xref("@I42@"), Some(ids[42]));
+    }
+
+    #[test]
+    fn identifiers_are_renamed_in_place() {
+        let text: String = (0..300).map(|i| format!("@I{i}@")).collect();
+        let mut store = Store::new(text);
+        let ids: Vec<XrefId> = (0..300)
+            .map(|i| store.intern_xref(&format!("@I{i}@")).unwrap())
+            .collect();
+        assert!(store.rename_xref(ids[7], "@P7@"));
+        assert_eq!(store.xref(ids[7]), "@P7@");
+        assert_eq!(store.find_xref("@P7@"), Some(ids[7]));
+        assert_eq!(store.find_xref("@I7@"), None);
+        // Every other identifier is still found, whatever the probing.
+        for (i, id) in ids.iter().enumerate().filter(|(i, _)| *i != 7) {
+            assert_eq!(store.find_xref(&format!("@I{i}@")), Some(*id), "{i}");
+        }
+        assert!(store.is_valid_xref(ids[7], &crate::version::V70));
+        assert!(store.rename_xref(ids[7], "@p7@"));
+        assert!(!store.is_valid_xref(ids[7], &crate::version::V70));
+        // Taking the text of an unused id: that id is no longer found.
+        let spare = store.intern_xref("@SPARE@").unwrap();
+        assert!(store.rename_xref(ids[8], "@SPARE@"));
+        assert_eq!(store.find_xref("@SPARE@"), Some(ids[8]));
+        assert_ne!(spare, ids[8]);
+        let copy = store.clone();
+        assert_eq!(copy, store);
+        // A new identifier after renames is interned once.
+        let made = store.intern_xref("@I7@").unwrap();
+        assert_eq!(store.intern_xref("@I7@"), Some(made));
+        assert_ne!(copy, store);
     }
 
     #[test]

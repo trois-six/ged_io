@@ -54,7 +54,7 @@ let mut data = Dataset::new(GedcomVersion::V5_5_1);
 let id = data.store_mut().intern_xref("@I1@").unwrap();
 let mut person = ged_io::model::Individual { xref: Some(id), ..Default::default() };
 person.notes.push(Note::text("@home and ann@example.com"));
-data.individuals.push(person);
+data.add(person).unwrap();
 
 // GEDCOM 5.5.1: every @ doubled
 let v551 = GedcomWriter::new().write_to_string(&data).unwrap();
@@ -84,7 +84,7 @@ let gedcom_7 = "\
     0 TRLR";
 
 let data = Dataset::parse(gedcom_7);
-assert_eq!(data.notes.len(), 1);
+assert_eq!(data.notes().len(), 1);
 let note = data.find_note("@N1@").unwrap();
 assert!(note.text.to_str(&data).contains("referenced"));
 ```
@@ -108,7 +108,7 @@ let gedcom_7 = "\
     0 TRLR";
 
 let data = Dataset::parse(gedcom_7);
-let schema = data.header.as_ref().unwrap().schema.as_ref().unwrap();
+let schema = data.header().unwrap().schema.as_ref().unwrap();
 assert_eq!(
     schema.tags[0].to_str(&data),
     "_CUSTOM http://example.com/gedcom-extensions/custom"
@@ -181,7 +181,7 @@ use ged_io::Dataset;
 use ged_io::model::OrdinanceKind;
 
 let data = Dataset::parse("0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 INIL\n2 DATE 15 MAR 1990\n2 TEMP SLAKE\n0 TRLR\n");
-let ordinance = &data.individuals[0].detail().ordinances[0];
+let ordinance = &data.individuals()[0].detail().ordinances[0];
 assert_eq!(ordinance.kind, OrdinanceKind::Initiatory);
 assert_eq!(ordinance.kind.tag(), "INIL");
 ```
@@ -237,7 +237,7 @@ use ged_io::Dataset;
 let data = Dataset::parse("0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @N1@ SNOTE Shared\n0 TRLR\n");
 
 if data.version().is_v7() {
-    for note in &data.notes {
+    for note in data.notes() {
         println!("Shared note: {}", note.text.to_str(&data));
     }
 }
@@ -284,14 +284,16 @@ use ged_io::{Dataset, GedcomVersion};
 let mut data = Dataset::new(GedcomVersion::V7_0);
 // Create a shared note from common text, and point to it.
 let id = data.store_mut().intern_xref("@N1@").unwrap();
-data.notes.push(SharedNote {
+data.add(SharedNote {
     xref: Some(id),
     text: "Common note text used in multiple places".into(),
     ..Default::default()
-});
+})
+.unwrap();
 let mut person = ged_io::model::Individual::default();
 person.notes.push(Note::shared(id));
-data.individuals.push(person);
+data.add(person).unwrap(); // checked: the note it points to is there
+assert_eq!(data.references(id), 1);
 assert!(data.dangling_references().is_empty());
 ```
 

@@ -623,6 +623,7 @@ impl<'de> Deserialize<'de> for Dataset {
                 }
                 store.shrink();
                 data.store = store;
+                data.reindex();
                 Ok(data)
             }
         }

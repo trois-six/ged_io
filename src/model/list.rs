@@ -52,6 +52,44 @@ impl<T> ThinVec<T> {
         self.0 = None;
     }
 
+    /// Removes and returns the item at `index`, shifting the items after
+    /// it.
+    ///
+    /// # Panics
+    ///
+    /// When `index` is out of bounds, as `Vec::remove`.
+    pub fn remove(&mut self, index: usize) -> T {
+        let mut items = std::mem::take(self).into_vec();
+        let item = items.remove(index);
+        *self = items.into();
+        item
+    }
+
+    /// Keeps the items for which `keep` is true, in order.
+    pub fn retain(&mut self, mut keep: impl FnMut(&T) -> bool) {
+        self.retain_mut(|item| keep(item));
+    }
+
+    /// Keeps the items for which `keep` is true, in order, letting it edit
+    /// each.
+    pub fn retain_mut(&mut self, mut keep: impl FnMut(&mut T) -> bool) {
+        match self.0.as_deref_mut() {
+            None => {}
+            Some(Inner::One(item)) => {
+                if !keep(item) {
+                    self.0 = None;
+                }
+            }
+            Some(Inner::Many(items)) => {
+                let before = items.len();
+                items.retain_mut(keep);
+                if items.len() < before {
+                    *self = std::mem::take(items).into();
+                }
+            }
+        }
+    }
+
     /// The items, as a `Vec`.
     #[must_use]
     pub fn into_vec(self) -> Vec<T> {
@@ -157,6 +195,18 @@ mod tests {
         assert_eq!(&*one, [8]);
         one.clear();
         assert!(one.is_empty());
+        let mut list: ThinVec<u8> = vec![1, 2, 3, 4].into();
+        list.retain(|&i| i % 2 == 0);
+        assert_eq!(&*list, [2, 4]);
+        assert_eq!(list.remove(0), 2);
+        assert_eq!(&*list, [4]);
+        list.retain_mut(|i| {
+            *i += 1;
+            true
+        });
+        assert_eq!(&*list, [5]);
+        list.retain(|_| false);
+        assert!(list.is_empty());
         assert_eq!(std::mem::size_of::<ThinVec<String>>(), 8);
     }
 }

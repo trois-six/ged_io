@@ -151,12 +151,15 @@ impl Relocate for Extra {
     }
 }
 
-/// Implements [`Relocate`] for types that hold nothing of a store.
+/// Implements [`Relocate`] for types that hold nothing of a store, and
+/// [`Pointers`](super::pointers::Pointers): they hold no pointer either.
 macro_rules! relocate_nothing {
     ($($ty:ty),* $(,)?) => {$(
         impl $crate::model::relocate::Relocate for $ty {
             fn relocate(&mut self, _r: &mut $crate::model::relocate::Relocation<'_>) {}
         }
+
+        impl $crate::model::pointers::Pointers for $ty {}
     )*};
 }
 pub(crate) use relocate_nothing;

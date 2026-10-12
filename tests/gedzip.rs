@@ -38,8 +38,8 @@ fn a_dataset_round_trips_through_an_archive() {
     let bytes = write_gedzip(&data).unwrap();
     let read = read_gedzip(&bytes).unwrap();
     assert_eq!(read.version(), GedcomVersion::V7_0);
-    assert_eq!(read.individuals.len(), 2);
-    assert_eq!(read.families.len(), 1);
+    assert_eq!(read.individuals().len(), 2);
+    assert_eq!(read.families().len(), 1);
     assert_eq!(read.to_structures(), Dataset::parse(FAMILY).to_structures());
     let ann = read.find_individual("@I1@").unwrap();
     assert_eq!(ann.full_name(&read).as_deref(), Some("Ann Example"));
@@ -72,7 +72,10 @@ fn the_reader_and_writer_types() {
 
     let read = reader.read_dataset(&GedcomBuilder::new()).unwrap();
     // The FILE reference of the dataset finds its entry.
-    let path = read.multimedia[0].files[0].path.to_str(&read).into_owned();
+    let path = read.multimedia()[0].files[0]
+        .path
+        .to_str(&read)
+        .into_owned();
     assert_eq!(reader.read_media_file(&path).unwrap(), b"JPEG BYTES");
 
     // gedcom.ged holds what the default writer writes, its byte order mark
@@ -96,7 +99,7 @@ fn an_archive_is_written_in_any_version() {
     let bytes = writer.finish().unwrap().into_inner();
     let read = read_gedzip(&bytes).unwrap();
     assert_eq!(read.version(), GedcomVersion::V7_1);
-    assert_eq!(read.individuals.len(), 2);
+    assert_eq!(read.individuals().len(), 2);
 }
 
 #[test]
@@ -195,7 +198,7 @@ fn the_builder_limit_and_strict_mode_apply_to_the_archive() {
     ));
     // Leniently, the value is kept.
     let lenient = read_gedzip(&raw).unwrap();
-    assert!(lenient.individuals[0]
+    assert!(lenient.individuals()[0]
         .sex
         .as_ref()
         .is_some_and(|s| !s.is_known()));

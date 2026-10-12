@@ -7,7 +7,8 @@ use std::io::BufReader;
 
 use ged_io::encoding::{decode, encode, DecodeReader, GedcomEncoding};
 use ged_io::model::{
-    Address, CharacterSet, Dataset, EventKind, Note, NoteContent, RecordRef, Sex, Text,
+    Address, CharacterSet, Dataset, EventKind, Individual, Multimedia, Note, NoteContent,
+    RecordRef, Repository, Sex, SharedNote, Source, Text,
 };
 use ged_io::tree::Structure;
 use ged_io::{GedcomBuilder, GedcomError, GedcomStreamParser, GedcomVersion, GedcomWriter};
@@ -29,7 +30,10 @@ fn stream(bytes: &[u8]) -> Dataset {
 
 /// The first name of the first individual, as written.
 fn name(data: &Dataset) -> String {
-    data.individuals[0].names[0].value.to_str(data).into_owned()
+    data.individuals()[0].names[0]
+        .value
+        .to_str(data)
+        .into_owned()
 }
 
 /// The text of an inline note.
@@ -104,11 +108,11 @@ fn every_input_reads_to_the_same_dataset() {
 fn simple_fixture_is_read() {
     let text = std::fs::read_to_string("tests/fixtures/simple.ged").unwrap();
     let data = Dataset::parse(text);
-    assert_eq!(data.individuals.len(), 3);
-    assert_eq!(data.families.len(), 1);
-    assert_eq!(data.submitters.len(), 1);
+    assert_eq!(data.individuals().len(), 3);
+    assert_eq!(data.families().len(), 1);
+    assert_eq!(data.submitters().len(), 1);
 
-    let header = data.header.as_ref().unwrap();
+    let header = data.header().unwrap();
     assert_eq!(header.charset.as_ref().unwrap().value, CharacterSet::Ascii);
     assert_eq!(
         header.submitter.map(|s| data.store().xref(s)),
@@ -117,12 +121,12 @@ fn simple_fixture_is_read() {
     assert_eq!(data.declared_version(), Some("5.5"));
 
     assert_eq!(name(&data), "/Father/");
-    let address = data.submitters[0].address.as_ref().unwrap();
+    let address = data.submitters()[0].address.as_ref().unwrap();
     assert_eq!(
         address.value.to_str(&data),
         "Submitters address\naddress continued here"
     );
-    let events = &data.families[0].events;
+    let events = &data.families()[0].events;
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].kind, EventKind::Marriage);
     assert_eq!(
@@ -135,13 +139,13 @@ fn simple_fixture_is_read() {
 fn large_fixture_is_read() {
     let bytes = std::fs::read("tests/fixtures/washington.ged").unwrap();
     let data = Dataset::from_bytes(bytes);
-    assert_eq!(data.individuals.len(), 538);
-    assert_eq!(data.families.len(), 278);
+    assert_eq!(data.individuals().len(), 538);
+    assert_eq!(data.families().len(), 278);
     assert_eq!(data.declared_version(), Some("5.5.1"));
     assert_eq!(data.version(), GedcomVersion::V5_5_1);
-    let header = data.header.as_ref().unwrap();
+    let header = data.header().unwrap();
     assert_eq!(header.charset.as_ref().unwrap().value, CharacterSet::Utf8);
-    let events = &data.families[0].events;
+    let events = &data.families()[0].events;
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].kind, EventKind::Marriage);
     assert!(events[0].date.is_some());
@@ -156,15 +160,15 @@ fn every_record_type_is_read_with_its_identifier() {
          0 @N1@ NOTE A shared note\n0 TRLR\n",
     );
     let xref = |id| data.store().xref(id);
-    assert_eq!(data.submitters.len(), 1);
-    assert_eq!(xref(data.submitters[0].xref.unwrap()), "@U1@");
-    assert_eq!(xref(data.individuals[0].xref.unwrap()), "@I1@");
-    assert_eq!(xref(data.families[0].xref.unwrap()), "@F1@");
-    assert_eq!(xref(data.repositories[0].xref.unwrap()), "@R1@");
-    assert_eq!(xref(data.sources[0].xref.unwrap()), "@S1@");
-    assert_eq!(xref(data.multimedia[0].xref.unwrap()), "@M1@");
-    assert_eq!(xref(data.notes[0].xref.unwrap()), "@N1@");
-    assert!(data.extra.is_empty());
+    assert_eq!(data.submitters().len(), 1);
+    assert_eq!(xref(data.submitters()[0].xref.unwrap()), "@U1@");
+    assert_eq!(xref(data.individuals()[0].xref.unwrap()), "@I1@");
+    assert_eq!(xref(data.families()[0].xref.unwrap()), "@F1@");
+    assert_eq!(xref(data.repositories()[0].xref.unwrap()), "@R1@");
+    assert_eq!(xref(data.sources()[0].xref.unwrap()), "@S1@");
+    assert_eq!(xref(data.multimedia()[0].xref.unwrap()), "@M1@");
+    assert_eq!(xref(data.notes()[0].xref.unwrap()), "@N1@");
+    assert!(data.extra().is_empty());
     // The header and seven records; the trailer is not a record.
     assert_eq!(data.records().count(), 8);
 }
@@ -180,7 +184,7 @@ fn individuals_and_families_are_read() {
     assert_eq!(person.names[0].value.to_str(&data), "Ann Example");
     assert_eq!(person.sex, Some(Sex::Male));
 
-    let family = &data.families[0];
+    let family = &data.families()[0];
     let xref = |id| data.store().xref(id);
     assert_eq!(xref(family.xref.unwrap()), "@F1@");
     assert_eq!(family.husband_id().map(xref), Some("@PERSON1@"));
@@ -222,7 +226,7 @@ fn file_size_limit_refuses_a_larger_input() {
 fn minimal_file_conforms() {
     assert_strict_accepts(MINIMAL_7);
     let data = Dataset::parse(MINIMAL_7);
-    assert!(data.header.is_some());
+    assert!(data.header().is_some());
     assert_eq!(data.record_count(), 1);
     assert_eq!(data.version(), GedcomVersion::V7_0);
 }
@@ -246,9 +250,9 @@ fn missing_header_or_trailer_keeps_the_records() {
         "0 @I1@ INDI\n1 NAME Ann /Example/",
     ] {
         let data = Dataset::parse(text);
-        assert_eq!(data.individuals.len(), 1, "{text:?}");
+        assert_eq!(data.individuals().len(), 1, "{text:?}");
         assert_eq!(name(&data), "Ann /Example/", "{text:?}");
-        assert!(data.extra.is_empty(), "{text:?}");
+        assert!(data.extra().is_empty(), "{text:?}");
     }
     // A file without a header does not conform.
     assert_strict_rejects("0 @I1@ INDI\n1 NAME Ann /Example/\n0 TRLR\n");
@@ -258,7 +262,7 @@ fn missing_header_or_trailer_keeps_the_records() {
 fn empty_or_blank_input_is_an_empty_dataset() {
     for text in ["", "   \n\n  ", "\n\r\n\t\n"] {
         let data = Dataset::parse(text);
-        assert!(data.header.is_none(), "{text:?}");
+        assert!(data.header().is_none(), "{text:?}");
         assert_eq!(data.record_count(), 0, "{text:?}");
         assert_eq!(read(text.as_bytes()), data, "{text:?}");
     }
@@ -268,8 +272,11 @@ fn empty_or_blank_input_is_an_empty_dataset() {
 fn unknown_record_is_kept() {
     let text = "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 UNKNOWN_TOP_LEVEL_TAG\n0 TRLR\n";
     let data = Dataset::parse(text);
-    assert_eq!(data.extra.len(), 1);
-    assert_eq!(data.store().tag(data.extra[0].tag), "UNKNOWN_TOP_LEVEL_TAG");
+    assert_eq!(data.extra().len(), 1);
+    assert_eq!(
+        data.store().tag(data.extra()[0].tag),
+        "UNKNOWN_TOP_LEVEL_TAG"
+    );
     assert!(write(&data).contains("UNKNOWN_TOP_LEVEL_TAG"));
     assert_strict_rejects(text);
 }
@@ -278,7 +285,7 @@ fn unknown_record_is_kept() {
 fn unparsable_date_is_kept_as_written() {
     let text = "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 BIRT\n2 DATE not-valid\n0 TRLR\n";
     let data = Dataset::parse(text);
-    let birth = data.individuals[0].birth().unwrap();
+    let birth = data.individuals()[0].birth().unwrap();
     assert_eq!(
         birth.date.as_ref().unwrap().value.to_str(&data),
         "not-valid"
@@ -290,7 +297,7 @@ fn unparsable_date_is_kept_as_written() {
 fn reference_to_a_missing_record_is_kept_and_reported() {
     let text = "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @F1@ FAM\n1 HUSB @I999@\n0 TRLR\n";
     let data = Dataset::parse(text);
-    let husband = data.families[0].husband_id().unwrap();
+    let husband = data.families()[0].husband_id().unwrap();
     assert_eq!(data.store().xref(husband), "@I999@");
     let dangling = data.dangling_references();
     assert_eq!(dangling.len(), 1);
@@ -307,7 +314,7 @@ fn duplicate_identifiers_keep_both_records_and_find_the_first() {
     let text = "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 NAME Ann /Example/\n\
                 0 @I1@ INDI\n1 NAME Bob /Example/\n0 TRLR\n";
     let data = Dataset::parse(text);
-    assert_eq!(data.individuals.len(), 2);
+    assert_eq!(data.individuals().len(), 2);
     let found = data.find_individual("@I1@").unwrap();
     assert_eq!(found.names[0].value.to_str(&data), "Ann /Example/");
     assert_strict_rejects(text);
@@ -316,9 +323,9 @@ fn duplicate_identifiers_keep_both_records_and_find_the_first() {
 #[test]
 fn family_without_members_is_read() {
     let data = Dataset::parse("0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @F1@ FAM\n0 TRLR\n");
-    assert_eq!(data.families.len(), 1);
-    assert!(data.families[0].husband.is_none());
-    assert!(data.families[0].children.is_empty());
+    assert_eq!(data.families().len(), 1);
+    assert!(data.families()[0].husband.is_none());
+    assert!(data.families()[0].children.is_empty());
 }
 
 // ----------------------------------------------------------------------------
@@ -368,7 +375,7 @@ fn enc_ansel_mark_split_by_conc() {
     let bytes = b"0 HEAD\r\n1 CHAR ANSEL\r\n0 @I1@ INDI\r\n1 NOTE Andr\xE2\r\n2 CONC e lives here\r\n0 TRLR\r\n";
     let data = read(bytes);
     assert_eq!(
-        note_text(&data, &data.individuals[0].notes[0]),
+        note_text(&data, &data.individuals()[0].notes[0]),
         "André lives here"
     );
     assert_eq!(stream(bytes).to_structures(), data.to_structures());
@@ -464,8 +471,8 @@ fn eol_crlf_lfcr_and_mixed() {
 fn blank_and_whitespace_only_lines_are_skipped() {
     let bytes = b"\n0 HEAD\n1 GEDC\n2 VERS 7.0\n\n0 @I1@ INDI\n  \t\n1 SEX M\n\r\n0 TRLR\n\n";
     let data = read(bytes);
-    assert_eq!(data.individuals[0].sex, Some(Sex::Male));
-    assert!(data.individuals[0].extra.is_empty());
+    assert_eq!(data.individuals()[0].sex, Some(Sex::Male));
+    assert!(data.individuals()[0].extra.is_empty());
     assert_eq!(stream(bytes).to_structures(), data.to_structures());
 }
 
@@ -475,7 +482,7 @@ fn empty_cont_with_trailing_delimiter_in_crlf() {
     let bytes = b"0 HEAD\r\n1 GEDC\r\n2 VERS 5.5.1\r\n0 @I1@ INDI\r\n1 NOTE first\r\n2 CONT \r\n2 CONT third\r\n0 TRLR\r\n";
     let data = read(bytes);
     assert_eq!(
-        note_text(&data, &data.individuals[0].notes[0]),
+        note_text(&data, &data.individuals()[0].notes[0]),
         "first\n\nthird"
     );
     assert_eq!(stream(bytes).to_structures(), data.to_structures());
@@ -514,7 +521,7 @@ fn encoding_and_terminator_matrix() {
                 "{label} {eol:?}"
             );
             // Only the declared character set differs.
-            data.header.as_mut().unwrap().charset = None;
+            data.header_mut().unwrap().charset = None;
             let structures = data.to_structures();
             match &reference {
                 None => reference = Some((structures, data)),
@@ -525,7 +532,7 @@ fn encoding_and_terminator_matrix() {
     let (_, r) = reference.unwrap();
     assert_eq!(name(&r), "Zoé /Straße/");
     assert_eq!(
-        note_text(&r, &r.individuals[0].notes[0]),
+        note_text(&r, &r.individuals()[0].notes[0]),
         "Première ligne\nseconde ligne"
     );
 }
@@ -542,7 +549,7 @@ fn spaces_after_the_conc_and_cont_delimiter_are_kept() {
                     2 CONT    indented line\n0 TRLR";
     for data in [Dataset::parse(original), stream(original.as_bytes())] {
         assert_eq!(
-            note_text(&data, &data.families[0].notes[0]),
+            note_text(&data, &data.families()[0].notes[0]),
             "first second\n   indented line"
         );
     }
@@ -592,7 +599,7 @@ fn long_text_round_trip_keeps_spaces_at_conc_splits() {
 
         let data2 = Dataset::parse(written);
         assert_eq!(
-            note_text(&data2, &data2.families[0].notes[0]),
+            note_text(&data2, &data2.families()[0].notes[0]),
             text,
             "word length {word_len}"
         );
@@ -606,7 +613,7 @@ fn event_and_attribute_values_are_continued() {
                     1 OCCU Long\n2 CONT second line\n2 DATE 1900\n1 BIRT Born at home\n\
                     2 CONC  during a storm\n2 DATE 1 JAN 1900\n0 TRLR";
     let data = Dataset::parse(original);
-    let events = &data.individuals[0].events;
+    let events = &data.individuals()[0].events;
     assert_eq!(events[0].kind, EventKind::Title);
     assert_eq!(events[0].value.to_str(&data), "Duke of Somewhere");
     assert_eq!(events[1].kind, EventKind::Occupation);
@@ -622,10 +629,10 @@ fn extension_tags_after_continued_text_are_substructures() {
     let original = "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @N1@ SNOTE First\n1 CONT second\n1 _X kept\n\
                     0 @I1@ INDI\n1 NOTE a\n2 CONT b\n2 _Y kept\n0 TRLR";
     let data = Dataset::parse(original);
-    let shared = &data.notes[0];
+    let shared = &data.notes()[0];
     assert_eq!(shared.text.to_str(&data), "First\nsecond");
     assert_eq!(data.store().tag(shared.extra[0].tag), "_X");
-    let note = &data.individuals[0].notes[0];
+    let note = &data.individuals()[0].notes[0];
     assert_eq!(note_text(&data, note), "a\nb");
     assert_eq!(data.store().tag(note.extra[0].tag), "_Y");
 }
@@ -650,20 +657,22 @@ fn long_values_of_any_tag_round_trip() {
          2 RELA x\n1 FACT x\n2 TYPE x\n0 @I2@ INDI\n0 @M1@ OBJE\n1 FILE a.jpg\n2 FORM jpg\n\
          2 TITL x\n0 @R1@ REPO\n1 NAME x\n0 TRLR",
     );
-    let person = &mut data.individuals[0];
-    person.events[0].detail_mut().classification = Some(Text::new(event_type.as_str()));
-    person.events[0].detail_mut().agency = Some(Text::new(agency.as_str()));
-    person.detail_mut().associations[0].relation = Some(Text::new(relation.as_str()));
-    person.events[1].detail_mut().classification = Some(Text::new(multi_line_type));
-    data.multimedia[0].files[0].title = Some(Text::new(title.as_str()));
-    data.repositories[0].name = Some(Text::new(repo_name.as_str()));
+    {
+        let mut person = data.get_mut_at::<Individual>(0).unwrap();
+        person.events[0].detail_mut().classification = Some(Text::new(event_type.as_str()));
+        person.events[0].detail_mut().agency = Some(Text::new(agency.as_str()));
+        person.detail_mut().associations[0].relation = Some(Text::new(relation.as_str()));
+        person.events[1].detail_mut().classification = Some(Text::new(multi_line_type));
+    }
+    data.get_mut_at::<Multimedia>(0).unwrap().files[0].title = Some(Text::new(title.as_str()));
+    data.get_mut_at::<Repository>(0).unwrap().name = Some(Text::new(repo_name.as_str()));
 
     let written = write(&data);
     assert!(written.contains(" CONC "), "{written}");
     assert!(written.contains("3 CONT Second line"), "{written}");
 
     let reread = Dataset::parse(written);
-    let person = &reread.individuals[0];
+    let person = &reread.individuals()[0];
     let t = |x: Option<&Text>| text(&reread, x);
     assert_eq!(
         t(person.events[0].detail().classification.as_ref()),
@@ -678,8 +687,11 @@ fn long_values_of_any_tag_round_trip() {
         t(person.events[1].detail().classification.as_ref()).as_deref(),
         Some(multi_line_type)
     );
-    assert_eq!(t(reread.multimedia[0].files[0].title.as_ref()), Some(title));
-    assert_eq!(t(reread.repositories[0].name.as_ref()), Some(repo_name));
+    assert_eq!(
+        t(reread.multimedia()[0].files[0].title.as_ref()),
+        Some(title)
+    );
+    assert_eq!(t(reread.repositories()[0].name.as_ref()), Some(repo_name));
 }
 
 #[test]
@@ -691,8 +703,8 @@ fn note_record_continuations_round_trip() {
     let expected = "Ann Example was born Ann Sample. Her last name was legally\n\
                     changed to Example in 1950 in Sampleton.";
     let data = Dataset::parse(sample);
-    assert_eq!(data.notes.len(), 1);
-    assert_eq!(data.notes[0].text.to_str(&data), expected);
+    assert_eq!(data.notes().len(), 1);
+    assert_eq!(data.notes()[0].text.to_str(&data), expected);
 
     let written = GedcomWriter::new()
         .gedcom_version(GedcomVersion::V5_5_1)
@@ -703,7 +715,7 @@ fn note_record_continuations_round_trip() {
         "{written}"
     );
     let reread = Dataset::parse(written);
-    assert_eq!(reread.notes[0].text.to_str(&reread), expected);
+    assert_eq!(reread.notes()[0].text.to_str(&reread), expected);
 }
 
 #[test]
@@ -715,10 +727,11 @@ fn carriage_returns_in_values_are_written_as_line_breaks() {
          1 NOTE placeholder\n0 @S1@ SOUR\n1 TITL Parish register\n\
          0 @R1@ REPO\n1 NAME Example archive\n0 TRLR",
     );
-    data.individuals[0].notes[0].content =
+    data.get_mut_at::<Individual>(0).unwrap().notes[0].content =
         NoteContent::Text(Text::new("First line\rSecond line\r\nThird line"));
-    data.sources[0].publication = Some(Text::new("Example Press\r\nSample Town"));
-    data.repositories[0].address = Some(Address {
+    data.get_mut_at::<Source>(0).unwrap().publication =
+        Some(Text::new("Example Press\r\nSample Town"));
+    data.get_mut_at::<Repository>(0).unwrap().address = Some(Address {
         value: Text::new("1 Example Street\rSample Town"),
         ..Address::default()
     });
@@ -748,14 +761,14 @@ fn carriage_returns_in_values_are_written_as_line_breaks() {
 
         let reread = Dataset::parse(written);
         assert_eq!(
-            note_text(&reread, &reread.individuals[0].notes[0]),
+            note_text(&reread, &reread.individuals()[0].notes[0]),
             "First line\nSecond line\nThird line"
         );
         assert_eq!(
-            text(&reread, reread.sources[0].publication.as_ref()).as_deref(),
+            text(&reread, reread.sources()[0].publication.as_ref()).as_deref(),
             Some("Example Press\nSample Town")
         );
-        let address = reread.repositories[0].address.as_ref().unwrap();
+        let address = reread.repositories()[0].address.as_ref().unwrap();
         assert_eq!(
             address.value.to_str(&reread),
             "1 Example Street\nSample Town"
@@ -766,7 +779,7 @@ fn carriage_returns_in_values_are_written_as_line_breaks() {
 #[test]
 fn carriage_returns_in_a_shared_note_record_are_written_as_line_breaks() {
     let mut data = Dataset::parse("0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @N1@ SNOTE placeholder\n0 TRLR");
-    data.notes[0].text = Text::new("First line\r\n\r\nThird line\r");
+    data.get_mut_at::<SharedNote>(0).unwrap().text = Text::new("First line\r\n\r\nThird line\r");
 
     let written = write(&data);
     assert!(!written.contains('\r'), "{written:?}");
@@ -776,7 +789,7 @@ fn carriage_returns_in_a_shared_note_record_are_written_as_line_breaks() {
     );
     let reread = Dataset::parse(written);
     assert_eq!(
-        reread.notes[0].text.to_str(&reread),
+        reread.notes()[0].text.to_str(&reread),
         "First line\n\nThird line\n"
     );
 }
@@ -794,7 +807,7 @@ fn leading_at_sign_round_trip() {
 
     let data1 = Dataset::parse(original);
     assert_eq!(
-        note_text(&data1, &data1.families[0].notes[0]),
+        note_text(&data1, &data1.families()[0].notes[0]),
         "@home in the village\n@noon every day"
     );
 
