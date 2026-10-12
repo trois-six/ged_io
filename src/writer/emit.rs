@@ -95,6 +95,62 @@ impl<'w> LineSink<'w> {
         }
     }
 
+    /// A sink for the lines of one record, written as `self` writes them,
+    /// in UTF-8 and in memory, where a line that needs a repair fails
+    /// ([`RepairPolicy::Error`]).
+    pub(crate) fn record_lines(&self) -> LineSink<'static> {
+        LineSink::new(
+            None,
+            self.eol,
+            self.max_line,
+            OutputEncoding::Utf8,
+            RepairPolicy::Error,
+        )
+    }
+
+    /// The output encoding.
+    pub(crate) fn encoding(&self) -> OutputEncoding {
+        self.encoding
+    }
+
+    /// The UTF-8 text written so far (UTF-8 output) or of the open line.
+    #[cfg(debug_assertions)]
+    pub(crate) fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Empties a sink without a writer.
+    pub(crate) fn clear(&mut self) {
+        self.text.clear();
+        self.buf.clear();
+        self.line_start = 0;
+        self.line_no = 1;
+        self.repairs.clear();
+        self.source_line = 0;
+    }
+
+    /// Appends the lines of `lines` (a sink of [`LineSink::record_lines`]),
+    /// as if each was written here.
+    pub(crate) fn append(&mut self, lines: &LineSink<'_>) -> Result<(), WriteError> {
+        debug_assert_eq!(lines.line_start, lines.text.len());
+        if self.encoding != OutputEncoding::Utf8 {
+            // Encoded line by line, as they are written here.
+            for line in lines.text.split_inclusive(self.eol) {
+                self.text
+                    .push_str(line.strip_suffix(self.eol).unwrap_or(line));
+                self.end_line()?;
+            }
+            return Ok(());
+        }
+        self.text.push_str(&lines.text);
+        self.line_start = self.text.len();
+        self.line_no += lines.line_no - 1;
+        if self.writer.is_some() && self.text.len() >= FLUSH_AT {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
     /// A sink that keeps everything in memory, LF-terminated in UTF-8, for
     /// `rules` (tests).
     #[cfg(test)]
@@ -254,6 +310,15 @@ impl<'w> LineSink<'w> {
         Ok(())
     }
 
+    /// The bytes written, encoded, for a sink without a writer.
+    pub(crate) fn into_bytes(self) -> Vec<u8> {
+        if self.encoding == OutputEncoding::Utf8 {
+            self.text.into_bytes()
+        } else {
+            self.buf
+        }
+    }
+
     /// The text written, for a UTF-8 sink without a writer.
     pub(crate) fn into_string(self) -> String {
         debug_assert_eq!(self.encoding, OutputEncoding::Utf8);
@@ -380,6 +445,38 @@ pub(crate) fn emit_known(
             let special = special.unwrap_or_else(|| special_bytes(text));
             emit_text_special(rules, sink, level, text, special)
         }
+    }
+}
+
+/// [`emit_known`] of a structure whose tag is in the version's grammar and
+/// whose identifier, on a record only, is valid; its text payload has the
+/// [`special_bytes`] `special`. A pointer is written as it is: the caller
+/// makes sure that it names a record (whose identifier is valid), `@VOID@`
+/// in 7.x or, in 5.5.1, a substructure or another file, or throws the line
+/// away.
+#[inline]
+pub(crate) fn emit_typed(
+    rules: &VersionRules,
+    sink: &mut LineSink<'_>,
+    level: usize,
+    xref: Option<&str>,
+    tag: &str,
+    payload: PayloadRef<'_>,
+    special: u8,
+) -> Result<(), WriteError> {
+    if level > rules.max_level || matches!(tag, "CONT" | "CONC") || (xref.is_some() && level > 0) {
+        return emit_known(rules, sink, level, xref, tag, true, payload, Some(special));
+    }
+    debug_assert!(rules.is_valid_tag(tag) && xref.is_none_or(|x| rules.is_valid_xref(x)));
+    sink.start(level, xref, tag);
+    match payload {
+        PayloadRef::None => sink.end_line(),
+        PayloadRef::Pointer(p) => {
+            sink.text.push(' ');
+            sink.text.push_str(p);
+            sink.end_line()
+        }
+        PayloadRef::Text(text) => emit_text_special(rules, sink, level, text, special),
     }
 }
 
@@ -557,10 +654,28 @@ pub(crate) const MAYBE_BANNED: u8 = 16;
 /// An `@`, which text may have to escape.
 pub(crate) const AT_SIGN: u8 = 32;
 
+/// The [`special_bytes`] class of each byte.
+static CLASSES: [u8; 256] = {
+    let mut table = [0_u8; 256];
+    let mut c = 0;
+    while c < 0x20 {
+        table[c] = CONTROL;
+        c += 1;
+    }
+    table[b'\n' as usize] = LINE_FEED;
+    table[b'\r' as usize] = CARRIAGE_RETURN;
+    table[b'\t' as usize] = TAB;
+    table[0x7F] = MAYBE_BANNED;
+    table[0xC2] = MAYBE_BANNED;
+    table[0xEF] = MAYBE_BANNED;
+    table[b'@' as usize] = AT_SIGN;
+    table
+};
+
 /// What `text` holds of the bytes that can start a line break, a tab or a
 /// banned character, or that escaping changes (`@`), as bits. Eight bytes
 /// are tested at a time, and only a word that holds one is looked at byte
-/// by byte.
+/// by byte; the last bytes are looked up one at a time.
 #[inline]
 pub(crate) fn special_bytes(text: &str) -> u8 {
     const ONES: u64 = 0x0101_0101_0101_0101;
@@ -569,17 +684,9 @@ pub(crate) fn special_bytes(text: &str) -> u8 {
     // most 128). Exact, as booleans.
     let zero = |v: u64| v.wrapping_sub(ONES) & !v & HIGH;
     let below = |v: u64, n: u64| v.wrapping_sub(ONES * n) & !v & HIGH;
-    let class = |c: u8| match c {
-        b'\n' => LINE_FEED,
-        b'\r' => CARRIAGE_RETURN,
-        b'\t' => TAB,
-        0..=0x1F => CONTROL,
-        0x7F | 0xC2 | 0xEF => MAYBE_BANNED,
-        b'@' => AT_SIGN,
-        _ => 0,
-    };
-    let word = |w: [u8; 8]| {
-        let x = u64::from_le_bytes(w);
+    let class = |c: &u8| CLASSES.get(usize::from(*c)).copied().unwrap_or(0);
+    let word = |w: &[u8; 8]| {
+        let x = u64::from_le_bytes(*w);
         let hit = below(x, 0x20)
             | zero(x ^ (ONES * 0x7F))
             | zero(x ^ (ONES * 0xC2))
@@ -588,20 +695,12 @@ pub(crate) fn special_bytes(text: &str) -> u8 {
         if hit == 0 {
             0
         } else {
-            w.iter().fold(0, |f, &c| f | class(c))
+            w.iter().fold(0, |f, c| f | class(c))
         }
     };
     let (words, rest) = text.as_bytes().as_chunks::<8>();
-    let mut found = words.iter().fold(0, |f, &w| f | word(w));
-    // The last bytes, padded with a byte of no class.
-    if !rest.is_empty() {
-        let mut w = [b'a'; 8];
-        for (slot, &b) in w.iter_mut().zip(rest) {
-            *slot = b;
-        }
-        found |= word(w);
-    }
-    found
+    let found = words.iter().fold(0, |f, w| f | word(w));
+    rest.iter().fold(found, |f, c| f | class(c))
 }
 
 /// Writes one line of text without special bytes ([`special_bytes`]) on

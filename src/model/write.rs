@@ -124,6 +124,56 @@ mod tests {
         assert!(records[1].0, "{records:?}");
     }
 
+    /// Writing a dataset one record at a time writes what the whole
+    /// conformance pass writes, with the same repairs, on every fixture in
+    /// every version, whatever the output; most fixtures need no restart.
+    #[test]
+    fn the_direct_write_is_the_whole_pass() {
+        let mut files = Vec::new();
+        ged_files(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures"),
+            &mut files,
+        );
+        files.sort();
+        let restarts = || crate::writer::RESTARTS.with(std::cell::Cell::get);
+        let (mut writes, before) = (0, restarts());
+        let mut restarted = Vec::new();
+        for path in files {
+            let data = Dataset::from_bytes(std::fs::read(&path).unwrap());
+            for version in [
+                GedcomVersion::V5_5_1,
+                GedcomVersion::V7_0,
+                GedcomVersion::V7_1,
+            ] {
+                let name = path.display();
+                let writer = GedcomWriter::new().gedcom_version(version);
+                let at = restarts();
+                let direct = writer.write_to_string_with_report(&data).unwrap();
+                if restarts() > at {
+                    restarted.push(format!("{name} {version}"));
+                }
+                let whole = writer.write_to_string_whole(&data).unwrap();
+                assert_eq!(direct.0, whole.0, "{name} as {version}");
+                assert_eq!(direct.1, whole.1, "{name} as {version}");
+                // The first repair as the error, under the strict policy.
+                let strict = writer.clone().on_nonconformant(crate::RepairPolicy::Error);
+                let error = |r: Result<(String, crate::WriteReport), crate::WriteError>| match r {
+                    Ok((text, _)) => Ok(text),
+                    Err(e) => Err(e.to_string()),
+                };
+                assert_eq!(
+                    error(strict.write_to_string_with_report(&data)),
+                    error(strict.write_to_string_whole(&data)),
+                    "{name} as {version}"
+                );
+                writes += 1;
+            }
+        }
+        let restarts = restarts() - before;
+        eprintln!("{restarts} of {writes} direct writes restarted: {restarted:#?}");
+        assert!(restarts * 4 < writes, "{restarts} of {writes}");
+    }
+
     /// Every `.ged` file under `dir`.
     fn ged_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
         for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {

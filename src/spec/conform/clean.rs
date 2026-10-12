@@ -11,10 +11,11 @@
 //! The check allocates nothing and finds tags by their index: it is the
 //! cost of conformance on a dataset that needs no repair.
 
-use super::{payload, Conformer, Family, Kind, Pick, StructId, DATASET};
+use super::{payload, Conformer, Family, Kind, Pick, Schema, SchemaIndex, StructId, DATASET};
 use crate::spec::schema::EnumSet;
 use crate::spec::validate::is_external_pointer;
 use crate::tree::{Flat, Node, PayloadRef};
+use crate::version::VersionRules;
 use crate::writer::XrefIndex;
 
 /// The occurrences of each tag among the substructures of one structure:
@@ -171,6 +172,22 @@ impl Conformer<'_> {
                 self.rules.is_valid_tag(e.tag()) && self.clean_extension(e, at, true, walk)
             }),
         )
+    }
+
+    /// [`Conformer::is_clean_typed`] of a record written in stream mode
+    /// ([`Flat::spoiled`] being false): its typed pointers, and the
+    /// pointers of its extension structures, each to name a record. Stream
+    /// mode is for datasets without documented aliases of standard
+    /// structures, which the walk of a record checks as those structures.
+    pub(super) fn is_clean_streamed(&self, flat: &Flat<'_>, walk: &mut Walk<'_>) -> bool {
+        debug_assert!(self.aliases.structs.is_empty());
+        walk.size += flat.size();
+        walk.rtype = flat.root_type().unwrap_or(DATASET);
+        let (checks, mut pointers) = flat.stream_checks();
+        let mut checks = checks;
+        checks.all(|(payload, ty, special)| {
+            self.clean_payload_known(payload, ty, Some(special), walk)
+        }) && pointers.all(|p| self.resolves(p, walk))
     }
 
     /// [`Conformer::is_clean`] of a record, its size bound added to
@@ -339,8 +356,8 @@ impl Conformer<'_> {
                 });
                 true
             }
-            _ => match self.xrefs.get(p) {
-                Some(ty) => want == ANY || *ty == Some(want),
+            _ => match self.target(p) {
+                Some(named) => want == ANY || named.0 == Some(want),
                 None => false,
             },
         }
@@ -386,43 +403,20 @@ impl Conformer<'_> {
             PayloadRef::Text(t) => t,
             PayloadRef::None => "",
         };
-        let banned = match special {
-            Some(special) => payload::has_banned_known(raw, special, self.rules),
-            None => payload::has_banned(raw, self.rules),
-        };
-        if banned {
-            return false;
-        }
-        // Any text without a banned character is a text.
-        if matches!(kind, Kind::Text | Kind::ListText) {
-            return true;
-        }
-        let set = matches!(kind, Kind::Enum | Kind::ListEnum)
-            .then(|| self.schema.enum_set(arg))
-            .flatten();
-        match (kind, set) {
-            (Kind::Enum, Some(set)) if !raw.is_empty() => {
-                return is_canonical(set, raw, self.family);
-            }
-            (Kind::ListEnum, Some(set)) if !raw.is_empty() => {
-                return is_canonical_list(set, raw, self.family);
-            }
-            _ => {}
-        }
-        let valid = if raw.is_empty() && payload::empty_is_valid(kind) {
-            true
-        } else if matches!(kind, Kind::Date | Kind::DateExact | Kind::DatePeriod) {
-            payload::is_valid(kind, set, &self.aliases.unalias(raw), self.family)
+        let unaliased = if matches!(kind, Kind::Date | Kind::DateExact | Kind::DatePeriod) {
+            self.aliases.unalias(raw)
         } else {
-            payload::is_valid(kind, set, raw, self.family)
+            std::borrow::Cow::Borrowed(raw)
         };
-        // The media type of a text is a text type.
-        let text_type = || {
-            raw.get(..5)
-                .is_some_and(|p| p.eq_ignore_ascii_case("text/"))
-        };
-        let mime_of_text = self.family == Family::V7 && self.tables.is_mime(ty);
-        valid && (!mime_of_text || raw.is_empty() || text_type())
+        is_clean_value(
+            self.schema,
+            self.tables,
+            self.rules,
+            ty,
+            raw,
+            &unaliased,
+            special,
+        )
     }
 
     /// Whether the payload of a pointer structure stays as it is: a pointer
@@ -452,6 +446,60 @@ impl Conformer<'_> {
             PayloadRef::Text(_) => false,
         }
     }
+}
+
+/// Whether a payload `raw` that is no pointer stays as it is in a structure
+/// of type `ty`, whose payload is no pointer ([`Conformer::payload`]):
+/// no banned character, and valid for the type. A date is looked at as
+/// `unaliased`, its documented aliases (7.x `HEAD.SCHMA`) replaced.
+pub(crate) fn is_clean_value(
+    schema: &Schema,
+    tables: &SchemaIndex,
+    rules: &VersionRules,
+    ty: StructId,
+    raw: &str,
+    unaliased: &str,
+    special: Option<u8>,
+) -> bool {
+    let (kind, arg) = schema.kind(ty);
+    let family = Family::of(rules);
+    let banned = match special {
+        Some(special) => payload::has_banned_known(raw, special, rules),
+        None => payload::has_banned(raw, rules),
+    };
+    if banned {
+        return false;
+    }
+    // Any text without a banned character is a text.
+    if matches!(kind, Kind::Text | Kind::ListText) {
+        return true;
+    }
+    let set = matches!(kind, Kind::Enum | Kind::ListEnum)
+        .then(|| schema.enum_set(arg))
+        .flatten();
+    match (kind, set) {
+        (Kind::Enum, Some(set)) if !raw.is_empty() => {
+            return is_canonical(set, raw, family);
+        }
+        (Kind::ListEnum, Some(set)) if !raw.is_empty() => {
+            return is_canonical_list(set, raw, family);
+        }
+        _ => {}
+    }
+    let valid = if raw.is_empty() && payload::empty_is_valid(kind) {
+        true
+    } else if matches!(kind, Kind::Date | Kind::DateExact | Kind::DatePeriod) {
+        payload::is_valid(kind, set, unaliased, family)
+    } else {
+        payload::is_valid(kind, set, raw, family)
+    };
+    // The media type of a text is a text type.
+    let text_type = || {
+        raw.get(..5)
+            .is_some_and(|p| p.eq_ignore_ascii_case("text/"))
+    };
+    let mime_of_text = family == Family::V7 && tables.is_mime(ty);
+    valid && (!mime_of_text || raw.is_empty() || text_type())
 }
 
 /// Whether an enumeration value is written as it is: it is its set's

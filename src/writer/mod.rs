@@ -58,13 +58,18 @@ use std::io;
 
 use crate::convert::{ConversionOptions, Plan};
 use crate::model::Dataset;
-use crate::spec::conform::{conform_records, with_node, Build, FieldOrder, Rec, RecRef};
+use crate::model::Store;
+use crate::spec::conform::{
+    conform_records, take_head, with_node, Build, Direct, FieldOrder, Place, Rec, RecRef,
+};
 use crate::tree::{Flat, FlatRef, Node, PayloadRef, Structure, Tree};
 use crate::version::{GedcomVersion, VersionRules};
-use emit::{emit, emit_known, emit_tagged, LineSink};
+use emit::{emit, emit_known, emit_tagged};
 use xref::XrefMap;
 
-pub(crate) use emit::{extension_tag, new_xref, special_bytes, CONTROL, MAYBE_BANNED, TAB};
+pub(crate) use emit::{
+    emit_typed, extension_tag, new_xref, special_bytes, LineSink, CONTROL, MAYBE_BANNED, TAB,
+};
 pub(crate) use head::{complete as complete_head, needs_submitter, stub_submitter, PLACEHOLDER};
 pub(crate) use xref::{numbered_xref, XrefIndex};
 
@@ -437,13 +442,14 @@ impl GedcomWriter {
             .rules()
     }
 
-    /// A sink for `rules`: the configured terminator, line length and
-    /// repair policy, and `encoding`.
+    /// A sink for `rules`: the configured terminator and line length,
+    /// `encoding` and `policy`.
     fn sink<'w>(
         &self,
         writer: Option<&'w mut dyn io::Write>,
         rules: &VersionRules,
         encoding: OutputEncoding,
+        policy: RepairPolicy,
     ) -> LineSink<'w> {
         let max_line = rules
             .max_line_len
@@ -453,7 +459,7 @@ impl GedcomWriter {
             self.config.line_ending.as_str(),
             max_line,
             encoding,
-            self.config.on_nonconformant,
+            policy,
         )
     }
 
@@ -495,11 +501,15 @@ impl GedcomWriter {
         data: &Dataset,
     ) -> Result<WriteReport, WriteError> {
         let built = data.built(self);
+        let store = Some(data.store());
         match self.plan_for(data, &built) {
-            Some(plan) => {
-                self.write_built(writer, &plan.entries(&built), crate::model::field_order)
-            }
-            None => self.write_built(writer, &built, crate::model::field_order),
+            Some(plan) => self.write_built(
+                writer,
+                &plan.entries(&built),
+                crate::model::field_order,
+                store,
+            ),
+            None => self.write_built(writer, &built, crate::model::field_order, store),
         }
     }
 
@@ -540,11 +550,15 @@ impl GedcomWriter {
     ) -> Result<(String, WriteReport), WriteError> {
         let built = data.built(self);
         let size = data.store().input_len();
+        let store = Some(data.store());
         match self.plan_for(data, &built) {
-            Some(plan) => {
-                self.write_built_to_string(&plan.entries(&built), crate::model::field_order, size)
-            }
-            None => self.write_built_to_string(&built, crate::model::field_order, size),
+            Some(plan) => self.write_built_to_string(
+                &plan.entries(&built),
+                crate::model::field_order,
+                size,
+                store,
+            ),
+            None => self.write_built_to_string(&built, crate::model::field_order, size, store),
         }
     }
 
@@ -653,16 +667,57 @@ impl GedcomWriter {
     /// typed dataset) like
     /// [`write_structures`](Self::write_structures).
     /// `order` gives the order of the typed model they come from, in the
-    /// target version ([`FieldOrder`]).
+    /// target version ([`FieldOrder`]). With the `store` of the dataset
+    /// they come from, they are first written one at a time
+    /// ([`Self::write_direct`]), the output held until the last.
     fn write_built<'n, W: io::Write>(
         &self,
         mut writer: W,
-        records: &'n [impl Build<'n>],
+        built: &'n [impl Build<'n>],
         order: fn(GedcomVersion) -> &'static FieldOrder,
+        store: Option<&'n Store>,
     ) -> Result<WriteReport, WriteError> {
-        let records: Vec<Rec<'n, &'n Structure>> = records.iter().map(|r| Rec::built(r)).collect();
+        let mut records: Vec<Rec<'n, &'n Structure>> =
+            built.iter().map(|r| Rec::built(r)).collect();
         let rules = self.rules_for_built(&records);
+        if let Some(store) = store {
+            let encoding = self.encoding(rules);
+            let mut sink = self.sink(None, rules, encoding, RepairPolicy::Repair);
+            sink.reserve(store.input_len().saturating_add(store.input_len() / 16));
+            if self.wants_bom(rules, encoding, false) {
+                sink.bom();
+            }
+            if let Some(conformed) =
+                write_direct(rules, &mut sink, &mut records, order(rules.version), store)?
+            {
+                let lines = std::mem::take(&mut sink.repairs);
+                let report = self.direct_report(conformed, lines)?;
+                writer.write_all(&sink.into_bytes())?;
+                writer.flush()?;
+                return Ok(report);
+            }
+            records = built.iter().map(|r| Rec::built(r)).collect();
+        }
         self.write_conformed(&mut writer, rules, records, Some(order(rules.version)))
+    }
+
+    /// The report of a direct write ([`Self::write_direct`]): the repairs
+    /// of the conformance pass, then those of the lines, as the whole pass
+    /// reports them; the first of them as an error under
+    /// [`RepairPolicy::Error`].
+    fn direct_report(
+        &self,
+        mut conformed: Vec<Repair>,
+        mut lines: Vec<Repair>,
+    ) -> Result<WriteReport, WriteError> {
+        if self.config.on_nonconformant == RepairPolicy::Error {
+            if let Some(first) = conformed.into_iter().chain(lines).next() {
+                return Err(WriteError::NonConformant(Box::new(first)));
+            }
+            return Ok(WriteReport::default());
+        }
+        conformed.append(&mut lines);
+        Ok(WriteReport { repairs: conformed })
     }
 
     /// [`write_built`](Self::write_built) as text, as
@@ -671,13 +726,33 @@ impl GedcomWriter {
     /// records were read from), the room the text starts with.
     fn write_built_to_string<'n>(
         &self,
-        records: &'n [impl Build<'n>],
+        built: &'n [impl Build<'n>],
         order: fn(GedcomVersion) -> &'static FieldOrder,
         size: usize,
+        store: Option<&'n Store>,
     ) -> Result<(String, WriteReport), WriteError> {
         let mut records: Vec<Rec<'n, &'n Structure>> =
-            records.iter().map(|r| Rec::built(r)).collect();
+            built.iter().map(|r| Rec::built(r)).collect();
         let rules = self.rules_for_built(&records);
+        // A little more than the input: the header is completed, `@` doubled.
+        let room = size.saturating_add(size / 16).saturating_add(256);
+        if let Some(store) = store {
+            let mut sink = self.sink(None, rules, OutputEncoding::Utf8, RepairPolicy::Repair);
+            sink.reserve(room);
+            if self.wants_bom(rules, OutputEncoding::Utf8, true) {
+                sink.bom();
+            }
+            if let Some(conformed) =
+                write_direct(rules, &mut sink, &mut records, order(rules.version), store)?
+            {
+                let lines = std::mem::take(&mut sink.repairs);
+                let report = self.direct_report(conformed, lines)?;
+                return Ok((sink.into_string(), report));
+            }
+            #[cfg(test)]
+            RESTARTS.with(|r| r.set(r.get() + 1));
+            records = built.iter().map(|r| Rec::built(r)).collect();
+        }
         let mut conformed =
             conform_records(&mut records, rules.version, Some(order(rules.version)));
         let mut repairs = std::mem::take(&mut conformed.repairs);
@@ -687,9 +762,13 @@ impl GedcomWriter {
             }
             repairs = Vec::new();
         }
-        let mut sink = self.sink(None, rules, OutputEncoding::Utf8);
-        // A little more than the input: the header is completed, `@` doubled.
-        sink.reserve(size.saturating_add(size / 16).saturating_add(256));
+        let mut sink = self.sink(
+            None,
+            rules,
+            OutputEncoding::Utf8,
+            self.config.on_nonconformant,
+        );
+        sink.reserve(room);
         if self.wants_bom(rules, OutputEncoding::Utf8, true) {
             sink.bom();
         }
@@ -702,6 +781,17 @@ impl GedcomWriter {
         )?;
         repairs.append(&mut sink.repairs);
         Ok((sink.into_string(), WriteReport { repairs }))
+    }
+
+    /// [`write_to_string_with_report`](Self::write_to_string_with_report)
+    /// through the whole conformance pass, never one record at a time:
+    /// what the direct write must equal.
+    #[cfg(test)]
+    pub(crate) fn write_to_string_whole(
+        &self,
+        data: &Dataset,
+    ) -> Result<(String, WriteReport), WriteError> {
+        self.write_built_to_string(&data.built(self), crate::model::field_order, 0, None)
     }
 
     /// [`rules_for_records`](Self::rules_for_records) of records that write
@@ -754,7 +844,7 @@ impl GedcomWriter {
         known: &dyn Fn(&str) -> bool,
     ) -> Result<WriteReport, WriteError> {
         let encoding = self.encoding(rules);
-        let mut sink = self.sink(Some(writer), rules, encoding);
+        let mut sink = self.sink(Some(writer), rules, encoding, self.config.on_nonconformant);
         if self.wants_bom(rules, encoding, false) {
             sink.bom();
         }
@@ -875,6 +965,126 @@ fn write_records<'n, N: Node<'n>>(
     }
     out.sink.source_line = 0;
     out.put(0, None, "TRLR", PayloadRef::None)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The direct writes of this thread that started again with the whole
+    /// conformance pass.
+    pub(crate) static RESTARTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Writes a typed dataset's records (the header first, the trailer last)
+/// one at a time, each checked and, when its repair stays inside it,
+/// repaired just before it is written ([`Direct`]): what
+/// [`write_records`] writes once the whole conformance pass is done, with
+/// the pass's repairs. `None` when the dataset needs the whole pass: what
+/// was written is to be thrown away.
+fn write_direct<'n>(
+    rules: &'static VersionRules,
+    sink: &mut LineSink<'_>,
+    records: &mut Vec<Rec<'n, &'n Structure>>,
+    order: &'static FieldOrder,
+    store: &'n Store,
+) -> Result<Option<Vec<Repair>>, WriteError> {
+    let Some(mut direct) = Direct::prepare(records, rules.version, Some(order), store) else {
+        return Ok(None);
+    };
+    let Some(mut head) = take_head(records) else {
+        return Ok(None);
+    };
+    let last = records.len().saturating_sub(1);
+    // Identifiers for the standard records without one, avoiding those of
+    // the others.
+    let missing: Vec<(usize, &'static str)> = records
+        .get(1..last)
+        .unwrap_or(&[])
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.xref().is_none())
+        .filter_map(|(i, r)| record_prefix(r.tag()).map(|p| (i, p)))
+        .collect();
+    let ids = direct.ids();
+    let known = move |x: &str| ids.knows(x);
+    let mut xrefs = XrefMap::missing(rules, missing.into_iter(), &known);
+    map_pointers(&mut head, &mut xrefs);
+    if head::needs_submitter(&head, rules) {
+        return Ok(None);
+    }
+    head::complete(&mut head, rules, sink.charset(), None);
+    if sink.encoding() == OutputEncoding::Utf8 {
+        direct.stream_into(sink);
+    }
+    let mut out = Emitter { rules, sink };
+    put_structure(&mut out, &head)?;
+    for i in 1..last {
+        let Some(record) = records.get_mut(i) else {
+            break;
+        };
+        // The identifier of a record that writes itself, for its lines.
+        let built = if record.is_built() {
+            xrefs.record(i - 1, record.built_xref())
+        } else {
+            None
+        };
+        let Some(place) = direct.record(i, record, built) else {
+            return Ok(None);
+        };
+        if place == Place::Lines {
+            if let Some(lines) = direct.lines() {
+                #[cfg(debug_assertions)]
+                assert_lines(rules, &out, &mut xrefs, record, i - 1, lines);
+                out.sink.append(lines)?;
+            }
+            continue;
+        }
+        let xref = xrefs.record(i - 1, record.xref());
+        let xref = xref.as_deref();
+        match (place, record.as_owned()) {
+            (Place::Arena, _) => {
+                if let Some(root) = direct.root() {
+                    put_flat(&mut out, &mut xrefs, xref, root)?;
+                }
+            }
+            (Place::Record, Some(s)) => put_record(&mut out, &mut xrefs, xref, s, &mut Vec::new())?,
+            (Place::Record, None) | (Place::Lines, _) => return Ok(None),
+        }
+    }
+    out.sink.source_line = 0;
+    out.put(0, None, "TRLR", PayloadRef::None)?;
+    Ok(Some(direct.into_repairs()))
+}
+
+/// Checks, in debug builds, that the lines a record wrote as it wrote
+/// itself ([`Place::Lines`]) are those the writer writes of its
+/// structures.
+#[cfg(debug_assertions)]
+fn assert_lines<'n>(
+    rules: &'static VersionRules,
+    out: &Emitter<'_, '_>,
+    xrefs: &mut XrefMap<'_>,
+    record: &Rec<'n, &'n Structure>,
+    index: usize,
+    lines: &LineSink<'_>,
+) {
+    let mut expected = out.sink.record_lines();
+    let mut flat = Flat::default();
+    let mut scratch = Flat::default();
+    let xref = xrefs.record(index, record.xref()).map(Cow::into_owned);
+    let mut check = Emitter {
+        rules,
+        sink: &mut expected,
+    };
+    let written = with_node!(record.get(&scratch), flat, |n| put_record(
+        &mut check,
+        xrefs,
+        xref.as_deref(),
+        n,
+        &mut Vec::new()
+    ));
+    scratch.clear();
+    assert!(written.is_ok(), "{written:?}");
+    assert_eq!(expected.text(), lines.text());
 }
 
 /// Writes a record, with the identifier `xref`, and its substructures,
