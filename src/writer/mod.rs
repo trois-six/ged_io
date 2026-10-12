@@ -513,10 +513,10 @@ impl GedcomWriter {
                 return Ok(report);
             }
             if let Some(plan) = self.plan_for(data, &built, true) {
-                return self.write_built(writer, &plan.entries(&built), order, store);
+                return self.write_built(writer, &plan.entries(&built), order, store, None);
             }
         }
-        self.write_built(writer, &built, order, store)
+        self.write_built(writer, &built, order, store, Some(data))
     }
 
     /// `data` written in a version of the other family with its header
@@ -540,7 +540,14 @@ impl GedcomWriter {
         let order = crate::model::field_order;
         let head = plan.head().map(|(i, h)| (i, h.clone()));
         let unconverted = Unconverted { watch, head };
-        let out = self.direct_built(built, order, data.store(), text, Some(unconverted))?;
+        let out = self.direct_built(
+            built,
+            order,
+            data.store(),
+            text,
+            Some(unconverted),
+            Some(data),
+        )?;
         #[cfg(debug_assertions)]
         if out.is_some() {
             debug_assert!(
@@ -606,10 +613,10 @@ impl GedcomWriter {
                 return Ok((sink.into_string(), report));
             }
             if let Some(plan) = self.plan_for(data, &built, true) {
-                return self.write_built_to_string(&plan.entries(&built), order, size, store);
+                return self.write_built_to_string(&plan.entries(&built), order, size, store, None);
             }
         }
-        self.write_built_to_string(&built, order, size, store)
+        self.write_built_to_string(&built, order, size, store, Some(data))
     }
 
     /// Writes a lossless [`Tree`] to `writer` in the target version (the
@@ -726,9 +733,12 @@ impl GedcomWriter {
         built: &'n [impl Build<'n>],
         order: fn(GedcomVersion) -> &'static FieldOrder,
         store: Option<&'n Store>,
+        whole: Option<&'n Dataset>,
     ) -> Result<WriteReport, WriteError> {
         if let Some(store) = store {
-            if let Some((sink, report)) = self.direct_built(built, order, store, None, None)? {
+            if let Some((sink, report)) =
+                self.direct_built(built, order, store, None, None, whole)?
+            {
                 writer.write_all(&sink.into_bytes())?;
                 writer.flush()?;
                 return Ok(report);
@@ -747,7 +757,8 @@ impl GedcomWriter {
     /// `watch`, the records are those of a dataset written in a version of
     /// the other family: the header converted replaces theirs, if given,
     /// and no other record may need converting
-    /// ([`GedcomWriter::unconverted`]).
+    /// ([`GedcomWriter::unconverted`]). `whole`: the dataset `built` are
+    /// the records of, one for one, when they are.
     fn direct_built<'n>(
         &self,
         built: &'n [impl Build<'n>],
@@ -755,6 +766,7 @@ impl GedcomWriter {
         store: &'n Store,
         text: Option<usize>,
         watch: Option<Unconverted>,
+        whole: Option<&'n Dataset>,
     ) -> Result<Option<(LineSink<'static>, WriteReport)>, WriteError> {
         let mut records: Vec<Rec<'n, &'n Structure>> =
             built.iter().map(|r| Rec::built(r)).collect();
@@ -786,7 +798,8 @@ impl GedcomWriter {
             sink.bom();
         }
         let order = order(rules.version);
-        let Some(conformed) = write_direct(rules, &mut sink, &mut records, order, store, watch)?
+        let Some(conformed) =
+            write_direct(rules, &mut sink, &mut records, order, store, watch, whole)?
         else {
             return Ok(None);
         };
@@ -824,10 +837,11 @@ impl GedcomWriter {
         order: fn(GedcomVersion) -> &'static FieldOrder,
         size: usize,
         store: Option<&'n Store>,
+        whole: Option<&'n Dataset>,
     ) -> Result<(String, WriteReport), WriteError> {
         if let Some(store) = store {
             if let Some((sink, report)) =
-                self.direct_built(built, order, store, Some(size), None)?
+                self.direct_built(built, order, store, Some(size), None, whole)?
             {
                 return Ok((sink.into_string(), report));
             }
@@ -880,8 +894,8 @@ impl GedcomWriter {
         let built = data.built(self);
         let order = crate::model::field_order;
         match self.plan_for(data, &built, true) {
-            Some(plan) => self.write_built_to_string(&plan.entries(&built), order, 0, None),
-            None => self.write_built_to_string(&built, order, 0, None),
+            Some(plan) => self.write_built_to_string(&plan.entries(&built), order, 0, None, None),
+            None => self.write_built_to_string(&built, order, 0, None, None),
         }
     }
 
@@ -1107,10 +1121,12 @@ fn write_direct<'n>(
     order: &'static FieldOrder,
     store: &'n Store,
     watch: Option<std::rc::Rc<crate::convert::Watch>>,
+    whole: Option<&'n Dataset>,
 ) -> Result<Option<Vec<Repair>>, WriteError> {
     let utf8 = sink.encoding() == OutputEncoding::Utf8;
     let stream = utf8.then_some(&*sink);
-    let Some(mut direct) = Direct::prepare(records, rules.version, Some(order), store, stream)
+    let Some(mut direct) =
+        Direct::prepare(records, rules.version, Some(order), store, stream, whole)
     else {
         return Ok(None);
     };

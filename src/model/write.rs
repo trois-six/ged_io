@@ -223,6 +223,47 @@ mod tests {
         assert!(restarts * 4 < writes, "{restarts} of {writes}");
     }
 
+    /// A dataset whose identifiers are valid and unique is written without
+    /// a look at each record's identifier: its index says so, and tells
+    /// the record of each. Duplicates, or identifiers the target's grammar
+    /// refuses, take the pass.
+    #[test]
+    fn identifiers_the_index_vouches_for_are_not_checked_again() {
+        use crate::spec::conform::ID_PASSES;
+        let passes = || ID_PASSES.with(std::cell::Cell::get);
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/washington.ged");
+        let data = Dataset::from_bytes(std::fs::read(path).unwrap());
+        let before = passes();
+        // In its own version family: the records written are its records.
+        GedcomWriter::new().write_to_string(&data).unwrap();
+        let v7 = Dataset::parse(
+            "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 FAMS @F1@\n0 @F1@ FAM\n\
+             1 HUSB @I1@\n0 @L1@ _LOC\n0 TRLR\n",
+        );
+        for version in [GedcomVersion::V7_0, GedcomVersion::V7_1] {
+            GedcomWriter::new()
+                .gedcom_version(version)
+                .write_to_string(&v7)
+                .unwrap();
+        }
+        assert_eq!(passes(), before);
+
+        let text = "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n0 @I1@ INDI\n0 TRLR\n";
+        let duplicate = Dataset::parse(text);
+        let out = GedcomWriter::new().write_to_string(&duplicate).unwrap();
+        assert_eq!(passes(), before + 1);
+        assert!(out.contains("0 @I1_2@ INDI\n"), "{out}");
+
+        let mut renamed = Dataset::parse("0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n0 TRLR\n");
+        renamed.rename("@I1@", "@i1@").unwrap();
+        GedcomWriter::new().write_to_string(&renamed).unwrap();
+        assert_eq!(passes(), before + 2);
+        renamed.rename("@i1@", "@I1@").unwrap();
+        GedcomWriter::new().write_to_string(&renamed).unwrap();
+        assert_eq!(passes(), before + 2);
+    }
+
     /// Every `.ged` file under `dir`.
     fn ged_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
         for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {

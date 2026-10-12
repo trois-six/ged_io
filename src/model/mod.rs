@@ -166,6 +166,7 @@ pub use citation::{
 };
 pub use dataset::{DanglingReference, Dataset, Record, RecordRef, XrefKey};
 pub use date::{Age, ChangeDate, CreationDate, Date, DateDetail, ExactDate, Period};
+pub(crate) use edit::PLACE_KIND_SHIFT;
 pub use edit::{
     EditError, Editable, Handle, Holder, Link, RecordHandle, RecordKind, RecordMut, RecordType,
     Removal,
