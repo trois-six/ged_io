@@ -2,11 +2,16 @@
 //! the typed model and the lossless tree read from it are written in each
 //! version without panicking, every written line passes the line rules of
 //! the version, the output reads back with the same records, and writing
-//! it again gives the same bytes: write(read(write(x))) == write(x).
+//! it again gives the same bytes: write(read(write(x))) == write(x). The
+//! same holds of the model's records written one at a time
+//! (`GedcomStreamWriter`).
 #![no_main]
 
+use ged_io::model::Header;
 use ged_io::tree::{parse_tree, Tree};
-use ged_io::{Dataset, GedcomVersion, GedcomWriter, OutputEncoding};
+use ged_io::{
+    Dataset, GedcomStreamWriter, GedcomVersion, GedcomWriter, OutputEncoding, WriterConfig,
+};
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashSet;
 
@@ -70,6 +75,24 @@ fn check_lines(out: &str, version: GedcomVersion) {
     assert!(out.ends_with("0 TRLR\n"), "no trailer");
 }
 
+/// `data`'s records written one at a time, in the order the in-memory
+/// writer writes them.
+fn streamed(data: &Dataset, version: GedcomVersion) -> String {
+    let config = WriterConfig {
+        version: Some(version),
+        bom: ged_io::Bom::Never,
+        ..WriterConfig::default()
+    };
+    let default = Header::default();
+    let header = data.header.as_ref().unwrap_or(&default);
+    let mut w = GedcomStreamWriter::new(Vec::new(), config, header, data).expect("repairs");
+    for r in data.records().skip(usize::from(data.header.is_some())) {
+        w.write_record(r, data).expect("repairs, never fails");
+    }
+    let (bytes, _) = w.finish().expect("writes");
+    String::from_utf8(bytes).expect("UTF-8")
+}
+
 /// The number of level-0 lines.
 fn records(out: &str) -> usize {
     out.split_terminator('\n')
@@ -122,6 +145,14 @@ fuzz_target!(|data: &[u8]| {
             // Writing is idempotent: write(read(write(x))) == write(x).
             let again = writer.write_to_string(&back).expect("repairs, never fails");
             assert!(again == out, "{version}: not stable\n{out}\n{again}");
+            // One record at a time: conformant lines, and idempotent.
+            let once = streamed(&model, version);
+            check_lines(&once, version);
+            let twice = streamed(&Dataset::parse(once.as_str()), version);
+            assert!(
+                twice == once,
+                "{version}: streaming not stable\n{once}\n{twice}"
+            );
             for encoding in [
                 OutputEncoding::Ansel,
                 OutputEncoding::Ascii,

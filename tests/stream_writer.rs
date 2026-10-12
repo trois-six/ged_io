@@ -166,3 +166,33 @@ fn identifiers_are_kept_unique_record_by_record() {
         "{report:?}"
     );
 }
+
+/// Streaming is idempotent: what it wrote, read back and streamed again,
+/// is the same bytes.
+#[test]
+fn streaming_is_idempotent() {
+    let mut files = Vec::new();
+    ged_files(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures"),
+        &mut files,
+    );
+    files.sort();
+    for path in files {
+        let name = path.display();
+        let data = Dataset::from_bytes(std::fs::read(&path).unwrap());
+        for version in [
+            GedcomVersion::V5_5_1,
+            GedcomVersion::V7_0,
+            GedcomVersion::V7_1,
+        ] {
+            let config = WriterConfig {
+                version: Some(version),
+                bom: Bom::Never,
+                ..WriterConfig::default()
+            };
+            let (once, _) = streamed(&data, config.clone());
+            let (twice, _) = streamed(&Dataset::parse(once.as_str()), config);
+            assert!(once == twice, "{name} as {version}:\n{once}\n---\n{twice}");
+        }
+    }
+}
