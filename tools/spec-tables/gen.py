@@ -13,10 +13,12 @@ one shared tag list, and each version's structure names share one string.
 Inputs (pinned in tests/fixtures/corpora.lock.tsv, fetched by
 tools/fetch-corpora.sh into target/corpora/spec/):
 
-* GEDCOM 7.0: FamilySearch/GEDCOM `extracted-files/` at 512e38d (Apache-2.0):
-  substructures.tsv, cardinalities.tsv, payloads.tsv, enumerations.tsv,
-  enumerationsets.tsv and tags/cal-*.
-* GEDCOM 7.1: the same files on the `v7.1` branch at c451779 (Apache-2.0).
+* GEDCOM 7.0: FamilySearch/GEDCOM `extracted-files/` of the latest release,
+  7.0.18 (tag v7.0.18, 2f0b863, Apache-2.0): substructures.tsv,
+  cardinalities.tsv, payloads.tsv, enumerations.tsv, enumerationsets.tsv and
+  tags/cal-*.
+* GEDCOM 7.1, a draft: the same files on the `v7.1` branch at c451779, its
+  head (Apache-2.0).
 * GEDCOM 5.5.1: cacack/gedcom-go `testdata/spec/gedcom-5.5.1/*.tsv` at 3c6d42d
   (MIT), a transcription of the 5.5.1 PDF, completed and corrected by
   `551-errata.tsv` (this directory), which cites the PDF page of each row.
@@ -47,7 +49,7 @@ ANSEL_OUT = os.path.join(ROOT, 'tests', 'conformance', 'support', 'ansel_table.r
 ERRATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), '551-errata.tsv')
 
 SOURCES = {
-    'fs70': ('FamilySearch/GEDCOM', '512e38d0cd8b882f9cd23256e53df78a06fe702d', 'Apache-2.0'),
+    'fs70': ('FamilySearch/GEDCOM v7.0.18', '2f0b863b5a42275bd2b3ca315900cf779e42f28b', 'Apache-2.0'),
     'fs71': ('FamilySearch/GEDCOM (v7.1 branch)', 'c4517798b163500be5b994f601c51940f3c21d1c', 'Apache-2.0'),
     'gedcom-go': ('cacack/gedcom-go', '3c6d42de6e1c4fc487a8438cc8aaa892578ac97e', 'MIT'),
 }
@@ -99,10 +101,19 @@ def sha256(path):
         return hashlib.sha256(f.read()).hexdigest()
 
 
+# The first cell of the header row of each input TSV file. FamilySearch's
+# files have one only after 7.0.18 (its release files start with data).
+TSV_HEADERS = {'superstructure', 'structure', 'set', 'primitive', 'block', 'kind'}
+
+
 def read_tsv(path):
+    """The data rows of a TSV file: a header row, when there is one, is left
+    out."""
     with open(path, newline='', encoding='utf-8') as f:
         rows = list(csv.reader(f, delimiter='\t', quoting=csv.QUOTE_NONE))
-    return rows[1:]
+    if rows and rows[0] and rows[0][0] in TSV_HEADERS:
+        return rows[1:]
+    return rows
 
 
 def short7(uri):
@@ -134,13 +145,14 @@ def yaml_list(path, key):
     out, inside = [], False
     with open(path, encoding='utf-8') as f:
         for line in f:
+            line = line.rstrip()
             if re.match(rf'^{key}:\s*\[\]\s*$', line):
                 return []
             if re.match(rf'^{key}:\s*$', line):
                 inside = True
                 continue
             if inside:
-                m = re.match(r'^\s+-\s+"?([^"]+)"?\s*$', line)
+                m = re.match(r'^\s+-\s+"?([^"]+?)"?$', line)
                 if m:
                     out.append(m[1])
                 elif line.strip():
