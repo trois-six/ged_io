@@ -15,7 +15,10 @@
 //!    `@F1@`, … of its kind.
 //!
 //! A pointer to no record is kept when valid and otherwise rewritten the
-//! same way, without taking an identifier of a record.
+//! same way, without taking an identifier of a record. A new identifier is
+//! never one the data uses, a record's or a pointer's (`known`, from the
+//! conformance repair): a record given the identifier a pointer to no
+//! record holds would become what it names.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};

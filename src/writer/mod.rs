@@ -881,7 +881,7 @@ impl GedcomWriter {
             &mut sink,
             &mut records,
             &conformed.arena,
-            Some(&|x| conformed.knows(x)),
+            Some(&|x| conformed.uses(x)),
         )?;
         repairs.append(&mut sink.repairs);
         Ok((sink.into_string(), WriteReport { repairs }))
@@ -939,7 +939,7 @@ impl GedcomWriter {
     ) -> Result<WriteReport, WriteError> {
         let mut conformed = conform_records(&mut records, rules.version, order);
         let repairs = std::mem::take(&mut conformed.repairs);
-        let known = |x: &str| conformed.knows(x);
+        let known = |x: &str| conformed.uses(x);
         let arena = &conformed.arena;
         if self.config.on_nonconformant == RepairPolicy::Error {
             if let Some(first) = repairs.into_iter().next() {
@@ -1015,7 +1015,7 @@ fn is_trailer<'n, N: Node<'n>>(r: &Rec<'n, N>) -> bool {
 
 /// The prefix of the identifiers generated for a standard record without
 /// one; `None` for other records, which need none.
-fn record_prefix(tag: &str) -> Option<&'static str> {
+pub(crate) fn record_prefix(tag: &str) -> Option<&'static str> {
     Some(match tag {
         "INDI" => "I",
         "FAM" => "F",
@@ -1149,7 +1149,7 @@ fn write_direct<'n>(
         .filter_map(|(i, r)| record_prefix(r.tag()).map(|p| (i, p)))
         .collect();
     let ids = direct.ids();
-    let known = move |x: &str| ids.knows(x);
+    let known = move |x: &str| ids.uses(x);
     let mut xrefs = XrefMap::missing(rules, missing.into_iter(), &known);
     let mut out = Emitter { rules, sink };
     if let Some(lines) = direct.head_lines() {

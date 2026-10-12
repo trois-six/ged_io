@@ -49,9 +49,12 @@ const STUB: &str = "@U1@";
 ///   [`GedcomWriter`] gives it first (`@i1@` as `@I1@` in 7.x), with a
 ///   `_2`, `_3`… suffix when that form is taken, and so is a repeated
 ///   one; a standard record without one gets the first free `@I1@`,
-///   `@F1@`…. Free means: not written yet. A later record holding that
-///   identifier is then renamed, where [`GedcomWriter`], knowing every
-///   identifier first, renames the earlier one.
+///   `@F1@`…. Free means: not written yet, and not used in the store the
+///   record comes with (a dataset's has every identifier of the dataset,
+///   a [`StreamedRecord`](crate::StreamedRecord)'s those of the record),
+///   as a record's or a pointer's. A later record holding that identifier
+///   is then renamed, where [`GedcomWriter`], knowing every identifier
+///   first, renames the earlier one.
 /// - **Pointers.** A pointer is written as it is when it is valid, and in
 ///   the valid form of its identifier otherwise (the form a record with
 ///   that identifier gets, when no suffix was needed): pointers keep
@@ -274,7 +277,7 @@ impl<W: io::Write> GedcomStreamWriter<W> {
                     "a second HEAD written as a _HEAD record",
                 ));
                 self.repairs_since(mark)?;
-                self.put_owned(&s)?;
+                self.put_owned(&s, &|x| cx.store.find_xref(x).is_some())?;
             }
             RecordRef::Other(n) if store.as_ref().tag(n.tag) == "TRLR" => {
                 if !record.is_empty() || n.xref.is_some() {
@@ -287,13 +290,14 @@ impl<W: io::Write> GedcomStreamWriter<W> {
                         "a TRLR with content written as a _TRLR record",
                     ));
                     self.repairs_since(mark)?;
-                    self.put_owned(&s)?;
+                    self.put_owned(&s, &|x| cx.store.find_xref(x).is_some())?;
                 }
             }
             _ => {
                 let own = record.xref().map(|id| cx.store.xref(id));
                 let tag = record.tag(cx.store, self.rules.version);
-                let xref = self.record_xref(own, tag)?;
+                let uses = |x: &str| cx.store.find_xref(x).is_some();
+                let xref = self.record_xref(own, tag, &uses)?;
                 let mut converts = false;
                 if let Some(c) = &mut self.convert {
                     if let (true, Some(x)) = (c.conv.names_void(own), &xref) {
@@ -310,7 +314,7 @@ impl<W: io::Write> GedcomStreamWriter<W> {
                         &built,
                         xref.as_deref().map(|x| Cow::Owned(x.to_string())),
                         &mut self.sink,
-                        &mut || xrefs.unique("@N1@"),
+                        &mut || xrefs.unique("@N1@", &uses),
                         self.convert.as_ref().map(|c| &c.watch),
                     );
                     self.repairs_since(mark)?;
@@ -319,7 +323,7 @@ impl<W: io::Write> GedcomStreamWriter<W> {
                         return self.sink.drain_to(&mut self.writer, false);
                     }
                 }
-                self.convert_record(&built, xref, tag)?;
+                self.convert_record(&built, xref, tag, &uses)?;
             }
         }
         self.sink.drain_to(&mut self.writer, false)
@@ -327,19 +331,21 @@ impl<W: io::Write> GedcomStreamWriter<W> {
 
     /// Converts `built`, a record tagged `tag` written with the identifier
     /// `xref`, and writes it, then the records the conversion takes out of
-    /// it (multimedia and source records), right after it.
+    /// it (multimedia and source records), right after it; their
+    /// identifiers are none its store `uses`.
     fn convert_record(
         &mut self,
         built: &Built<'_>,
         xref: Option<String>,
         tag: &str,
+        uses: &dyn Fn(&str) -> bool,
     ) -> Result<(), WriteError> {
         let Some(c) = &self.convert else {
             return Ok(());
         };
         let mut s = built_structure(built);
         let mut out = Out::default();
-        let mut fresh = StreamFresh(&mut self.xrefs);
+        let mut fresh = StreamFresh(&mut self.xrefs, uses);
         if c.conv.record(&mut s, &mut fresh, &mut out) == Fate::Remove {
             return Ok(());
         }
@@ -352,18 +358,24 @@ impl<W: io::Write> GedcomStreamWriter<W> {
             // An extension record now, written last.
             self.held_converted.push((s, xref));
         } else {
-            self.put_converted(&s, xref)?;
+            self.put_converted(&s, xref, uses)?;
         }
         for r in &added {
             let xref = r.xref.as_ref().map(|x| x.as_str().to_string());
-            self.put_converted(r, xref)?;
+            self.put_converted(r, xref, uses)?;
         }
         Ok(())
     }
 
     /// Writes `s`, a record converted, with the identifier `xref`,
-    /// repaired as any record.
-    fn put_converted(&mut self, s: &Structure, xref: Option<String>) -> Result<(), WriteError> {
+    /// repaired as any record; the identifiers of the notes a repair moves
+    /// out of it are none its store `uses`.
+    fn put_converted(
+        &mut self,
+        s: &Structure,
+        xref: Option<String>,
+        uses: &dyn Fn(&str) -> bool,
+    ) -> Result<(), WriteError> {
         let mark = self.conform.repairs.len();
         let xrefs = &mut self.xrefs;
         let entry = Entry::<Built<'_>>::Owned(s);
@@ -371,7 +383,7 @@ impl<W: io::Write> GedcomStreamWriter<W> {
             &entry,
             xref.as_deref().map(|x| Cow::Owned(x.to_string())),
             &mut self.sink,
-            &mut || xrefs.unique("@N1@"),
+            &mut || xrefs.unique("@N1@", uses),
             None,
         );
         self.repairs_since(mark)?;
@@ -423,8 +435,9 @@ impl<W: io::Write> GedcomStreamWriter<W> {
     ///
     /// [`WriteError::Io`] when the writer fails.
     pub fn finish(mut self) -> Result<(W, WriteReport), WriteError> {
+        // Their stores are gone: what was written is all that is known.
         for (s, xref) in std::mem::take(&mut self.held_converted) {
-            self.put_converted(&s, xref)?;
+            self.put_converted(&s, xref, &|_| false)?;
         }
         for (s, xref) in std::mem::take(&mut self.held) {
             self.put_with(&s, xref.as_deref())?;
@@ -454,18 +467,25 @@ impl<W: io::Write> GedcomStreamWriter<W> {
     }
 
     /// The identifier written for a record with the identifier `xref` and
-    /// the tag `tag`, the rename reported.
-    fn record_xref(&mut self, xref: Option<&str>, tag: &str) -> Result<Option<String>, WriteError> {
-        let (new, repair) = self.xrefs.record(xref, record_prefix(tag));
+    /// the tag `tag`, the rename reported; a new one is none the record's
+    /// store `uses`.
+    fn record_xref(
+        &mut self,
+        xref: Option<&str>,
+        tag: &str,
+        uses: &dyn Fn(&str) -> bool,
+    ) -> Result<Option<String>, WriteError> {
+        let (new, repair) = self.xrefs.record(xref, record_prefix(tag), uses);
         if let Some(repair) = repair {
             self.sink.repair(repair)?;
         }
         Ok(new)
     }
 
-    /// Writes an owned record, its identifier made by the writer.
-    fn put_owned(&mut self, s: &Structure) -> Result<(), WriteError> {
-        let xref = self.record_xref(s.xref.as_ref().map(Xref::as_str), s.tag.as_str())?;
+    /// Writes an owned record, its identifier made by the writer, none
+    /// its store `uses`.
+    fn put_owned(&mut self, s: &Structure, uses: &dyn Fn(&str) -> bool) -> Result<(), WriteError> {
+        let xref = self.record_xref(s.xref.as_ref().map(Xref::as_str), s.tag.as_str(), uses)?;
         self.put_with(s, xref.as_deref())
     }
 
@@ -507,12 +527,12 @@ impl StreamXrefs {
         self.written.insert(Cow::Owned(xref.to_string()), ());
     }
 
-    /// `candidate`, or `candidate` with the first `_n` suffix not written:
-    /// taken.
-    fn unique(&mut self, candidate: &str) -> String {
+    /// `candidate`, or `candidate` with the first `_n` suffix not written
+    /// and not one the store `uses`: taken.
+    fn unique(&mut self, candidate: &str, uses: &dyn Fn(&str) -> bool) -> String {
         let mut new = candidate.to_string();
         let mut n = 1_usize;
-        while self.written.contains_key(&new) {
+        while self.written.contains_key(&new) || uses(&new) {
             n += 1;
             new = numbered_xref(self.rules, candidate, n);
         }
@@ -520,14 +540,15 @@ impl StreamXrefs {
         new
     }
 
-    /// The first `@<prefix>n@` not written: taken.
-    pub(crate) fn fresh(&mut self, prefix: &str) -> String {
+    /// The first `@<prefix>n@` not written and not one the store `uses`:
+    /// taken.
+    pub(crate) fn fresh(&mut self, prefix: &str, uses: &dyn Fn(&str) -> bool) -> String {
         let n = self.counters.entry(prefix.into()).or_insert(0);
         let mut next = *n;
         let new = loop {
             next += 1;
             let candidate = format!("@{prefix}{next}@");
-            if !self.written.contains_key(&candidate) {
+            if !self.written.contains_key(&candidate) && !uses(&candidate) {
                 break candidate;
             }
         };
@@ -538,21 +559,23 @@ impl StreamXrefs {
 
     /// The identifier of a record with the identifier `xref`, of a kind
     /// whose generated identifiers start with `prefix`: kept when it is
-    /// valid and not written yet, renamed otherwise (with the repair).
+    /// valid and not written yet, renamed otherwise (with the repair) to
+    /// one the store does not use.
     fn record(
         &mut self,
         xref: Option<&str>,
         prefix: Option<&'static str>,
+        uses: &dyn Fn(&str) -> bool,
     ) -> (Option<String>, Option<Repair>) {
         let Some(x) = xref else {
-            return (prefix.map(|p| self.fresh(p)), None);
+            return (prefix.map(|p| self.fresh(p, uses)), None);
         };
         let valid = self.rules.is_valid_xref(x);
         if valid && !self.written.contains_key(x) {
             self.take(x);
             return (Some(x.to_string()), None);
         }
-        let new = self.unique(&new_xref(self.rules, x));
+        let new = self.unique(&new_xref(self.rules, x), uses);
         if !valid && !self.renamed.contains_key(x) {
             self.renamed.insert(x.into(), new.as_str().into());
         }
@@ -566,12 +589,13 @@ impl StreamXrefs {
 }
 
 /// The identifiers of the records a conversion adds, the first not
-/// written ([`StreamXrefs::fresh`]).
-struct StreamFresh<'x>(&'x mut StreamXrefs);
+/// written and not used in the store of the record converted
+/// ([`StreamXrefs::fresh`]).
+struct StreamFresh<'x>(&'x mut StreamXrefs, &'x dyn Fn(&str) -> bool);
 
 impl Fresh for StreamFresh<'_> {
     fn fresh(&mut self, prefix: &str) -> Box<str> {
-        self.0.fresh(prefix).into()
+        self.0.fresh(prefix, self.1).into()
     }
 }
 

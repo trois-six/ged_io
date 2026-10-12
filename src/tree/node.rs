@@ -8,6 +8,20 @@ use super::{PayloadRef, Structure, StructureRef, Substructures};
 /// repair find a tag's type without its text.
 pub(crate) use super::tag::{standard_index, STANDARD_TAGS};
 
+/// Gives `f` the identifier and the pointers of `n` and of every structure
+/// under it: every identifier it uses.
+pub(crate) fn identifiers<'n, N: Node<'n>>(n: N, f: &mut dyn FnMut(&'n str)) {
+    if let Some(x) = n.xref() {
+        f(x);
+    }
+    if let PayloadRef::Pointer(p) = n.payload() {
+        f(p);
+    }
+    for c in n.children() {
+        identifiers(c, f);
+    }
+}
+
 /// A structure, borrowed for `'n`.
 pub(crate) trait Node<'n>: Copy {
     /// The substructures.

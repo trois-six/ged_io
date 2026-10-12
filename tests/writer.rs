@@ -700,6 +700,45 @@ fn values_are_converted_as_written() {
     }
 }
 
+/// A new identifier is never one a pointer holds, whether a record's
+/// invalid one is renamed (`@U1` written `@U1@`), a record without one is
+/// numbered (`@I1@`) or a conversion takes a record out of another
+/// (`@M1@`): the pointer to no record would come to name it, and the next
+/// write read it otherwise (fuzz `writer`, `model` and `entry_points`).
+#[test]
+fn new_identifiers_take_none_a_pointer_holds() {
+    let cases = [
+        (
+            "0 HEAD\n1 SCHMA\n2 TAG _USER https://gedcom.io/terms/v7/record-SUBM\n0 @U1 _USER\n\n2 CHIL\n0 INDI\n1 SUBM @U1@\n",
+            "@U1@ _USER",
+        ),
+        (
+            "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @F1@ FAM\n1 HUSB @I1@\n0 INDI\n1 NAME Ann /Example/\n0 TRLR\n",
+            "@I1@ INDI",
+        ),
+        (
+            "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 OBJE\n2 FILE photo.jpg\n3 FORM jpg\n1 OBJE @M1@\n0 TRLR\n",
+            "@M1@ OBJE",
+        ),
+    ];
+    for (input, taken) in cases {
+        for version in VERSIONS {
+            let out = write(&read(input), version);
+            assert!(!out.contains(taken), "{version}: {out}");
+            assert_eq!(write(&read(&out), version), out, "{version}");
+        }
+    }
+    // Through the whole conformance pass, renamed or moved out.
+    let input = "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @i1@ INDI\n0 @F1@ FAM\n1 HUSB @I1@\n0 TRLR\n";
+    let mut bytes = Vec::new();
+    GedcomWriter::new()
+        .gedcom_version(GedcomVersion::V7_0)
+        .write_tree(&mut bytes, &Tree::parse(input))
+        .unwrap();
+    let out = String::from_utf8(bytes).unwrap();
+    assert!(out.contains("0 @I1_2@ INDI\n"), "{out}");
+}
+
 /// A record the header documents as an alias of a standard record
 /// (`_USER` for `record-SUBM`, 7.x `HEAD.SCHMA`) is a record of that type,
 /// whichever way the writer goes: the pointers to it stay standard (or

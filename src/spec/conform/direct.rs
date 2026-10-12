@@ -247,9 +247,11 @@ impl<'n> IdTypes<'n> {
         }
     }
 
-    /// Whether a record has `xref`.
-    pub(crate) fn knows(&self, xref: &str) -> bool {
-        self.get(xref).is_some()
+    /// Whether the dataset uses `xref`: a record has it or a pointer holds
+    /// it (the store has every identifier of the dataset). A new identifier
+    /// is never one of these, so that it names nothing a pointer named.
+    pub(crate) fn uses(&self, xref: &str) -> bool {
+        self.store.find_xref(xref).is_some() || self.made.contains_key(xref)
     }
 
     /// Gives `xref` (whose id in the store is `id`, when known) to a record
@@ -819,7 +821,7 @@ impl<'n> Conformer<'n> {
             let candidate = new_xref(self.rules, &old);
             let mut new = candidate.clone();
             let mut n = 1_usize;
-            while ids.knows(&new) {
+            while ids.uses(&new) {
                 n += 1;
                 new = numbered_xref(self.rules, &candidate, n);
             }
@@ -875,7 +877,7 @@ impl<'n> Conformer<'n> {
             None => {
                 let x = (1..usize::MAX)
                     .map(|n| format!("@U{n}@"))
-                    .find(|x| !ids.knows(x))?;
+                    .find(|x| !ids.uses(x))?;
                 ids.take(&x, None, self.record_of("SUBM"));
                 *stub = Some(stub_submitter(x.clone()));
                 Some(FlatPayload::Pointer(Cow::Owned(x), None))
@@ -929,7 +931,7 @@ impl<'n> Conformer<'n> {
         } else {
             let x = (1..usize::MAX)
                 .map(|n| format!("@U{n}@"))
-                .find(|x| !ids.knows(x))?;
+                .find(|x| !ids.uses(x))?;
             ids.take(&x, None, subm_ty);
             *stub = Some(stub_submitter(x.clone()));
             Some(x)
