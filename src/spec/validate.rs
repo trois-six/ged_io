@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 
+use super::graph::{Graph, Pointer};
 use super::index::{SchemaIndex, SPEC_TAGS};
 use super::payload::{self, Family};
 use super::schema::{tag_index, Kind, Schema, StructId, DATASET};
@@ -42,6 +43,12 @@ pub(crate) struct Validator<'a> {
     records: HashMap<&'a str, Record<'a>>,
     aliases: Aliases,
     out: Vec<Deviation>,
+    /// The pointers between records 7.x rules on ([`super::graph`]).
+    graph: Graph,
+    /// The record being checked, its type, and its pointers the graph
+    /// rules concern: line, tag and pointer.
+    current: Option<(&'a str, StructId)>,
+    pointers: Vec<(u32, &'a str, &'a str, bool)>,
 }
 
 /// The extension tags `HEAD.SCHMA` documents with a standard URI (7.x
@@ -129,6 +136,9 @@ where
         records: HashMap::new(),
         aliases: Aliases::of(head, schema),
         out: Vec::new(),
+        graph: Graph::default(),
+        current: None,
+        pointers: Vec::new(),
     };
     v.index(records.clone());
     v.dataset(&records);
@@ -495,7 +505,9 @@ impl<'a> Validator<'a> {
         let ty = self.pick(DATASET, r);
         match ty {
             Ok(ty) => {
+                self.begin_graph(r, ty);
                 self.structure(r, ty, "", true);
+                self.end_graph();
                 if options.record_size && self.family == Family::V551 {
                     let size = encoded_len(r, 0, self.family);
                     if size > MAX_RECORD_BYTES {
@@ -508,12 +520,64 @@ impl<'a> Validator<'a> {
                 }
             }
             Err(None) => match self.aliases.structs.get(tag).copied() {
-                Some(ty) => self.structure(r, ty, "", true),
+                Some(ty) => {
+                    self.begin_graph(r, ty);
+                    self.structure(r, ty, "", true);
+                    self.end_graph();
+                }
                 None => self.extension(r),
             },
             Err(Some((kind, why))) => {
                 self.push(r.line(), kind, why);
                 self.extension(r);
+            }
+        }
+    }
+
+    /// Starts collecting the pointers of record `r`, of type `ty`, that
+    /// the 7.x pointer rules concern.
+    fn begin_graph<N: Node<'a>>(&mut self, r: N, ty: StructId) {
+        self.pointers.clear();
+        self.current = (self.family == Family::V7 && self.rules.index.is_graph_record(ty))
+            .then(|| r.xref().map(|x| (x, ty)))
+            .flatten();
+    }
+
+    /// A substructure `n` of type `ty` of the current record: collected
+    /// when it is a pointer the rules concern, to a record of the type it
+    /// points to (others are deviations of their own).
+    fn graph_pointer<N: Node<'a>>(&mut self, n: N, ty: StructId) {
+        let Some((_, rtype)) = self.current else {
+            return;
+        };
+        let PayloadRef::Pointer(p) = n.payload() else {
+            return;
+        };
+        let index = self.rules.index;
+        if !index.is_graph_pointer(self.schema, rtype, ty) {
+            return;
+        }
+        let want = self.schema.kind(ty).1;
+        if self.records.get(p).is_some_and(|r| r.ty == Some(want)) {
+            self.pointers
+                .push((n.line(), n.tag(), p, index.is_alias(ty)));
+        }
+    }
+
+    /// Decides the rules for the current record's pointers.
+    fn end_graph(&mut self) {
+        let Some((xref, _)) = self.current.take() else {
+            return;
+        };
+        let pointers: Vec<Pointer<'_>> = self
+            .pointers
+            .iter()
+            .map(|&(_, _, to, alias)| Pointer { to, alias })
+            .collect();
+        for (i, broken) in self.graph.record(Some(xref), &pointers) {
+            if let Some(&(line, tag, p, _)) = self.pointers.get(i) {
+                self.out
+                    .push(dev(line, DeviationKind::Cycle, broken.detail(tag, p, xref)));
             }
         }
     }
@@ -588,12 +652,16 @@ impl<'a> Validator<'a> {
                             None => counts.push((t, 1)),
                         }
                     }
+                    self.graph_pointer(c, cty);
                     self.structure(c, cty, tag, false);
                 }
                 // A documented alias of a standard structure is that
                 // structure, wherever it is (7.x §1.5.1: relocated).
                 Err(None) => match self.aliases.structs.get(c.tag()).copied() {
-                    Some(aty) => self.structure(c, aty, tag, false),
+                    Some(aty) => {
+                        self.graph_pointer(c, aty);
+                        self.structure(c, aty, tag, false);
+                    }
                     None => self.extension(c),
                 },
                 Err(Some((kind, why))) => {

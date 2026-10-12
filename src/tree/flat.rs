@@ -197,6 +197,9 @@ pub(crate) struct Stream<'s> {
     /// The pointers of extension structures, each to name a record, with
     /// their ids.
     pointers: Vec<(Cow<'s, str>, Option<XrefId>)>,
+    /// The typed pointers the 7.x pointer rules between records concern
+    /// (`crate::spec::graph`), with their types.
+    graph: Vec<(Cow<'s, str>, StructId)>,
     /// The type of the record, once typed.
     root: StructId,
     /// The structures written.
@@ -289,6 +292,7 @@ impl<'s> Stream<'s> {
             spoiled: false,
             checks: Vec::new(),
             pointers: Vec::new(),
+            graph: Vec::new(),
             root: UNTYPED,
             written: 0,
             watch: None,
@@ -384,6 +388,7 @@ impl<'s> Flat<'s> {
             st.spoiled = false;
             st.checks.clear();
             st.pointers.clear();
+            st.graph.clear();
             st.root = UNTYPED;
             st.written = 0;
             st.converts = false;
@@ -431,6 +436,13 @@ impl<'s> Flat<'s> {
             };
             (payload_ref(p), id, *ty)
         })
+    }
+
+    /// The typed pointers of the record streamed that the 7.x pointer
+    /// rules between records concern, with their types.
+    pub(crate) fn stream_graph(&self) -> impl Iterator<Item = (&str, StructId)> {
+        let graph: &[_] = self.stream.as_deref().map_or(&[], |st| &st.graph);
+        graph.iter().map(|(p, ty)| (&**p, *ty))
     }
 
     /// The pointers of the extension structures of the record streamed,
@@ -810,6 +822,11 @@ impl<'s> Flat<'s> {
             empty,
             lang: false,
         });
+        if let FlatPayload::Pointer(p, _) = &payload {
+            if typing.is_graph_pointer(st.root, ty) {
+                st.graph.push((p.clone(), ty));
+            }
+        }
         match (
             typing.check(ty, &payload, claim, special),
             &st.targets,

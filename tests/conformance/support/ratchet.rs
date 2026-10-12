@@ -265,8 +265,8 @@ mod tests {
             );
             let n: u32 = g.cause[2..].parse().unwrap_or(0);
             assert!(
-                (1..=37).contains(&n),
-                "line {}: cause {} is not TS1–TS37",
+                (1..=38).contains(&n),
+                "line {}: cause {} is not TS1–TS38",
                 g.line,
                 g.cause
             );

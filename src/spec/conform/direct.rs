@@ -16,7 +16,10 @@
 //! record or one more than its type permits, a structure of a record
 //! relocated under a `HEAD.SCHMA` declaration (or one using the tag of a
 //! structure the header relocated), a 5.5.1 record over 32K — it answers
-//! `None` for, and the writer starts again with the whole pass. Either way
+//! `None` for, and the writer starts again with the whole pass. The 7.x
+//! pointer rules between records ([`crate::spec::graph`]) are decided
+//! record by record, as the whole pass decides them: a record with a
+//! pointer that breaks one gets `None` too. Either way
 //! the output and the repairs are those of the whole pass: the records the
 //! direct pass finds clean are those the whole pass finds clean, under the
 //! same state, and the records it repairs it repairs with the same code.
@@ -29,12 +32,14 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use super::clean::Walk;
+use super::cycles::{streamed_pointers, Found};
 use super::{
     bump, encoded_len, extension_tags, insert_records, Aliases, Body, Conformer, Family,
     FieldOrder, Named, Rec, RecRef, RepairKind, StructId, DATASET,
 };
 use crate::convert::Watch;
 use crate::model::{Dataset, RecordKind, Store, XrefId};
+use crate::spec::graph::{Graph, Pointer};
 use crate::spec::validate::{xref_error, MAX_RECORD_BYTES};
 use crate::tree::{Flat, FlatPayload, FlatRef, Node, Stream, Structure, Xref};
 use crate::writer::{
@@ -339,6 +344,9 @@ pub(crate) struct Direct<'n> {
     /// What a conversion looks for in the records, when the dataset is
     /// written in another version family without one ([`Direct::watch`]).
     watch: Option<Rc<Watch>>,
+    /// The pointers between records kept so far, for the 7.x pointer
+    /// rules ([`crate::spec::graph`]).
+    graph: Graph,
 }
 
 impl<'n> Direct<'n> {
@@ -448,6 +456,7 @@ impl<'n> Direct<'n> {
             head_lines,
             first,
             watch: None,
+            graph: Graph::default(),
         })
     }
 
@@ -531,6 +540,14 @@ impl<'n> Direct<'n> {
                 }
                 #[cfg(debug_assertions)]
                 self.c.assert_clean(r);
+                if self.c.family == Family::V7
+                    && self.c.tables.is_graph_record(walk.rtype)
+                    && !self
+                        .graph
+                        .keep_if_clean(r.xref(), &streamed_pointers(&self.arena, self.c.tables))
+                {
+                    return None;
+                }
                 return Some(Place::Lines);
             }
         }
@@ -616,6 +633,9 @@ impl<'n> Direct<'n> {
             if !self.count(walk.rtype) {
                 return None;
             }
+            if !self.graph_rules(r, place, walk.rtype) {
+                return None;
+            }
             if self.c.family == Family::V551 && walk.size > MAX_RECORD_BYTES {
                 let size = match (place, r.get(&self.c.arena)) {
                     (Place::Arena, _) => self
@@ -658,7 +678,36 @@ impl<'n> Direct<'n> {
         {
             return None;
         }
+        let rtype = c
+            .record_type_of(s.tag.as_str(), s.tag.standard_index())
+            .unwrap_or(DATASET);
+        if !self.graph_rules(r, Place::Record, rtype) {
+            return None;
+        }
         Some(Place::Record)
+    }
+
+    /// The 7.x pointer rules between records ([`crate::spec::graph`]) for
+    /// record `r`, of type `rtype`, left at `place`: its pointers kept, or
+    /// `false` when one breaks a rule, which the whole pass repairs.
+    fn graph_rules<N: Node<'n>>(&mut self, r: &Rec<'n, N>, place: Place, rtype: StructId) -> bool {
+        let c = &self.c;
+        if c.family != Family::V7 || !c.tables.is_graph_record(rtype) {
+            return true;
+        }
+        let found = match place {
+            Place::Arena => self
+                .arena
+                .root()
+                .map(|n| c.graph_pointers(n, rtype))
+                .unwrap_or_default(),
+            Place::Record | Place::Lines => {
+                let mut scratch = Flat::default();
+                super::with_node!(r.get(&c.arena), scratch, |n| c.graph_pointers(n, rtype))
+            }
+        };
+        let pointers: Vec<Pointer<'_>> = found.iter().map(Found::pointer).collect();
+        self.graph.keep_if_clean(r.xref(), &pointers)
     }
 
     /// Counts a clean record of type `rtype` towards the records of its

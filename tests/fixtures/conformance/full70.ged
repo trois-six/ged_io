@@ -335,7 +335,7 @@
 1 EXID OX1
 2 TYPE http://authority.example.invalid/media
 1 NOTE Media note
-1 SOUR @S1@
+1 SOUR @S2@
 2 PAGE first
 1 SOUR @S2@
 2 PAGE second

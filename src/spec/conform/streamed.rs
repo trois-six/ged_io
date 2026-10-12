@@ -17,15 +17,19 @@
 //!
 //! The records of each type are counted as they come, so that one more
 //! than its type permits becomes an extension record as in the whole
-//! pass.
+//! pass; and the 7.x pointer rules between records
+//! ([`crate::spec::graph`]) are decided as they come, as the whole pass
+//! decides them in the same order.
 
 use std::borrow::Cow;
 use std::rc::Rc;
 
 use super::clean::Walk;
+use super::cycles::{streamed_pointers, Found};
 use super::{bump, encoded_len, Aliases, Conformer, Family, StructId, Typing, DATASET};
 use crate::convert::Watch;
 use crate::spec::conform::Build;
+use crate::spec::graph::{Graph, Pointer};
 use crate::spec::validate::MAX_RECORD_BYTES;
 use crate::tree::Node;
 use crate::tree::{Flat, Stream, StreamBuffers, Structure};
@@ -45,6 +49,9 @@ pub(crate) struct Streamed {
     pub(crate) repairs: Vec<Repair>,
     /// The room of stream mode, from record to record.
     buffers: Option<StreamBuffers>,
+    /// The pointers between records kept so far, for the 7.x pointer
+    /// rules ([`crate::spec::graph`]).
+    graph: Graph,
 }
 
 /// A record as [`Streamed::record`] leaves it.
@@ -76,6 +83,7 @@ impl Streamed {
             counts: Vec::new(),
             repairs: Vec::new(),
             buffers: None,
+            graph: Graph::default(),
         };
         let mut c = this.conformer();
         if let Some(x) = head.xref.take() {
@@ -160,7 +168,17 @@ impl Streamed {
                 && !flat.spoiled()
                 && c.is_clean_streamed(&flat, &mut walk)
                 && (c.family != Family::V551 || walk.size <= MAX_RECORD_BYTES);
-            let keep = clean && self.count(&c, walk.rtype);
+            let mut keep = clean && self.count(&c, walk.rtype);
+            if keep
+                && c.family == Family::V7
+                && c.tables.is_graph_record(walk.rtype)
+                && !self
+                    .graph
+                    .keep_if_clean(record.xref(), &streamed_pointers(&flat, c.tables))
+            {
+                self.uncount(&c, walk.rtype);
+                keep = false;
+            }
             self.buffers = flat.take_stream().map(Stream::into_buffers);
             if let Some(b) = &mut self.buffers {
                 sink.take_back(b.lines_mut(), keep);
@@ -190,7 +208,14 @@ impl Streamed {
                     .root()
                     .is_some_and(|n| encoded_len(n, 0, c.family) > MAX_RECORD_BYTES);
             if !over && !big {
-                return Outcome::Clean(Box::new(flat));
+                let found = flat
+                    .root()
+                    .map(|n| c.graph_pointers(n, walk.rtype))
+                    .unwrap_or_default();
+                let pointers: Vec<Pointer<'_>> = found.iter().map(Found::pointer).collect();
+                if self.graph.keep_if_clean(record.xref(), &pointers) {
+                    return Outcome::Clean(Box::new(flat));
+                }
             }
             if !over {
                 // Counted again by the repair.
@@ -203,9 +228,35 @@ impl Streamed {
             .unwrap_or_default();
         c.path.clear();
         c.record(&mut s, &mut self.counts);
+        self.cut_graph(&mut c, &mut s, record.xref());
         let notes = Self::notes(&mut c, &mut s, fresh);
         self.repairs.append(&mut c.repairs);
         Outcome::Repaired(s, notes)
+    }
+
+    /// The 7.x pointer rules between records for the repaired record `s`
+    /// (identifier `xref`): its pointers that break one cut, the others
+    /// kept.
+    fn cut_graph(&mut self, c: &mut Conformer<'_>, s: &mut Structure, xref: Option<&str>) {
+        let Some(rtype) = c.record_type_of(s.tag.as_str(), s.tag.standard_index()) else {
+            return;
+        };
+        let found = c.graph_pointers(&*s, rtype);
+        if found.is_empty() {
+            return;
+        }
+        let pointers: Vec<Pointer<'_>> = found.iter().map(Found::pointer).collect();
+        let broken = self.graph.record(xref, &pointers);
+        if broken.is_empty() {
+            return;
+        }
+        let x = xref.unwrap_or_default();
+        for (i, b) in broken {
+            if let Some(f) = found.get(i) {
+                c.cut(s, f.path(), b, x);
+            }
+        }
+        c.model_order(s, rtype);
     }
 
     /// Counts a clean record of type `rtype` towards the records of its

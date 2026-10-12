@@ -25,7 +25,9 @@
 //! every documented extension tag the output uses; in 7.x, a substructure
 //! with a payload or a substructure (§1.2: "A structure must have either a
 //! non-empty payload or at least 1 substructure"; records, which pointers
-//! name, are left to the writer).
+//! name, are left to the writer); in 7.x (7.0.17), no `ALIA` to its own
+//! record and no cycle of pointers between sources and multimedia objects
+//! or shared notes.
 
 use super::spec_tables::{Cal, Pay, Spec, Sub, V551, V70, V71};
 use super::tree::{self, Node, Payload, Version};
@@ -518,6 +520,9 @@ fn check_records(records: &[Node], target: Target, input: Option<&str>, issues: 
         target,
         record_types,
     };
+    if target.is_v7() {
+        check_pointer_cycles(records, issues);
+    }
     let mut root_counts: HashMap<&str, usize> = HashMap::new();
     for r in records {
         if r.tag.starts_with('_') {
@@ -548,6 +553,85 @@ fn check_records(records: &[Node], target: Target, input: Option<&str>, issues: 
                 line: 0,
                 detail: format!("{} records: {n} > {}", s.tag, s.max),
             });
+        }
+    }
+}
+
+/// 7.x pointers between records (7.0.17): an individual's `ALIA` never
+/// names the individual itself, and the pointers of sources to multimedia
+/// objects and shared notes, and back, form no cycle. Any cycle is
+/// reported once, at a record on it.
+fn check_pointer_cycles(records: &[Node], issues: &mut Vec<Issue>) {
+    let tag_of: HashMap<&str, &str> = records
+        .iter()
+        .filter_map(|r| Some((r.xref.as_deref()?, r.tag.as_str())))
+        .collect();
+    let mut edges: HashMap<&str, Vec<&str>> = HashMap::new();
+    for r in records {
+        let Some(x) = r.xref.as_deref() else { continue };
+        if r.tag == "INDI" {
+            for a in r.children.iter().filter(|c| c.tag == "ALIA") {
+                if let Payload::Pointer(p) = &a.payload {
+                    if p == x {
+                        issues.push(Issue {
+                            rule: "alia-self",
+                            line: a.line,
+                            detail: p.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        let wanted: &[&str] = match r.tag.as_str() {
+            "SOUR" => &["OBJE", "SNOTE"],
+            "OBJE" | "SNOTE" => &["SOUR"],
+            _ => continue,
+        };
+        fn pointers<'a>(n: &'a Node, out: &mut Vec<&'a str>) {
+            for c in n.children.iter().filter(|c| !c.tag.starts_with('_')) {
+                if let Payload::Pointer(p) = &c.payload {
+                    out.push(p);
+                }
+                pointers(c, out);
+            }
+        }
+        let mut found = Vec::new();
+        pointers(r, &mut found);
+        found.retain(|p| tag_of.get(p).is_some_and(|t| wanted.contains(t)));
+        edges.insert(x, found);
+    }
+    // Depth-first, three colours: a pointer to a record on the path closes
+    // a cycle.
+    let mut colour: HashMap<&str, u8> = HashMap::new();
+    for r in records {
+        let Some(start) = r.xref.as_deref() else {
+            continue;
+        };
+        if colour.contains_key(start) || !edges.contains_key(start) {
+            continue;
+        }
+        let mut stack: Vec<(&str, usize)> = vec![(start, 0)];
+        colour.insert(start, 1);
+        while let Some(&mut (at, ref mut next)) = stack.last_mut() {
+            let out = edges.get(at).map_or(&[][..], Vec::as_slice);
+            if let Some(&to) = out.get(*next) {
+                *next += 1;
+                match colour.get(to) {
+                    Some(1) => issues.push(Issue {
+                        rule: "pointer-cycle",
+                        line: r.line,
+                        detail: format!("{at} -> {to}"),
+                    }),
+                    Some(_) => {}
+                    None => {
+                        colour.insert(to, 1);
+                        stack.push((to, 0));
+                    }
+                }
+            } else {
+                colour.insert(at, 2);
+                stack.pop();
+            }
         }
     }
 }
@@ -1212,6 +1296,21 @@ mod tests {
     fn minimal_streams_are_clean() {
         assert_eq!(check(OK7, Target::V70, None), []);
         assert_eq!(check(OK5, Target::V551, None), []);
+    }
+
+    #[test]
+    fn pointer_rules_between_records() {
+        let doc = |body: &str| format!("0 HEAD\n1 GEDC\n2 VERS 7.0\n{body}0 TRLR\n");
+        let self_alias = doc("0 @I1@ INDI\n1 ALIA @I1@\n");
+        assert_eq!(rules(&self_alias, Target::V70), ["alia-self"]);
+        let cycle = doc(
+            "0 @S1@ SOUR\n1 OBJE @O1@\n0 @O1@ OBJE\n1 FILE a.jpg\n2 FORM image/jpeg\n1 SOUR @S1@\n",
+        );
+        assert_eq!(rules(&cycle, Target::V70), ["pointer-cycle"]);
+        let cut = cycle.replace("1 SOUR @S1@", "1 _SOUR @S1@");
+        assert_eq!(rules(&cut, Target::V70), Vec::<&str>::new());
+        let notes = doc("0 @N1@ SNOTE x\n1 SOUR @S1@\n0 @S1@ SOUR\n1 SNOTE @N1@\n");
+        assert_eq!(rules(&notes, Target::V70), ["pointer-cycle"]);
     }
 
     #[test]

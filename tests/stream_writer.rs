@@ -345,3 +345,35 @@ fn a_record_a_conversion_makes_an_extension_record_is_written_last() {
         "{in_memory}\n---\n{stream}"
     );
 }
+
+/// The 7.x pointer rules between records (7.0.17) hold record by record:
+/// the streaming writer cuts the pointer that closes a cycle, and an `ALIA`
+/// to its own record, as the in-memory writer does.
+#[test]
+fn streaming_keeps_the_pointer_rules_between_records() {
+    let data = Dataset::parse(
+        "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 ALIA @I1@\n\
+         0 @S1@ SOUR\n1 TITL Register\n1 OBJE @O1@\n\
+         0 @O1@ OBJE\n1 FILE scan.jpg\n2 FORM image/jpeg\n1 SOUR @S1@\n2 PAGE 4\n0 TRLR\n",
+    );
+    let (text, report) = streamed(&data, WriterConfig::default());
+    let (in_memory, memory_report) = GedcomWriter::new()
+        .write_to_string_with_report(&data)
+        .unwrap();
+    assert_eq!(text.trim_start_matches('\u{feff}'), in_memory);
+    assert_eq!(report, memory_report);
+    assert!(text.contains("0 @I1@ INDI\n1 _ALIA @I1@\n"), "{text}");
+    assert!(text.contains("1 OBJE @O1@\n"), "{text}");
+    assert!(text.contains("1 _SOUR @S1@\n2 PAGE 4\n"), "{text}");
+    let cycles = report
+        .repairs
+        .iter()
+        .filter(|r| r.kind == RepairKind::Cycle)
+        .count();
+    assert_eq!(cycles, 2, "{:?}", report.repairs);
+    assert!(
+        validate_text(&text).is_empty(),
+        "{:?}",
+        validate_text(&text)
+    );
+}
