@@ -35,7 +35,7 @@ use super::{
 };
 use crate::model::{Store, XrefId};
 use crate::spec::validate::{xref_error, MAX_RECORD_BYTES};
-use crate::tree::{Flat, FlatRef, Node, Stream, Structure, Xref};
+use crate::tree::{Flat, FlatPayload, FlatRef, Node, Stream, Structure, Xref};
 use crate::writer::{
     complete_head, needs_submitter, new_xref, numbered_xref, stub_submitter, LineSink,
 };
@@ -118,6 +118,20 @@ impl<'n> IdTypes<'n> {
         }
         true
     }
+
+    /// Takes `xref` back from the record [`IdTypes::take`] gave it to.
+    fn forget(&mut self, xref: &str) {
+        match self.store.find_xref(xref) {
+            Some(id) => {
+                if let Some(slot) = self.types.get_mut(id.index()) {
+                    *slot = NO_RECORD;
+                }
+            }
+            None => {
+                self.made.remove(xref);
+            }
+        }
+    }
 }
 
 impl IdTypes<'_> {
@@ -167,12 +181,17 @@ pub(crate) struct Direct<'n> {
     /// permits a number of.
     counts: Vec<(u8, u32)>,
     /// The record being written; in stream mode ([`Flat::set_stream`])
-    /// when [`Direct::stream_into`] set it.
+    /// when [`Direct::prepare`] set it.
     arena: Flat<'n>,
     /// The extension tags the header's repair declared in `HEAD.SCHMA`
     /// for the structures it relocated: the whole pass declares them only
     /// when no record uses them.
     relocated: Vec<String>,
+    /// Whether the arena's stream holds the header's lines
+    /// ([`Direct::head_lines`]).
+    head_lines: bool,
+    /// The stub submitter record to write first ([`Direct::take_first`]).
+    first: Option<Structure>,
 }
 
 impl<'n> Direct<'n> {
@@ -181,59 +200,112 @@ impl<'n> Direct<'n> {
     /// any record: renames the identifiers, completes the header (adding
     /// the stub submitter it adds) and repairs it. `None` when the dataset
     /// needs the whole pass.
+    ///
+    /// With `sink` (UTF-8 output), the records that write themselves are
+    /// written as lines straight away, as `sink` writes them, when their
+    /// structures need no look of the check's walk ([`Flat`] stream mode).
+    /// The documented aliases of standard structures (7.x `HEAD.SCHMA`)
+    /// need it: none may be declared. A typed header that needs neither
+    /// repair nor stub submitter is written so, completed
+    /// ([`Direct::head_lines`]).
     pub(crate) fn prepare<N: Node<'n>>(
         records: &mut Vec<Rec<'n, N>>,
         version: GedcomVersion,
         order: Option<&'static FieldOrder>,
         store: &'n Store,
+        sink: Option<&LineSink<'_>>,
     ) -> Option<Self> {
         let mut c = Conformer::new(version);
         c.order = order;
         well_formed(records)?;
-        let mut scratch = Flat::default();
-        let head = records.first()?.get(&c.arena);
-        c.aliases = super::with_node!(head, scratch, |h| Aliases::of(Some(h), c.schema));
-        // The extension tags of the header as given, which a relocation
-        // does not take.
-        let head_tags = (c.family == Family::V7)
-            .then(|| records.first().map(|h| extension_tags(h, &c.arena)))
-            .flatten();
         let mut ids = IdTypes::new(store);
         c.rename(records, &mut ids);
+        let mut arena = Flat::default();
+        arena.set_typing(Some(super::Typing::of(version)));
         let mut stub = None;
-        c.complete_direct(records, &mut ids, &mut stub)?;
+        let submitter = match sink {
+            Some(sink) => {
+                // Pointers are checked by the check's walk until the
+                // header is.
+                arena.set_stream(Some(Stream::new(c.rules, sink.record_lines(), None)));
+                c.head_submitter(records, &mut ids, &mut stub)
+            }
+            None => None,
+        };
         let ids = Rc::new(ids);
         c.ids = Some(Rc::clone(&ids));
-        c.used = head_tags;
-        let relocated = c.check_head(records)?;
-        c.used = None;
-        if let Some(stub) = stub {
-            insert_records(records, vec![stub]);
+        let head_lines =
+            submitter.is_some_and(|submitter| c.stream_head(records, &mut arena, submitter));
+        let mut first = None;
+        let (ids, relocated) = if head_lines {
+            // The stub goes first, as the whole pass inserts it, unless
+            // other submitter records come first.
+            match stub {
+                Some(stub) if records.get(1).is_some_and(|r| r.tag() != "SUBM") => {
+                    first = Some(stub);
+                }
+                Some(stub) => insert_records(records, vec![stub]),
+                None => {}
+            }
+            (ids, Vec::new())
+        } else {
+            c.ids = None;
+            let mut ids = Rc::into_inner(ids)?;
+            if let Some(x) = stub.and_then(|s| s.xref) {
+                ids.forget(x.as_str());
+            }
+            let head = records.first()?.get(&c.arena);
+            let mut scratch = Flat::default();
+            c.aliases = super::with_node!(head, scratch, |h| Aliases::of(Some(h), c.schema));
+            // The extension tags of the header as given, which a relocation
+            // does not take.
+            let head_tags = (c.family == Family::V7)
+                .then(|| records.first().map(|h| extension_tags(h, &c.arena)))
+                .flatten();
+            let mut stub = None;
+            c.complete_direct(records, &mut ids, &mut stub)?;
+            let ids = Rc::new(ids);
+            c.ids = Some(Rc::clone(&ids));
+            c.used = head_tags;
+            let relocated = c.check_head(records)?;
+            c.used = None;
+            if let Some(stub) = stub {
+                insert_records(records, vec![stub]);
+            }
+            (ids, relocated)
+        };
+        if !c.streams() {
+            arena.set_stream(None);
         }
-        let mut arena = scratch;
-        arena.clear();
-        arena.set_typing(Some(super::Typing::of(version)));
+        // Pointers are looked up as they are written, unless renamed
+        // identifiers make the check's walk follow them.
+        arena.set_stream_targets(c.renamed.is_empty().then(|| Rc::clone(&ids)));
         Some(Self {
             c,
             ids,
             counts: Vec::new(),
             arena,
             relocated,
+            head_lines,
+            first,
         })
     }
 
-    /// Writes the records that write themselves as lines straight away,
-    /// as `sink` writes them, when their structures need no look of the
-    /// check's walk ([`Flat`] stream mode). The documented aliases of
-    /// standard structures (7.x `HEAD.SCHMA`) need it: none may be
-    /// declared.
-    pub(crate) fn stream_into(&mut self, sink: &LineSink<'_>) {
-        if self.c.streams() {
-            // Pointers are looked up as they are written, unless renamed
-            // identifiers make the check's walk follow them.
-            let targets = self.c.renamed.is_empty().then(|| Rc::clone(&self.ids));
-            let stream = Stream::new(self.c.rules, sink.record_lines(), targets);
-            self.arena.set_stream(Some(stream));
+    /// The stub submitter record to write first, after the header, when
+    /// [`Direct::prepare`] completed the header with it and kept it out
+    /// of the records (sparing their move).
+    pub(crate) fn take_first(&mut self) -> Option<Structure> {
+        self.first.take()
+    }
+
+    /// The lines of the header, completed, when [`Direct::prepare`] wrote
+    /// it so: to write before any record.
+    pub(crate) fn head_lines(&mut self) -> Option<&mut LineSink<'static>> {
+        if self.head_lines {
+            self.head_lines = false;
+            self.arena.stream_lines()
+        } else {
+            None
         }
     }
 
@@ -253,7 +325,7 @@ impl<'n> Direct<'n> {
     /// it: where it is then. `None` when the dataset needs the whole pass.
     ///
     /// A record that writes itself is first written as lines, with the
-    /// identifier `xref` ([`Direct::stream_into`]): when its structures are
+    /// identifier `xref` (stream mode, [`Direct::prepare`]): when its structures are
     /// all typed and its lines need no repair, it stays so
     /// ([`Place::Lines`]).
     pub(crate) fn record<N: Node<'n>>(
@@ -500,6 +572,75 @@ impl<'n> Conformer<'n> {
             );
             r.xref = Some(Xref::new(new));
         }
+    }
+
+    /// The `SUBM` pointer the typed header of `records` is completed
+    /// with ([`FlatPayload::None`] when it needs none), to write it as lines
+    /// ([`Conformer::stream_head`]): the first submitter record's, else a
+    /// stub submitter's (in `stub`, its identifier taken), as
+    /// [`Conformer::complete_direct`] finds it. `None` when the header is
+    /// not typed, declares extension tags (7.x `HEAD.SCHMA`) or the
+    /// submitter was renamed.
+    fn head_submitter<N: Node<'n>>(
+        &self,
+        records: &[Rec<'n, N>],
+        ids: &mut IdTypes<'n>,
+        stub: &mut Option<Structure>,
+    ) -> Option<FlatPayload<'n>> {
+        let Some(Body::Built(b)) = records.first().map(|r| &r.body) else {
+            return None;
+        };
+        let h = b.typed_head()?;
+        if h.schema.is_some() {
+            return None;
+        }
+        if !self.rules.head_sour_subm || h.submitter.is_some() {
+            return Some(FlatPayload::None);
+        }
+        let first = records
+            .iter()
+            .find(|r| r.tag() == "SUBM" && r.xref().is_some());
+        match first {
+            Some(
+                r @ Rec {
+                    body: Body::Built(_),
+                    xref: Some(x),
+                    ..
+                },
+            ) => Some(FlatPayload::Pointer(Cow::Borrowed(x), r.id)),
+            Some(_) => None,
+            None => {
+                let x = (1..usize::MAX)
+                    .map(|n| format!("@U{n}@"))
+                    .find(|x| !ids.knows(x))?;
+                ids.take(&x, None, self.record_of("SUBM"));
+                *stub = Some(stub_submitter(x.clone()));
+                Some(FlatPayload::Pointer(Cow::Owned(x), None))
+            }
+        }
+    }
+
+    /// The typed header of `records`, completed with `submitter`
+    /// ([`Conformer::head_submitter`]), written as lines into `arena` (in
+    /// stream mode) and checked as it is: `true` when it needs no repair,
+    /// what [`Conformer::check_head`] would find clean.
+    fn stream_head<N: Node<'n>>(
+        &self,
+        records: &[Rec<'n, N>],
+        arena: &mut Flat<'n>,
+        submitter: FlatPayload<'n>,
+    ) -> bool {
+        let Some(Body::Built(b)) = records.first().map(|r| &r.body) else {
+            return false;
+        };
+        arena.begin_stream(None);
+        if !b.build_completed_head(arena, self.rules, submitter) {
+            return false;
+        }
+        let mut walk = Walk::default();
+        !arena.spoiled()
+            && self.is_clean_streamed(arena, &mut walk)
+            && !(self.family == Family::V551 && walk.size > MAX_RECORD_BYTES)
     }
 
     /// (i) [`Conformer::complete_head`] of a typed dataset: the stub

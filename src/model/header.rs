@@ -2,10 +2,15 @@
 
 use super::address::Address;
 use super::date::ExactDate;
-use super::driver::gedcom_struct;
+use std::borrow::Cow;
+
+use super::driver::{gedcom_struct, Slot, StdTag, WriteCx};
 use super::enums::{CharacterSet, GedcomForm};
 use super::note::{Note, TextTranslation};
 use super::text::{Store, Text, XrefId};
+use crate::tree::{Flat, FlatPayload, UNKNOWN};
+use crate::version::VersionRules;
+use crate::writer::head::PRODUCT;
 
 gedcom_struct! {
     /// The header (`HEAD`): what the file is (`GEDC`), its character set
@@ -81,6 +86,79 @@ impl Header {
     ) -> Option<std::borrow::Cow<'a, str>> {
         let vers = self.gedcom.as_ref()?.version.as_ref()?;
         Some(vers.to_str(store))
+    }
+
+    /// Writes the header into `out` as the writer completes it for
+    /// `rules` in UTF-8 ([`crate::writer::head`]), its fields in model
+    /// order: `GEDC` with the target's version (and 5.5.1 form), 5.5.1
+    /// `CHAR UTF-8`, the `SOUR` 5.5.1 requires (`ged_io` when it has
+    /// none), the pointer `submitter` (if any) as its `SUBM` when it has none, then its other
+    /// fields. `false`, having written nothing, when it holds a structure
+    /// the completion would keep where the typed model does not write it
+    /// (an unknown or extension substructure, a payload or identifier set
+    /// aside).
+    pub(crate) fn write_completed_flat<'s>(
+        &'s self,
+        cx: &WriteCx<'s>,
+        out: &mut Flat<'s>,
+        rules: &VersionRules,
+        submitter: FlatPayload<'s>,
+    ) -> bool {
+        // The completion replaces `GEDC.VERS` and `GEDC.FORM`, and `CHAR`
+        // whole.
+        let gedc_kept = self.gedcom.as_ref().is_some_and(|g| {
+            g.extra
+                .iter()
+                .any(|n| !matches!(cx.store.tag(n.tag), "VERS" | "FORM"))
+        });
+        if !self.extra.is_empty() || gedc_kept {
+            return false;
+        }
+        macro_rules! tag {
+            ($t:literal) => {
+                const { StdTag::new($t) }
+            };
+        }
+        let text = |s: &'static str| FlatPayload::Text(Cow::Borrowed(s), UNKNOWN);
+        let at = out.open_typed("HEAD", tag!("HEAD").index, None, FlatPayload::None, None);
+        let gedc = out.open_typed("GEDC", tag!("GEDC").index, None, FlatPayload::None, None);
+        out.leaf_typed("VERS", tag!("VERS").index, text(rules.vers_payload), None);
+        if let Some(form) = rules.gedc_form {
+            out.leaf_typed("FORM", tag!("FORM").index, text(form), None);
+        }
+        out.close(gedc);
+        if rules.head_char {
+            out.leaf_typed("CHAR", tag!("CHAR").index, text("UTF-8"), None);
+        }
+        match &self.source {
+            None if rules.head_sour_subm => {
+                let sour = out.open_typed("SOUR", tag!("SOUR").index, None, text(PRODUCT), None);
+                let version = text(env!("CARGO_PKG_VERSION"));
+                out.leaf_typed("VERS", tag!("VERS").index, version, None);
+                out.leaf_typed("NAME", tag!("NAME").index, text(PRODUCT), None);
+                out.close(sour);
+            }
+            source => Slot::to_flat(source, tag!("SOUR"), cx, out),
+        }
+        Slot::to_flat(&self.destination, tag!("DEST"), cx, out);
+        Slot::to_flat(&self.date, tag!("DATE"), cx, out);
+        match (&self.submitter, submitter) {
+            (None, FlatPayload::None) | (Some(_), _) => {
+                Slot::to_flat(&self.submitter, tag!("SUBM"), cx, out);
+            }
+            (None, pointer) => out.leaf_typed("SUBM", tag!("SUBM").index, pointer, None),
+        }
+        Slot::to_flat(&self.submission, tag!("SUBN"), cx, out);
+        Slot::to_flat(&self.file, tag!("FILE"), cx, out);
+        Slot::to_flat(&self.copyright, tag!("COPR"), cx, out);
+        Slot::to_flat(&self.language, tag!("LANG"), cx, out);
+        Slot::to_flat(&self.place, tag!("PLAC"), cx, out);
+        Slot::to_flat(&self.notes, tag!("NOTE"), cx, out);
+        Slot::to_flat(&self.schema, tag!("SCHMA"), cx, out);
+        Slot::to_flat(&self.title, tag!("TITL"), cx, out);
+        Slot::to_flat(&self.description, tag!("DESC"), cx, out);
+        out.close(at);
+        true
     }
 }
 

@@ -337,6 +337,14 @@ impl<'s> Flat<'s> {
         self.stream = stream.map(Box::new);
     }
 
+    /// Sets the records the pointers of the records streamed name, looked
+    /// up as they are written ([`Stream::new`]).
+    pub(crate) fn set_stream_targets(&mut self, targets: Option<Rc<IdTypes<'s>>>) {
+        if let Some(st) = self.stream.as_deref_mut() {
+            st.targets = targets;
+        }
+    }
+
     /// Whether the arena is in stream mode.
     pub(crate) fn is_streaming(&self) -> bool {
         self.stream.is_some()

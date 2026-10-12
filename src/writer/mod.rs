@@ -49,7 +49,7 @@
 //! ```
 
 mod emit;
-mod head;
+pub(crate) mod head;
 mod stream;
 mod xref;
 
@@ -1003,10 +1003,10 @@ fn write_direct<'n>(
     order: &'static FieldOrder,
     store: &'n Store,
 ) -> Result<Option<Vec<Repair>>, WriteError> {
-    let Some(mut direct) = Direct::prepare(records, rules.version, Some(order), store) else {
-        return Ok(None);
-    };
-    let Some(mut head) = take_head(records) else {
+    let utf8 = sink.encoding() == OutputEncoding::Utf8;
+    let stream = utf8.then_some(&*sink);
+    let Some(mut direct) = Direct::prepare(records, rules.version, Some(order), store, stream)
+    else {
         return Ok(None);
     };
     let last = records.len().saturating_sub(1);
@@ -1023,17 +1023,31 @@ fn write_direct<'n>(
     let ids = direct.ids();
     let known = move |x: &str| ids.knows(x);
     let mut xrefs = XrefMap::missing(rules, missing.into_iter(), &known);
-    // The header's pointers name records, whose identifiers the pass made
-    // valid: the map leaves them as they are.
-    if head::needs_submitter(&head, rules) {
-        return Ok(None);
-    }
-    head::complete(&mut head, rules, sink.charset(), None);
-    if sink.encoding() == OutputEncoding::Utf8 {
-        direct.stream_into(sink);
-    }
     let mut out = Emitter { rules, sink };
-    put_clean(&mut out, &head)?;
+    if let Some(lines) = direct.head_lines() {
+        // Completed and written as lines already.
+        out.sink.append(lines)?;
+        if let Some(stub) = direct.take_first() {
+            let mut stub: Rec<'n, &'n Structure> = Rec::owned(stub);
+            if direct.record(0, &mut stub, None) != Some(Place::Record) {
+                return Ok(None);
+            }
+            if let Some(s) = stub.as_owned() {
+                put_record(&mut out, &mut xrefs, s.xref.as_deref(), s, &mut Vec::new())?;
+            }
+        }
+    } else {
+        let Some(mut head) = take_head(records) else {
+            return Ok(None);
+        };
+        // The header's pointers name records, whose identifiers the pass
+        // made valid: the map leaves them as they are.
+        if head::needs_submitter(&head, rules) {
+            return Ok(None);
+        }
+        head::complete(&mut head, rules, out.sink.charset(), None);
+        put_clean(&mut out, &head)?;
+    }
     for i in 1..last {
         let Some(record) = records.get_mut(i) else {
             break;
