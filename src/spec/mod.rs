@@ -9,8 +9,9 @@
 //! set are generated at development time by `tools/spec-tables/gen.py`
 //! into `src/spec/tables.rs`, which holds facts only:
 //!
-//! - GEDCOM 7.0 and 7.1 from FamilySearch/GEDCOM `extracted-files/`
-//!   (Apache-2.0, attributed in `NOTICE`);
+//! - GEDCOM 7.0 from FamilySearch/GEDCOM `extracted-files/` of the 7.0.18
+//!   release, and 7.1, a draft, from the same files on the `v7.1` branch of
+//!   FamilySearch/GEDCOM (Apache-2.0, attributed in `NOTICE`);
 //! - GEDCOM 5.5.1 from the gedcom-go transcription of the specification
 //!   (MIT, attributed in `NOTICE`), corrected and completed against the
 //!   PDF by `tools/spec-tables/551-errata.tsv`, which cites a page for each

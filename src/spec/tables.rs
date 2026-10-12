@@ -5,7 +5,7 @@
 //! The types and the layout are described in `schema.rs`.
 //!
 //! Sources (see NOTICE):
-//! * fs70: FamilySearch/GEDCOM @ 512e38d0cd8b882f9cd23256e53df78a06fe702d (Apache-2.0)
+//! * fs70: FamilySearch/GEDCOM v7.0.18 @ 2f0b863b5a42275bd2b3ca315900cf779e42f28b (Apache-2.0)
 //! * fs71: FamilySearch/GEDCOM (v7.1 branch) @ c4517798b163500be5b994f601c51940f3c21d1c (Apache-2.0)
 //! * gedcom-go: cacack/gedcom-go @ 3c6d42de6e1c4fc487a8438cc8aaa892578ac97e (MIT)
 //! * 5.5.1 corrections: tools/spec-tables/551-errata.tsv (PDF page references)
@@ -16,15 +16,15 @@
 //! * `3d2eadef9afeb96d6d0363754a4d136ae4b0759f4ff62a372d9f9cbf45135ae7` gedcom-go-5.5.1/primitives.tsv
 //! * `ab91481a030771468d6eaf0877040db72532e23a396d278292f2f613598e2f90` gedcom-go-5.5.1/substructures.tsv
 //! * `fd408f4885c8f1f0181b0f0ad0cf760c5b7c584feab889ab2979b969d4b1cc39` tools/spec-tables/551-errata.tsv
-//! * `cf665f5cd5d3115bdcfce9ead209d6921d85336e502a3489092fc09b981c97be` fs-gedcom-7.0/extracted-files/cardinalities.tsv
-//! * `93a2e168e3d0aed5ccb58b0caeae224684dc48070d2cfbacf34733d3960cf999` fs-gedcom-7.0/extracted-files/enumerations.tsv
-//! * `1f898fc753a9156b044ef678ed324b865a0a451f164564bf35c04f5fe5250b86` fs-gedcom-7.0/extracted-files/enumerationsets.tsv
-//! * `f0a8b3ac222ed7ae0736aebf87911218278ad6e4f755449ee44090cec3b8c1e5` fs-gedcom-7.0/extracted-files/payloads.tsv
-//! * `90501ba37b3c4c6140f6da7b8054303c08ffbb1809b1ea058e61df422743f3b1` fs-gedcom-7.0/extracted-files/substructures.tsv
-//! * `e5d436a5f9505053f86c0ba20e8c60534725c8185316eb99b3f6eaf25f018f87` fs-gedcom-7.0/extracted-files/tags/cal-GREGORIAN
-//! * `081944bf46187f94acaa031f829b2d7a820223affb2443f51210763a29e29f28` fs-gedcom-7.0/extracted-files/tags/cal-JULIAN
-//! * `70de0ba3768d6452844f1416e5d9d547a4994e27d551406b45e8daceefb2f350` fs-gedcom-7.0/extracted-files/tags/cal-FRENCH_R
-//! * `baf143b9bb79bff8364ebd0f3ab63b031f971786ec3cd4f2f71bab6a65ebe71d` fs-gedcom-7.0/extracted-files/tags/cal-HEBREW
+//! * `6b2d9acb8271ad5fc23d60013ed93f4de6354bb4a5adca3a8361643cb49823d0` fs-gedcom-7.0/extracted-files/cardinalities.tsv
+//! * `aea2b34be75e9715da0041f21a4b65b7bbb84bc8e101d56dd27aeaf94e5bf740` fs-gedcom-7.0/extracted-files/enumerations.tsv
+//! * `6a6519dc60916299d409255f2b5d4ec6688f279bc65d46288f4c31caaf715085` fs-gedcom-7.0/extracted-files/enumerationsets.tsv
+//! * `954e5a810860312eda62e8dc4a9e70afc1088d4356a68323dc879a5ea5ea6d46` fs-gedcom-7.0/extracted-files/payloads.tsv
+//! * `152909ecc489bee35a3e47b5ef9b5ebdb20bde196ce4476a4e969aceafc10937` fs-gedcom-7.0/extracted-files/substructures.tsv
+//! * `12e3d89fa62da193dce559097ef6ab99ce1b96ae1a8c0cb1844180618e08cdb8` fs-gedcom-7.0/extracted-files/tags/cal-GREGORIAN
+//! * `b9057d6944a41136d189b69707a7d05587d5c3ef02e318446f299aa279adf679` fs-gedcom-7.0/extracted-files/tags/cal-JULIAN
+//! * `a45f22b6ffbc21f3f3451fc5f6cc07e230cde7ad2b0b597cfb9e01beee7e51ff` fs-gedcom-7.0/extracted-files/tags/cal-FRENCH_R
+//! * `f88c9bd5d1854c31a3b581ff6727ac9a6c3239a77c61009044010d7e3fa18df1` fs-gedcom-7.0/extracted-files/tags/cal-HEBREW
 //! * `e548c9000bfa15874268b87b10072dca7beddb381762a949659b6a5dc72d70c2` fs-gedcom-7.1/extracted-files/cardinalities.tsv
 //! * `f1ef3478eb4bc45898b1934f289791845e7956a7b7f3fd6c072c78e33495ac6b` fs-gedcom-7.1/extracted-files/enumerations.tsv
 //! * `d6abacf7a8b8f469d0a850e537d331f92c905c57b1e3c0a9928bb55fdc1492e3` fs-gedcom-7.1/extracted-files/enumerationsets.tsv
