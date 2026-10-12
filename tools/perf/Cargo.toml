@@ -1,0 +1,15 @@
+[package]
+name = "ged_io-perf"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Time, throughput and peak memory of ged_io's pipelines on generated or given GEDCOM files, with the thresholds the CI checks."
+
+[dependencies]
+ged_io = { path = "../.." }
+
+# Not part of the crate's build: a stand-alone tool.
+[workspace]
+
+[profile.release]
+debug = "line-tables-only"
