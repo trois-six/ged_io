@@ -20,7 +20,10 @@ use std::borrow::Cow;
 
 use super::{Node, Payload, PayloadRef, Structure, Tag, Xref};
 use crate::model::XrefId;
-use crate::spec::conform::Typing;
+use std::rc::Rc;
+
+use crate::spec::conform::{IdTypes, Typing};
+use crate::spec::payload::Family;
 use crate::spec::schema::{Kind, StructId, DATASET};
 use crate::version::VersionRules;
 use crate::writer::{emit_typed, special_bytes, LineSink};
@@ -123,6 +126,10 @@ struct Open {
 /// look at.
 pub(crate) struct Stream<'s> {
     rules: &'static VersionRules,
+    family: Family,
+    /// The records pointers name, when they are looked up as they are
+    /// written.
+    targets: Option<Rc<IdTypes<'s>>>,
     /// The record's lines, emitted under [`RepairPolicy::Error`]: a line
     /// the emitter would repair spoils the stream.
     ///
@@ -152,7 +159,7 @@ pub(crate) struct Stream<'s> {
     written: usize,
 }
 
-impl Stream<'_> {
+impl<'s> Stream<'s> {
     /// The occurrences of `tag` among the counts from `from` on.
     #[inline]
     fn count(&self, from: u32, tag: u8) -> u32 {
@@ -176,9 +183,17 @@ impl Stream<'_> {
     }
 
     /// Stream mode for `rules`, with lines as `sink` writes them.
-    pub(crate) fn new(rules: &'static VersionRules, lines: LineSink<'static>) -> Self {
+    /// `targets`: the records the pointers name, to look them up as they
+    /// are written; without, they are kept for the check.
+    pub(crate) fn new(
+        rules: &'static VersionRules,
+        lines: LineSink<'static>,
+        targets: Option<Rc<IdTypes<'s>>>,
+    ) -> Self {
         Self {
             rules,
+            family: Family::of(rules),
+            targets,
             lines,
             xref: None,
             open: Vec::new(),
@@ -670,11 +685,21 @@ impl<'s> Flat<'s> {
             empty,
             lang: false,
         });
-        match typing.check(ty, &payload, claim, special) {
-            Some(true) => {}
-            Some(false) => st.spoiled = true,
-            // A pointer is looked up with the dataset's records later.
-            None => st.checks.push((payload, ty, special)),
+        match (
+            typing.check(ty, &payload, claim, special),
+            &st.targets,
+            &payload,
+        ) {
+            (Some(true), _, _) => {}
+            (Some(false), _, _) => st.spoiled = true,
+            // A pointer names a record of its type.
+            (None, Some(targets), FlatPayload::Pointer(p, id)) => {
+                if !targets.resolves(p, *id, Some(typing.pointer_target(ty)), st.family) {
+                    st.spoiled = true;
+                }
+            }
+            // Looked up with the dataset's records later.
+            (None, _, _) => st.checks.push((payload, ty, special)),
         }
         st.written += 1;
     }
@@ -733,7 +758,14 @@ impl<'s> Flat<'s> {
         self.size += size_bound(tag, standard, xref, &payload);
         st.line(depth, tag, standard.is_some(), &payload, special);
         if let FlatPayload::Pointer(p, id) = payload {
-            st.pointers.push((p, id));
+            match &st.targets {
+                Some(targets) => {
+                    if !targets.resolves(&p, id, None, st.family) {
+                        st.spoiled = true;
+                    }
+                }
+                None => st.pointers.push((p, id)),
+            }
         }
         st.written += 1;
     }

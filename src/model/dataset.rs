@@ -167,6 +167,27 @@ impl<'a> RecordRef<'a> {
         }
     }
 
+    /// The index among the standard tags of the record's tag
+    /// ([`RecordRef::tag`]).
+    pub(crate) fn standard_tag(&self, version: GedcomVersion) -> Option<u16> {
+        use crate::tree::standard_index_const as index;
+        match self {
+            RecordRef::Other(n) => u16::try_from(n.tag.get())
+                .ok()
+                .filter(|&t| usize::from(t) < crate::tree::STANDARD_TAGS.len()),
+            RecordRef::Note(_) if version.is_v7() => const { index("SNOTE") },
+            RecordRef::Note(_) => const { index("NOTE") },
+            RecordRef::Header(_) => const { index("HEAD") },
+            RecordRef::Individual(_) => const { index("INDI") },
+            RecordRef::Family(_) => const { index("FAM") },
+            RecordRef::Source(_) => const { index("SOUR") },
+            RecordRef::Repository(_) => const { index("REPO") },
+            RecordRef::Multimedia(_) => const { index("OBJE") },
+            RecordRef::Submitter(_) => const { index("SUBM") },
+            RecordRef::Submission(_) => const { index("SUBN") },
+        }
+    }
+
     /// The tag of a typed record (`SNOTE` for a shared note).
     fn std_tag(&self) -> &'static str {
         match self {
