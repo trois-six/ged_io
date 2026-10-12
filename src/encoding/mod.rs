@@ -12,7 +12,8 @@
 //! 2. a NUL byte in one half of most of the first KiB's code units selects
 //!    UTF-16 without a byte order mark;
 //! 3. bytes that read as UTF-8 (multi-byte sequences outnumber the bytes that
-//!    are not part of one) are UTF-8, whatever `CHAR` says — real ANSEL and
+//!    are not part of one, in the first 64 KiB that are not all ASCII) are
+//!    UTF-8, whatever `CHAR` says — real ANSEL and
 //!    code-page text practically never forms valid UTF-8 sequences; any
 //!    stray byte is decoded with the declared single-byte set;
 //! 4. otherwise the declared set applies: ANSEL (with its marks composed to
@@ -26,12 +27,14 @@
 //! length and line terminators, without copying the input.
 //!
 //! [`DecodeReader`] applies the same rules to a stream: it sniffs the first
-//! 64 KiB (or the whole input if shorter), then decodes chunk by chunk. When
-//! the window is ASCII only, nothing can be decided yet, so the stream decodes
-//! each valid UTF-8 sequence as UTF-8 and each other byte with the declared
-//! set; in-memory decoding sees the whole input and can only differ on a file
-//! whose first non-ASCII byte lies beyond the window and whose declared
-//! single-byte text happens to form valid UTF-8 sequences.
+//! 64 KiB (or the whole input if shorter), then decodes chunk by chunk.
+//! [`decode`] chooses from the same window, so that both give the same text.
+//! When the window is ASCII only, nothing can be decided yet, so the stream
+//! decodes each valid UTF-8 sequence as UTF-8 and each other byte with the
+//! declared set, while in-memory decoding lets the rest of the input choose;
+//! the two can only differ on a file whose first non-ASCII byte lies beyond
+//! the window and whose declared single-byte text happens to form valid UTF-8
+//! sequences.
 //!
 //! # Example
 //!
@@ -55,7 +58,7 @@ pub use reader::DecodeReader;
 
 pub(crate) use charset::encode_ansel;
 pub(crate) use decoder::Decoder;
-pub(crate) use detect::{mode_for, sniff, Mode};
+pub(crate) use detect::{mode_for, sniff_input, Mode};
 
 use charset::SingleByte;
 
@@ -160,11 +163,13 @@ pub struct Decoded {
 /// documentation](self) for how the encoding is chosen.
 #[must_use]
 pub fn decode(bytes: &[u8]) -> Decoded {
-    let sniff = sniff(bytes, true);
+    let sniff = sniff_input(bytes);
     let body = bytes.get(sniff.bom..).unwrap_or_default();
-    let text = match (sniff.mode, sniff.valid_utf8) {
-        (Mode::Utf8 { .. }, true) => String::from_utf8_lossy(body).into_owned(),
-        (mode, _) => decode_body(body, mode),
+    let text = match sniff.mode {
+        Mode::Utf8 { .. } => {
+            std::str::from_utf8(body).map_or_else(|_| decode_body(body, sniff.mode), str::to_owned)
+        }
+        mode => decode_body(body, mode),
     };
     decoded(text, sniff)
 }
@@ -174,14 +179,13 @@ pub fn decode(bytes: &[u8]) -> Decoded {
 /// UTF-8 file.
 #[must_use]
 pub fn decode_owned(mut bytes: Vec<u8>) -> Decoded {
-    let sniff = sniff(&bytes, true);
-    let text = match (sniff.mode, sniff.valid_utf8) {
-        (Mode::Utf8 { .. }, true) => {
+    let sniff = sniff_input(&bytes);
+    let text = match sniff.mode {
+        Mode::Utf8 { .. } => {
             bytes.drain(..sniff.bom.min(bytes.len()));
-            String::from_utf8(bytes)
-                .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+            String::from_utf8(bytes).unwrap_or_else(|e| decode_body(e.as_bytes(), sniff.mode))
         }
-        (mode, _) => decode_body(bytes.get(sniff.bom..).unwrap_or_default(), mode),
+        mode => decode_body(bytes.get(sniff.bom..).unwrap_or_default(), mode),
     };
     decoded(text, sniff)
 }
@@ -222,7 +226,7 @@ pub fn decode_as(bytes: &[u8], encoding: GedcomEncoding) -> String {
 /// Detects the encoding of GEDCOM bytes: the encoding [`decode`] reports.
 #[must_use]
 pub fn detect_encoding(bytes: &[u8]) -> GedcomEncoding {
-    sniff(bytes, true).encoding
+    sniff_input(bytes).encoding
 }
 
 fn decode_body(body: &[u8], mode: Mode) -> String {

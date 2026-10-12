@@ -2,11 +2,8 @@
 
 use std::io::{self, BufRead, Read};
 
-use super::detect::{declared_char, sniff, Mode};
+use super::detect::{declared_char, sniff, Mode, SNIFF_WINDOW};
 use super::{Decoder, GedcomEncoding};
-
-/// How much of the input is read before choosing the decoding.
-const SNIFF_WINDOW: usize = 64 * 1024;
 
 /// A reader that decodes GEDCOM bytes of any encoding into UTF-8 text.
 ///
@@ -180,20 +177,30 @@ mod tests {
         let mut late_utf8 = b"0 HEAD\n1 CHAR ANSI\n".to_vec();
         late_utf8.extend(std::iter::repeat_n(b'a', SNIFF_WINDOW));
         late_utf8.extend_from_slice("\n1 NOTE Zoë\n".as_bytes());
+        // UTF-8 in the window, then more stray bytes than sequences past
+        // it: the window decides, in memory as in the stream.
+        let mut late_strays = "0 HEAD\n1 CHAR ASCII\n1 NOTE Zoë\n".as_bytes().to_vec();
+        late_strays.extend(std::iter::repeat_n(b'a', SNIFF_WINDOW));
+        late_strays.extend_from_slice(b"\n1 NOTE Ren\xE9e \xE9\xE9\xE9\n");
         for input in [
             ansel.as_slice(),
             late_utf8.as_slice(),
+            late_strays.as_slice(),
             "0 HEAD\n1 NOTE é\n".as_bytes(),
         ] {
             let memory = super::super::decode(input);
             for capacity in [1, 2, 3, 7, 4096] {
                 let (text, encoding) = read_all(input, capacity);
                 assert_eq!(text, memory.text, "capacity {capacity}");
-                if input.len() < SNIFF_WINDOW {
+                // Only an ASCII window lets the rest decide in memory.
+                if input.get(..SNIFF_WINDOW).is_none_or(|w| !w.is_ascii()) {
                     assert_eq!(encoding, memory.encoding);
                 }
             }
         }
+        let memory = super::super::decode(&late_strays);
+        assert_eq!(memory.encoding, GedcomEncoding::Utf8);
+        assert!(memory.text.contains("Zoë") && memory.text.contains("Renée ééé"));
     }
 
     #[test]
