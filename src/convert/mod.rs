@@ -60,7 +60,7 @@
 
 mod rules;
 mod tables;
-mod text;
+pub(crate) mod text;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 

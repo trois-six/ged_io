@@ -226,6 +226,25 @@ fn file_references_find_their_entry() {
     assert_eq!(reader.find_entry("media/other.jpg"), None);
 }
 
+/// A `FILE` payload percent-escapes what a URL string cannot hold; the
+/// archive's entry names are not escaped (7.0.17 §4).
+#[test]
+fn media_added_by_their_file_payload_are_named_unescaped() {
+    let bytes = archive(&[("photos/an%20%C3%A9t%C3%A9.jpg", b"JPEG BYTES")]);
+    let mut reader = GedzipReader::new(Cursor::new(bytes)).unwrap();
+    assert_eq!(reader.media_files(), ["photos/an \u{e9}t\u{e9}.jpg"]);
+    for reference in [
+        "photos/an%20%C3%A9t%C3%A9.jpg",
+        "photos/an%20\u{e9}t\u{e9}.jpg",
+    ] {
+        assert_eq!(reader.read_media_file(reference).unwrap(), b"JPEG BYTES");
+    }
+    // An entry name as it is is stored as it is.
+    let bytes = archive(&[("photos/an \u{e9}t\u{e9}.jpg", b"JPEG BYTES")]);
+    let reader = GedzipReader::new(Cursor::new(bytes)).unwrap();
+    assert_eq!(reader.media_files(), ["photos/an \u{e9}t\u{e9}.jpg"]);
+}
+
 #[test]
 fn compressed_media_are_stored_as_they_are() {
     let bytes = archive(&[("photo.jpg", b"JPEG BYTES"), ("notes.txt", b"plain text")]);

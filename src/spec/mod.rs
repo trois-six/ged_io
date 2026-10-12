@@ -41,7 +41,7 @@
 //! | Each standard tag under a superstructure that permits it | `Misplaced` |
 //! | At most the permitted number of each substructure | `Cardinality` |
 //! | Every required substructure; 7.x: a note translation has a `MIME` or a `LANG` | `MissingRequired` |
-//! | Payloads of their type: none, `Y`, integers, names, dates, ages, times, languages, media types (7.x `MIME` of a text: `text/…`), file paths, URIs, coordinates, tag definitions, pointers where pointers belong and only there; 7.x: a structure has a payload or a substructure (records and pseudo-structures aside) | `Payload` |
+//! | Payloads of their type: none, `Y`, integers, names, dates, ages, times, languages, media types (7.x `MIME` of a text: `text/…`, any `text/` type, as 7.0.17 clarifies), file paths (7.x: WHATWG valid URL strings), URIs (7.x: RFC 3986 URI references), coordinates (7.x: the ABNF of §2.15–2.16), tag definitions (an extension tag and a URI reference), pointers where pointers belong and only there; 7.x: a structure has a payload or a substructure (records and pseudo-structures aside) | `Payload` |
 //! | Enumeration values: 7.x exact or an extension value, 5.5.1 in any case (p. 21); open sets admit any value; 5.5.1 file formats are open, but a media type is no format ([accepted practice](#accepted-practice)) | `EnumValue` |
 //! | Pointers name a record of the type the structure points to | `PointerTarget` |
 //! | Pointers name a record of the file (7.x `@VOID@` and 5.5.1 substructure and network pointers aside) | `DanglingPointer` |
@@ -95,7 +95,8 @@
 //! | c | A pointer of an extension to no record | The pointer as text | Same |
 //! | d | A date or an age outside the grammar | Empty payload and a `PHRASE` with the text, where the structure takes one it has not; otherwise `_TAG` | A date value becomes the date phrase `(text)`; otherwise `_TAG` |
 //! | d | An event (`Y` payload) with other text; text where no payload belongs | `Y` (nothing) and a `NOTE` with the text, where a `NOTE` is permitted; otherwise `_TAG` | Same |
-//! | d | Any other payload outside its grammar (names, integers, languages, media types, file paths, URIs, coordinates; 7.x `MIME` of a text not `text/…`) | `_TAG` | Same |
+//! | d | A file path that is no valid URL string, a coordinate outside its grammar | 7.x: the file path percent-encoded as conversion writes a 5.5.1 file reference (a local path as a `file` URL), the coordinate in its canonical form (upper-case direction, no extra leading zero), where that is valid; otherwise `_TAG` | `_TAG` |
+//! | d | Any other payload outside its grammar (names, integers, languages, media types, URIs, tag definitions; 7.x `MIME` of a text not `text/…`) | `_TAG` | Same |
 //! | e | A standard tag not permitted here, an unknown tag, a tag outside the grammar, a `CONT`/`CONC` structure | `_TAG` (letters upper-cased, other characters `_`); a standard structure only one type has the tag of, valid as that type, keeps its meaning: `HEAD.SCHMA` declares `TAG _TAG` with the type's URI, unless the file uses `_TAG` already | `_TAG` |
 //! | f | More occurrences than permitted | The first ones kept; the others become `_TAG`, declared with their type's URI as in (e) | The first ones kept; the others become `_TAG` |
 //! | g | A required substructure missing | Synthesised from the list below; otherwise the superstructure becomes `_TAG`, and so on up | Same |

@@ -759,7 +759,7 @@ fn check_payload(n: &Node, ty: &str, pay: Pay, cx: &Cx<'_>, issues: &mut Vec<Iss
             }
         }
         Pay::FilePath => {
-            if text.contains([' ', '\\']) {
+            if text.contains([' ', '\\']) || v7 && !url_string_ok(text) {
                 bad("payload-file-path", "not a URI reference");
             }
         }
@@ -769,20 +769,20 @@ fn check_payload(n: &Node, ty: &str, pay: Pay, cx: &Cx<'_>, issues: &mut Vec<Iss
             }
         }
         Pay::Lat | Pay::Long => {
-            if !coord_ok(text, pay == Pay::Lat) {
+            if !coord_ok(text, pay == Pay::Lat, v7) {
                 bad("payload-coordinate", "not a coordinate");
             }
         }
         Pay::TagDef => {
             let ok = text.split_once(' ').is_some_and(|(t, u)| {
-                t.starts_with('_') && tag_ok(t, Version::V70) && !u.is_empty() && !u.contains(' ')
+                t.starts_with('_') && tag_ok(t, Version::V70) && uri_reference_ok(u)
             });
             if !ok {
                 bad("payload-tagdef", "not `_TAG URI`");
             }
         }
         Pay::Uri => {
-            if text.is_empty() || text.contains(' ') || !text.contains(':') {
+            if !uri_reference_ok(text) {
                 bad("payload-uri", "not a URI");
             }
         }
@@ -1090,17 +1090,60 @@ fn name_ok(s: &str) -> bool {
     n == 0 || n == 2
 }
 
-fn coord_ok(s: &str, lat: bool) -> bool {
-    let (dirs, max) = if lat {
-        (['N', 'S'], 90.0)
+/// 7.x (7.0.17 as 7.0.18 corrected it): `N`/`S` and at most two digits of
+/// degrees up to 90, `E`/`W` and at most three up to 180, then `.` and
+/// one digit or more; 5.5.1 shows no grammar but its example.
+fn coord_ok(s: &str, lat: bool, v7: bool) -> bool {
+    let (dirs, max, width) = if lat {
+        (['N', 'S'], 90.0, 2)
     } else {
-        (['E', 'W'], 180.0)
+        (['E', 'W'], 180.0, 3)
     };
     let Some(rest) = s.strip_prefix(dirs) else {
         return false;
     };
     let (int, frac) = rest.split_once('.').unwrap_or((rest, "0"));
-    digits(int) && digits(frac) && rest.parse::<f64>().is_ok_and(|x| x <= max)
+    (!v7 || int.len() <= width)
+        && digits(int)
+        && digits(frac)
+        && rest.parse::<f64>().is_ok_and(|x| x <= max)
+}
+
+/// An RFC 3986 URI reference, loosely: printable ASCII but space, a
+/// backtick and the characters of `"<>\^{|}`, at most one `#`, no `:` in a
+/// first segment that is no scheme. Not empty.
+fn uri_reference_ok(s: &str) -> bool {
+    let chars = !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_graphic() && !b"\"<>\\^`{|}".contains(&b))
+        && s.matches('#').count() <= 1;
+    let first = s.split(['/', '?', '#']).next().unwrap_or("");
+    let scheme = first.split_once(':').is_some_and(|(sc, _)| {
+        sc.starts_with(|c: char| c.is_ascii_alphabetic())
+            && sc
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
+    });
+    chars && (scheme || !first.contains(':'))
+}
+
+/// A WHATWG valid URL string, loosely: no ASCII control, space, backtick
+/// or character of `"<>\^{|}`, no C1 control or noncharacter, `%` before
+/// two hex digits.
+fn url_string_ok(s: &str) -> bool {
+    let b = s.as_bytes();
+    s.chars().all(|c| {
+        let n = u32::from(c);
+        !(c.is_ascii_control()
+            || " \"<>\\^`{|}".contains(c)
+            || (0x80..0xA0).contains(&n)
+            || (0xFDD0..=0xFDEF).contains(&n)
+            || n & 0xFFFE == 0xFFFE)
+    }) && b.iter().enumerate().all(|(i, &c)| {
+        c != b'%'
+            || b.get(i + 1..i + 3)
+                .is_some_and(|h| h.iter().all(u8::is_ascii_hexdigit))
+    })
 }
 
 /// How often each (superstructure type, structure type) pair of the tables
