@@ -6,11 +6,10 @@
 //! [`super::lines`].
 
 use std::collections::HashMap;
-use std::sync::OnceLock;
 
+use super::index::{SchemaIndex, SPEC_TAGS};
 use super::payload::{self, Family};
 use super::schema::{tag_index, Kind, Schema, StructId, DATASET};
-use super::tables::{self, TAGS};
 use super::{Deviation, DeviationKind};
 use crate::tree::node::STANDARD_TAGS;
 use crate::tree::Node;
@@ -255,7 +254,7 @@ pub(crate) fn pick_node<'a, N: Node<'a>>(
 #[derive(Clone, Copy)]
 pub(crate) struct Picker {
     rules: &'static VersionRules,
-    table: Option<&'static PickTable>,
+    index: &'static SchemaIndex,
     spec_tags: &'static [u8; STANDARD_TAGS.len()],
 }
 
@@ -264,8 +263,8 @@ impl Picker {
         let rules = rules.version.rules();
         Picker {
             rules,
-            table: PickTable::of(rules.spec),
-            spec_tags: spec_tags(),
+            index: rules.index,
+            spec_tags: &SPEC_TAGS,
         }
     }
 
@@ -273,28 +272,16 @@ impl Picker {
     /// ([`bounds`]).
     #[inline]
     pub(crate) fn max(self, sup: StructId, tag: u8) -> Option<u8> {
-        match self.table.and_then(|t| t.cell(sup, tag)) {
-            Some(&[_, _, max]) => u8::try_from(max).ok(),
-            None => bounds(self.rules.spec, sup, tag).1,
-        }
+        self.index
+            .cell(sup, tag)
+            .map_or(Some(0), |c| u8::try_from(c.max).ok())
     }
 
     /// [`pick_node`].
     #[inline]
     pub(crate) fn pick<'a, N: Node<'a>>(self, sup: StructId, n: N, is_pointer: bool) -> Pick {
-        let index = n
-            .standard_tag()
-            .and_then(|t| self.spec_tags.get(usize::from(t)))
-            .copied()
-            .filter(|&t| t != u8::MAX);
-        match index {
-            Some(index) => {
-                let found = match self.table {
-                    Some(table) => table.get(sup, index, is_pointer),
-                    None => choose(self.rules.spec, sup, index, is_pointer),
-                };
-                picked(found, n.tag())
-            }
+        match n.standard_tag().and_then(|t| self.spec_tag(t)) {
+            Some(index) => picked(self.index.pick(sup, index, is_pointer), n.tag()),
             None => pick(self.rules, sup, n.tag(), is_pointer),
         }
     }
@@ -310,14 +297,12 @@ impl Picker {
         is_pointer: bool,
     ) -> Option<(StructId, u8)> {
         let index = self.spec_tag(standard)?;
-        let ty = match self.table {
-            Some(table) => table.get(sup, index, is_pointer),
-            None => choose(self.rules.spec, sup, index, is_pointer),
-        }?;
+        let ty = self.index.pick(sup, index, is_pointer)?;
         Some((ty, index))
     }
 
     /// The index in the tables' tags of a tag of the tree's standard table.
+    #[inline]
     pub(crate) fn spec_tag(self, standard: u16) -> Option<u8> {
         self.spec_tags
             .get(usize::from(standard))
@@ -326,23 +311,10 @@ impl Picker {
     }
 }
 
-/// The index in the tables' tags of each tag of the tree's standard table,
-/// `u8::MAX` for none.
-fn spec_tags() -> &'static [u8; STANDARD_TAGS.len()] {
-    static TABLE: OnceLock<[u8; STANDARD_TAGS.len()]> = OnceLock::new();
-    TABLE.get_or_init(|| {
-        let mut table = [u8::MAX; STANDARD_TAGS.len()];
-        for (t, tag) in table.iter_mut().zip(STANDARD_TAGS) {
-            *t = tag_index(tag).unwrap_or(u8::MAX);
-        }
-        table
-    })
-}
-
 /// [`pick`] of a tag the tables know, `TAGS[index]`.
 fn pick_tagged(schema: &Schema, sup: StructId, index: u8, tag: &str, is_pointer: bool) -> Pick {
-    let found = match PickTable::of(schema) {
-        Some(table) => table.get(sup, index, is_pointer),
+    let found = match super::index::of(schema) {
+        Some(table) => table.pick(sup, index, is_pointer),
         None => choose(schema, sup, index, is_pointer),
     };
     picked(found, tag)
@@ -370,56 +342,6 @@ fn choose(schema: &Schema, sup: StructId, index: u8, is_pointer: bool) -> Option
         found = found.or(Some(s.id));
     }
     found
-}
-
-/// [`choose`] for every structure type and tag of a version's tables,
-/// computed once: `[pointer, other]` per type and tag, 0 for none (0 is the
-/// dataset, never a substructure).
-pub(crate) struct PickTable {
-    /// Per type and tag: [`choose`] with a pointer, without one, and the
-    /// most occurrences ([`bounds`]; `u16::MAX`: no bound).
-    cells: Box<[[u16; 3]]>,
-}
-
-impl PickTable {
-    fn of(schema: &Schema) -> Option<&'static PickTable> {
-        static TABLES: [OnceLock<PickTable>; 3] = [const { OnceLock::new() }; 3];
-        let (slot, schema) = [&tables::V551, &tables::V70, &tables::V71]
-            .into_iter()
-            .enumerate()
-            .find(|(_, s)| std::ptr::eq(*s, schema))?;
-        Some(TABLES.get(slot)?.get_or_init(|| {
-            let mut cells = Vec::with_capacity(schema.structs.len() * TAGS.len());
-            for sup in 0..schema.structs.len() {
-                for index in 0..TAGS.len() {
-                    let (Ok(sup), Ok(index)) = (StructId::try_from(sup), u8::try_from(index))
-                    else {
-                        cells.push([0, 0, u16::MAX]);
-                        continue;
-                    };
-                    let [pointer, other] = [true, false]
-                        .map(|is_pointer| choose(schema, sup, index, is_pointer).unwrap_or(0));
-                    let max = bounds(schema, sup, index).1.map_or(u16::MAX, u16::from);
-                    cells.push([pointer, other, max]);
-                }
-            }
-            PickTable {
-                cells: cells.into_boxed_slice(),
-            }
-        }))
-    }
-
-    #[inline]
-    fn cell(&self, sup: StructId, index: u8) -> Option<&[u16; 3]> {
-        self.cells
-            .get(usize::from(sup) * TAGS.len() + usize::from(index))
-    }
-
-    #[inline]
-    fn get(&self, sup: StructId, index: u8, is_pointer: bool) -> Option<StructId> {
-        let [pointer, other, _] = *self.cell(sup, index)?;
-        Some(if is_pointer { pointer } else { other }).filter(|&id| id != 0)
-    }
 }
 
 /// How many substructures tagged `tag` (an index into `TAGS`) `sup` takes:

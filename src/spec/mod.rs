@@ -141,6 +141,7 @@
 //! ```
 
 pub(crate) mod conform;
+pub(crate) mod index;
 mod lines;
 pub(crate) mod payload;
 pub(crate) mod schema;

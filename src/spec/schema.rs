@@ -191,7 +191,35 @@ pub(crate) fn tag_index(tag: &str) -> Option<u8> {
         .and_then(|i| u8::try_from(i).ok())
 }
 
+/// What a constant computed from the tables reads of a structure type: its
+/// tag, its payload type, its substructures (`subs`, `nsubs` into
+/// [`Schema::subs`]) and its name (`name`, `name_len` into
+/// [`Schema::names`]).
+#[derive(Clone, Copy)]
+pub(crate) struct ConstDef {
+    pub(crate) tag: u8,
+    pub(crate) kind: Kind,
+    pub(crate) subs: usize,
+    pub(crate) nsubs: usize,
+    pub(crate) name: usize,
+    pub(crate) name_len: usize,
+}
+
 impl Schema {
+    /// Structure type `id` as a constant reads it; `id` is below
+    /// `structs.len()`.
+    pub(crate) const fn const_def(&self, id: usize) -> ConstDef {
+        let d = &self.structs[id];
+        ConstDef {
+            tag: d.tag,
+            kind: d.kind,
+            subs: d.subs as usize,
+            nsubs: d.nsubs as usize,
+            name: d.name as usize,
+            name_len: d.name_len as usize,
+        }
+    }
+
     #[inline]
     fn def(&self, id: StructId) -> Option<&StructDef> {
         self.structs.get(usize::from(id))

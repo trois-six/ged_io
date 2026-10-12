@@ -251,20 +251,16 @@ impl Conformer<'_> {
             }
         }
         // (g) Required substructures.
-        let required = self
+        if self
             .tables
-            .required
-            .get(usize::from(ty))
-            .map_or(&[][..], |r| r);
-        if required
-            .iter()
-            .any(|&(t, min, _)| counts.get(t) < u32::from(min))
+            .required(ty)
+            .any(|c| counts.get(c.tag) < u32::from(c.min))
         {
             return false;
         }
         if self.family == Family::V7 {
             // A note translation says its language or its media type.
-            if self.tables.note_tran.contains(&ty)
+            if self.tables.is_note_tran(ty)
                 && !n.children().any(|c| matches!(c.tag(), "MIME" | "LANG"))
             {
                 return false;
@@ -425,7 +421,7 @@ impl Conformer<'_> {
             raw.get(..5)
                 .is_some_and(|p| p.eq_ignore_ascii_case("text/"))
         };
-        let mime_of_text = self.family == Family::V7 && self.tables.mime.contains(&ty);
+        let mime_of_text = self.family == Family::V7 && self.tables.is_mime(ty);
         valid && (!mime_of_text || raw.is_empty() || text_type())
     }
 

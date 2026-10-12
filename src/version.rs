@@ -22,6 +22,7 @@
 //! - New structures: `EXID`, `MIME`, `CREA`, `SDATE`, `CROP`, `NO`, `INIL`, `TRAN`
 //! - URIs for all structure types
 
+use crate::spec::index::{self, SchemaIndex};
 use crate::spec::{tables, Schema};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
@@ -185,6 +186,8 @@ pub struct VersionRules {
     pub(crate) max_level: usize,
     /// The specification tables of the version ([`crate::spec`]).
     pub(crate) spec: &'static Schema,
+    /// Their index, computed at compile time.
+    pub(crate) index: &'static SchemaIndex,
 }
 
 /// GEDCOM 5.5.1.
@@ -200,6 +203,7 @@ pub static V551: VersionRules = VersionRules {
     xref: XrefGrammar::V551 { max_len: 22 },
     max_level: 98,
     spec: &tables::V551,
+    index: &index::V551,
 };
 
 /// GEDCOM 7.0.
@@ -210,6 +214,7 @@ pub static V71: VersionRules = VersionRules {
     version: GedcomVersion::V7_1,
     vers_payload: "7.1",
     spec: &tables::V71,
+    index: &index::V71,
     ..V70_LINES
 };
 
@@ -226,6 +231,7 @@ const V70_LINES: VersionRules = VersionRules {
     xref: XrefGrammar::V7,
     max_level: 254,
     spec: &tables::V70,
+    index: &index::V70,
 };
 
 impl VersionRules {
