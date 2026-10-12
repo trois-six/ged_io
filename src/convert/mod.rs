@@ -842,6 +842,13 @@ impl<'a, B: Build<'a>> Build<'a> for Entry<'a, B> {
         }
     }
 
+    fn declared_version(&self) -> Option<std::borrow::Cow<'a, str>> {
+        match self {
+            Entry::Plain(r) => r.declared_version(),
+            Entry::Converted { .. } | Entry::Owned(_) => None,
+        }
+    }
+
     fn typed_head(&self) -> Option<&'a crate::model::Header> {
         match self {
             Entry::Plain(r) => r.typed_head(),

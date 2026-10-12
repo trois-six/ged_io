@@ -55,6 +55,14 @@ enum Repr {
     Owned(Box<Owned>),
 }
 
+/// [`Text::valid_as`]: a date of the commonest shapes (`YYYY`, `MON YYYY`,
+/// `D MON YYYY` and keywords, in upper case), valid in every version
+/// ([`is_simple_date`](crate::spec::is_simple_date)), kept beside the
+/// special bytes.
+pub(crate) const SIMPLE_DATE: u8 = 64;
+/// [`Text::valid_as`]: an exact date of the commonest shape (`D MON YYYY`).
+pub(crate) const EXACT_DATE: u8 = 128;
+
 /// The characters of an owned [`Text`], with their [`special_bytes`].
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct Owned(Box<str>, u8);
@@ -202,10 +210,38 @@ impl Text {
     /// is made.
     #[inline]
     pub(crate) fn special(&self) -> u8 {
-        match &self.0 {
+        let bits = match &self.0 {
             Repr::Input { special, .. } | Repr::Pieces { special, .. } => *special,
             Repr::Owned(owned) => owned.1,
+        };
+        bits & !(SIMPLE_DATE | EXACT_DATE)
+    }
+
+    /// What the text is known to be valid as, found as it was read
+    /// ([`SIMPLE_DATE`], [`EXACT_DATE`]).
+    #[inline]
+    pub(crate) fn valid_as(&self) -> u8 {
+        match &self.0 {
+            Repr::Input { special, .. } => *special & (SIMPLE_DATE | EXACT_DATE),
+            Repr::Pieces { .. } | Repr::Owned(_) => 0,
         }
+    }
+
+    /// A text of the input read as a date payload (of a `DATE`
+    /// structure): its [`Text::valid_as`] found.
+    pub(crate) fn input_date(input: &str, start: usize, len: usize) -> Self {
+        let mut text = Self::input(input, start, len);
+        if let Repr::Input { special, .. } = &mut text.0 {
+            let date = input
+                .get(start..start.saturating_add(len))
+                .unwrap_or_default();
+            if crate::spec::is_simple_date(date, true, false) {
+                *special |= SIMPLE_DATE | EXACT_DATE;
+            } else if crate::spec::is_simple_date(date, false, false) {
+                *special |= SIMPLE_DATE;
+            }
+        }
+        text
     }
 
     /// Whether the text is empty (an absent payload).

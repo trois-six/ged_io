@@ -63,6 +63,23 @@ fn date_to_version(
 ) -> DateConversion {
     let family = Family::of(cx.version.rules());
     let valid = |kind, text: &str| crate::spec::payload::is_valid(kind, None, text, family);
+    // A date read valid in every version, as most are.
+    let known = match kind {
+        Kind::Date => super::text::SIMPLE_DATE,
+        Kind::DateExact => super::text::EXACT_DATE,
+        _ => 0,
+    };
+    if phrase.is_none()
+        && value.valid_as() & known != 0
+        && time.is_none_or(|t| valid(Kind::Time, &t.to_str(cx.store)))
+    {
+        debug_assert!(valid(kind, &value.to_str(cx.store)), "{value:?}");
+        debug_assert!(
+            convert(value, time, None, cx).is_none(),
+            "{value:?} {time:?}"
+        );
+        return DateConversion::Valid;
+    }
     if phrase.is_none() {
         let text = value.to_str(cx.store);
         if valid(kind, &text) && time.is_none_or(|t| valid(Kind::Time, &t.to_str(cx.store))) {

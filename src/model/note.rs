@@ -3,7 +3,7 @@
 use crate::tree::{FlatPayload, Payload};
 
 use super::citation::Citation;
-use super::driver::{gedcom_struct, NodeRef, PayloadField, ReadCx, WriteCx};
+use super::driver::{gedcom_struct, NodeRef, PayloadField, ReadCx, StdTag, WriteCx};
 use super::enums::{NoteKind, Phrased};
 use super::text::{Text, XrefId};
 
@@ -86,10 +86,10 @@ impl super::serde::DeserializeIn for NoteContent {
 }
 
 /// A shared note is written `SNOTE` in 7.x, `NOTE` in 5.5.1.
-fn note_tag(note: &Note, tag: &'static str, cx: &WriteCx<'_>) -> &'static str {
+fn note_tag(note: &Note, tag: StdTag, cx: &WriteCx<'_>) -> StdTag {
     match note.content {
-        NoteContent::Shared(_) if cx.version.is_v7() => "SNOTE",
-        NoteContent::Shared(_) => "NOTE",
+        NoteContent::Shared(_) if cx.version.is_v7() => const { StdTag::new("SNOTE") },
+        NoteContent::Shared(_) => const { StdTag::new("NOTE") },
         NoteContent::Text(_) => tag,
     }
 }

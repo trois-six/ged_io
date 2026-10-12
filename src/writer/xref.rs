@@ -57,10 +57,17 @@ pub(crate) struct KeyHasher {
 }
 
 impl Default for KeyHasher {
+    /// The keys of the thread, drawn once: an index is made for each write
+    /// (and each conformance pass), most of which hold few identifiers.
     fn default() -> Self {
-        let random = std::collections::hash_map::RandomState::new();
+        thread_local! {
+            static KEYS: [u64; 2] = {
+                let random = std::collections::hash_map::RandomState::new();
+                [random.hash_one(0_u8), random.hash_one(1_u8)]
+            };
+        }
         Self {
-            keys: [random.hash_one(0_u8), random.hash_one(1_u8)],
+            keys: KEYS.with(|k| *k),
         }
     }
 }

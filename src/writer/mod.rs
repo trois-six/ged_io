@@ -888,8 +888,16 @@ impl GedcomWriter {
     /// [`rules_for_records`](Self::rules_for_records) of records that write
     /// themselves.
     fn rules_for_built<'n, N: Node<'n>>(&self, records: &[Rec<'n, N>]) -> &'static VersionRules {
+        if let Some(version) = self.config.version {
+            return version.rules();
+        }
+        let head = records.iter().find(|r| r.tag() == "HEAD");
+        // A typed header says it without writing itself.
+        if let Some(declared) = head.and_then(Rec::declared_version) {
+            return self.rules_for(Some(&declared));
+        }
         let mut scratch = Flat::default();
-        let declared = records.iter().find(|r| r.tag() == "HEAD").and_then(|h| {
+        let declared = head.and_then(|h| {
             with_node!(h.get(&Flat::default()), scratch, |h| h
                 .children()
                 .find(|c| c.tag() == "GEDC")

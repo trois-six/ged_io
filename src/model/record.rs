@@ -9,7 +9,7 @@
 use super::address::Address;
 use super::citation::{Citation, RepositoryCitation};
 use super::date::{ChangeDate, CreationDate, Period};
-use super::driver::{gedcom_struct, WriteCx};
+use super::driver::{gedcom_struct, StdTag, WriteCx};
 use super::enums::{EnumList, EventKind, NoteKind, OrdinanceFlag, Phrased, Restriction, Sex};
 use super::event::{Event, NonEvent};
 use super::identifier::{Exid, Refn};
@@ -469,11 +469,11 @@ gedcom_struct! {
 }
 
 /// A shared note is written `SNOTE` in 7.x, `NOTE` in 5.5.1.
-fn shared_note_tag(_note: &SharedNote, _tag: &'static str, cx: &WriteCx<'_>) -> &'static str {
+fn shared_note_tag(_note: &SharedNote, _tag: StdTag, cx: &WriteCx<'_>) -> StdTag {
     if cx.version.is_v7() {
-        "SNOTE"
+        const { StdTag::new("SNOTE") }
     } else {
-        "NOTE"
+        const { StdTag::new("NOTE") }
     }
 }
 

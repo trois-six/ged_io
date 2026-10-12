@@ -65,6 +65,15 @@ impl<'d> Build<'d> for Built<'d> {
         }
     }
 
+    fn declared_version(&self) -> Option<Cow<'d, str>> {
+        let h = self.typed_head()?;
+        let gedcom_aside = h.gedcom.as_ref().is_some_and(|g| !g.extra.is_empty());
+        if !h.extra.is_empty() || gedcom_aside {
+            return None;
+        }
+        Some(h.declared_version(self.cx.store).unwrap_or_default())
+    }
+
     fn typed_head(&self) -> Option<&'d super::Header> {
         match self.record {
             Some(RecordRef::Header(h)) => Some(h),
