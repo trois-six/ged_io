@@ -268,7 +268,9 @@ macro_rules! gedcom_enum {
 /// have is not recognised: a 5.5.1 file's `Other` stays as written rather
 /// than becoming 7.x's `OTHER`, which 5.5.1 could not write back.
 fn find_known(values: &[EnumValue], s: &str, version: Option<GedcomVersion>) -> Option<usize> {
-    let s = s.trim();
+    // Spaces around a value are not the value; a line break is (a value
+    // continued is no value of the set, and writes back as continued).
+    let s = s.trim_matches(|c: char| c.is_whitespace() && c != '\n');
     values.iter().position(|v| {
         let own = match version {
             Some(version) if version.is_v7() => v.v7.is_some(),

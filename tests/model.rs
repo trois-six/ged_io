@@ -742,3 +742,19 @@ fn repairs_follow_the_order_of_the_model() {
         GedcomVersion::V7_0,
     );
 }
+
+/// An enumeration value continued by a line break is no value of its set:
+/// it is kept as it is, and writing it again gives the same bytes (fuzz
+/// case: a line of control characters continuing `TYPE hangul`).
+#[test]
+fn an_enumeration_value_with_a_line_break_is_kept() {
+    let text = "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 NAME Ann /Sample/\n2 FONE Value\n3 TYPE hangul\n\u{0}\u{0}\n0 TRLR\n";
+    let data = ged_io::Dataset::parse(text);
+    let writer = ged_io::GedcomWriter::new();
+    let once = writer.write_to_string(&data).unwrap();
+    let twice = writer
+        .write_to_string(&ged_io::Dataset::parse(once.as_str()))
+        .unwrap();
+    assert_eq!(once, twice);
+    assert!(once.contains("3 TYPE hangul\n4 CONT\n"), "{once}");
+}
