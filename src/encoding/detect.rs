@@ -104,6 +104,9 @@ fn sniff_with(window: &[u8], complete: bool, input: Option<&[u8]>) -> Sniff {
                 | GedcomEncoding::Iso8859_1
                 | GedcomEncoding::Iso8859_15
                 | GedcomEncoding::Windows1252
+                | GedcomEncoding::Windows1250
+                | GedcomEncoding::Windows1251
+                | GedcomEncoding::Iso8859_2
                 | GedcomEncoding::Cp437
                 | GedcomEncoding::MacRoman),
             ) => e,
@@ -133,6 +136,9 @@ const fn single_byte_for(encoding: GedcomEncoding) -> SingleByte {
     match encoding {
         GedcomEncoding::Ansel => SingleByte::Ansel,
         GedcomEncoding::Iso8859_15 => SingleByte::Iso8859_15,
+        GedcomEncoding::Windows1250 => SingleByte::Cp1250,
+        GedcomEncoding::Windows1251 => SingleByte::Cp1251,
+        GedcomEncoding::Iso8859_2 => SingleByte::Iso8859_2,
         GedcomEncoding::Cp437 => SingleByte::Cp437,
         GedcomEncoding::MacRoman => SingleByte::MacRoman,
         GedcomEncoding::Utf8

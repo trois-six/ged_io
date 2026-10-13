@@ -6,6 +6,12 @@ single-byte code pages GEDCOM files declare, from Python's codec tables.
   `ISO-8859-1`/`LATIN1`): the five bytes cp1252 leaves undefined (0x81, 0x8D,
   0x8F, 0x90, 0x9D) decode to the C1 control of the same value, as the WHATWG
   Encoding Standard does, so no byte is ever lost.
+* Windows-1250 (`WINDOWS-1250`, `CP1250`, and the Central European files
+  some producers label `ANSI`): its five undefined bytes (0x81, 0x83, 0x88,
+  0x90, 0x98) decode to the C1 control of the same value, as for cp1252.
+* Windows-1251 (`WINDOWS-1251`, `CP1251`, Cyrillic): 0x98, undefined,
+  decodes to U+0098.
+* ISO-8859-2 (`ISO-8859-2`, `LATIN2`).
 * ISO-8859-15 (`ISO-8859-15`, `LATIN9`).
 * IBM PC code page 437 (`IBMPC`, `CP437`).
 * Mac OS Roman (`MACINTOSH`, `MACROMAN`), 0xDB being the euro sign.
@@ -18,6 +24,9 @@ import sys
 
 PAGES = [
     ("CP1252", "cp1252", "Windows-1252"),
+    ("CP1250", "cp1250", "Windows-1250"),
+    ("CP1251", "cp1251", "Windows-1251"),
+    ("ISO_8859_2", "iso8859_2", "ISO-8859-2 (Latin-2)"),
     ("ISO_8859_15", "iso8859_15", "ISO-8859-15 (Latin-9)"),
     ("CP437", "cp437", "IBM PC code page 437"),
     ("MAC_ROMAN", "mac_roman", "Mac OS Roman"),
@@ -33,7 +42,11 @@ for const, codec, title in PAGES:
         try:
             c = bytes([b]).decode(codec)
         except UnicodeDecodeError:
-            assert codec == "cp1252" and b in (0x81, 0x8D, 0x8F, 0x90, 0x9D), (codec, b)
+            assert (
+                (codec == "cp1252" and b in (0x81, 0x8D, 0x8F, 0x90, 0x9D))
+                or (codec == "cp1250" and b in (0x81, 0x83, 0x88, 0x90, 0x98))
+                or (codec == "cp1251" and b == 0x98)
+            ), (codec, b)
             c = chr(b)
         out.write("    '\\u{%04X}',\n" % ord(c))
     out.write("];\n")
