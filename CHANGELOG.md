@@ -113,8 +113,51 @@ keeps all data; writing is conformant to GEDCOM 5.5.1, 7.0 or 7.1.
   percent-escaped. GEDCOM 7.1 remains a draft target, generated from
   FamilySearch's `v7.1` branch (`c451779`, its head).
 
+- Producer profiles (`ged_io::profile`): 36 import profiles (`generic`,
+  `oxidged` for this crate's own exports, read as written, and 34
+  producers) and 25 export profiles (two generic, 23
+  importers), written as compile-checked data (`macro_rules!`), each rule
+  citing the row of the compatibility research it implements.
+  `Detection` scores the header (system identifier, name, version,
+  corporation, destination, character set, header extension tags) and
+  refines with a fingerprint of the extension tags the file uses; other
+  producers the tags point to are hints, whose unambiguous extension rules
+  apply. `interpret` rewrites a producer's conventions as the standard
+  says them without losing anything (`Interpretation::{None, Lossless,
+  BestEffort}`), keyed by producer, place and tag; `InterpretReport`
+  lists what was done, by rule and catalogue row. `Exporter` writes for an
+  importer (`ExportOptions` to leave out media, private records or change
+  dates on request) and returns an `ExportReport` of every fold, lossy or
+  not, and of the importer limits exceeded. `docs/extensions.md` documents
+  the extension tags declared in 7.x with oxidged's URIs.
+- `GedcomBuilder::interpretation` and `GedcomBuilder::profile`; reading
+  detects the producer, decodes `CHAR` as it means it and interprets its
+  conventions losslessly by default. `Dataset::producer` and
+  `Dataset::interpretation`; the writer interprets what only 7.x can say
+  when it converts such a dataset to 7.x.
+- Deferred report: `GedcomBuilder::build_from_bytes_with_report`,
+  `build_from_str_with_report` and `build_from_reader_with_report` return
+  the dataset and a `ReadReport` (producer, encoding, every deviation from
+  the specification, what was interpreted); the other methods say nothing.
+- `stream::Visitor` and `GedcomStreamParser::visit`: records by type, with
+  `ControlFlow` to stop.
+- `Credentials` (`WriterConfig::credentials`, `GedcomWriter::credentials`,
+  `ExportOptions::credentials`): whether the credentials a file holds are
+  written; see Changed.
+- Encodings: Windows-1250, Windows-1251 and ISO-8859-2; the `CHAR` labels
+  `IBM`, `OEM` (code page 437) and `ISO8859` (Latin-1).
+- `ged-io --sanitize`, `--convert-encoding`, `--profile`, `--detect`,
+  `--list-profiles` and `--interpretation`.
+- Fuzz target `profiles`: any input read with any profile at any level, the
+  output conformant and idempotent in 5.5.1 and 7.0, and exported with
+  every export profile, conformant and idempotent.
+
 ### Changed
 
+- Every writer leaves out the credentials a file may hold, unless asked
+  to write them (`Credentials::Written`): `_PASS`, and an `_USER` that is
+  encrypted (`_ENCR`) or a server login (under `_DBID`). The dataset keeps
+  them; an export reports them as a lossy fold.
 - A dataset keeps every structure but the header as a row of the table of
   its type, its texts as 8-byte spans of the store and its pointers as
   interned ids: reading allocates no structure on its own, and a dataset

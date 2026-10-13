@@ -35,6 +35,7 @@ reporting each repair.
 | **Encodings** | UTF-8, UTF-16 LE/BE (with or without BOM), ANSEL (to Unicode NFC), ASCII, Windows-1252 (`ANSI`), ISO-8859-1, ISO-8859-15, IBM PC (cp437), Macintosh; decoding never fails; in memory and streaming |
 | **JSON** | `Serialize` and `Deserialize` for the dataset with serde, for JSON and other self-describing formats (feature `serde`) |
 | **Type safe** | A Rust type per structure, enumerations whose unknown values keep their text, typed identifiers and pointers |
+| **Producer profiles** | 34 producers' conventions as data: the producer detected, its `CHAR` read its way, its extensions read as the standard says them without loss; exports shaped for 23 importers, conformant, every lossy fold reported |
 | **Validation** | The 5.5.1, 7.0 and 7.1 specification tables: every deviation of a file with its line, an opt-in strict mode, and a repair pass that makes any tree conformant without losing data |
 | **Values** | Date, age and time grammars of both versions, conversions between versions, and calendar arithmetic (feature `calendar`) |
 | **Fast** | 1.5 to 3 times as fast as 0.17 to read and up to 4 times as fast to write, at about twice the input's size in memory (see [Performance](#performance)) |
@@ -176,12 +177,110 @@ match builder.clone().strict(true).build_from_str(text) {
 |--------|---------|-------------|
 | `strict(bool)` | `false` | Refuse input that does not follow the specification of the version it declares, with every deviation (encoding, lines, structures, cardinalities, payloads, enumerations, pointers, header) |
 | `max_file_size(bytes)` | none | Refuse input larger than this before reading it (for GEDZIP, its `gedcom.ged` as it is decompressed) |
+| `interpretation(level)` | `Lossless` | How far the producer's conventions are interpreted ([Producer profiles](#producer-profiles)): `None`, `Lossless` or `BestEffort` |
+| `profile(Some(p))` | detected | Read every file as written by this producer instead of detecting it |
 
 Inputs: `build_from_str`, `build_from_bytes` (a `Vec<u8>` of UTF-8 is not
 copied), `build_from_bytes_with_encoding`, `build_from_reader` and
 `build_from_gedzip`. `Dataset::parse` and `Dataset::from_bytes` read
-without options. Reading fails only on I/O, a size limit, strict mode or
-a GEDZIP container (`GedcomError`).
+without options (and interpret nothing). Reading fails only on I/O, a size
+limit, strict mode or a GEDZIP container (`GedcomError`).
+
+### Deferred report
+
+Reading says nothing. The `…_with_report` methods return, with the
+dataset, what reading found: the producer, the encoding, every deviation
+from the specification (what strict mode would refuse, nothing refused)
+and what was interpreted.
+
+```rust
+use ged_io::GedcomBuilder;
+
+let file = b"0 HEAD\n1 SOUR FTM\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 SEX male\n1 _FUN\n2 DATE 1900\n0 TRLR\n";
+let (data, report) = GedcomBuilder::new().build_from_bytes_with_report(file.to_vec()).unwrap();
+assert_eq!(report.detection.profile().id(), "ftm");
+assert_eq!(report.deviations.len(), 1); // SEX male
+assert_eq!(report.interpretation.rows(), ["VD-093", "X-020"]); // _FUN, a funeral
+assert_eq!(data.individuals().first().unwrap().events().len(), 1);
+```
+
+---
+
+## Producer profiles
+
+Genealogy programs extend GEDCOM their own ways: extension tags
+(`_MARNM`, `_FREL`, `_SDATE`), standard tags given another meaning, date
+dialects, `CHAR ANSI` meaning one code page or another. `ged_io::profile`
+describes them as data, from a compatibility study of about 40 programs:
+each rule cites the row of the research it implements.
+
+**Reading.** The builder detects the producer from the header (system
+identifier, name, version, corporation, destination, character set, header
+extension tags; scored) and from the extension tags the file uses (a
+fingerprint, since files pass through several programs), then:
+
+- decodes the bytes as the producer means its `CHAR` (`ANSI` is
+  Windows-1252, but GeneWeb's `ANSI`, `ASCII` and `IBMPC` are Latin-1, and
+  byte statistics find Windows-1250 under an `ANSI` label);
+- interprets its conventions without losing anything (the default,
+  `Interpretation::Lossless`): a rule whose standard form says all of it
+  replaces the extension (`_FUN` → `EVEN` + `TYPE Funeral`, `_AKA` → a
+  `NAME` of type AKA, `_SDATE` → `SDATE`); one that says part of it adds
+  the standard form and keeps the extension (`_FREL`/`_MREL` → `PEDI` when
+  both agree); inferred meanings apply only at `BestEffort`. Rules are
+  keyed by producer, place and tag, never by the tag alone (`_STAT`,
+  `_PRIM`, `_TYPE`… mean different things to different programs).
+  Interpretation stays in the file's version family; what only 7.x can say
+  (`UID`, `SDATE`, `CROP`, associations under events) is interpreted when
+  the writer converts the dataset to 7.x.
+
+Extension tags a profile knows and keeps are declared in a 7.x
+`HEAD.SCHMA`: with their registered URI when there is one, else with the
+URI oxidged publishes for them in [`docs/extensions.md`](docs/extensions.md).
+With `Interpretation::None`, reading costs nothing more than before; with
+the default, a file that holds none of the tags its producer's rules read
+costs nothing more either, and one whose conventions are rewritten is read
+twice over (see [Performance](#performance)).
+
+**Writing.** `profile::Exporter` writes a dataset for an importer: always
+conformant GEDCOM, its version, character set, line layout and limits
+chosen for the importer, its data folded into the standard structures the
+importer reads, redundant `_` extensions where the importer needs them
+(`_FREL`/`_MREL`, `_PRIM`, `_PHOTO`, `_SHAR`), data left out only on
+request (`ExportOptions`: media, private records, change dates). Every fold
+that loses something, and every importer limit the output exceeds, is in
+the `ExportReport`.
+
+```rust
+use ged_io::profile::Exporter;
+use ged_io::Dataset;
+
+let data = Dataset::parse(
+    "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 NAME Ann /Example/\n\
+     1 OCCU Weaver\n1 OCCU Miller\n0 TRLR\n",
+);
+let (text, report) = Exporter::named("geneanet").unwrap().write_to_string(&data).unwrap();
+assert!(text.contains("1 OCCU Weaver, Miller\n")); // one profession field on Geneanet
+assert!(text.contains("2 VERS 5.5.1\n")); // Geneanet reads no 7.0
+for fold in report.lossy() {
+    println!("{fold}"); // @I1@: 2 occupations made one (merged, lossy; EXF-013, EXF-038)
+}
+```
+
+| Tier | Import profiles | Export profiles |
+|------|-----------------|-----------------|
+| 1 | `ftm` (Family Tree Maker), `ancestry`, `myheritage`, `geni`, `paf`, `ancestral-quest`, `familysearch`, `heredis`, `geneweb`, `geneanet` | `ancestry`, `ftm`, `myheritage`, `geni`, `familysearch`, `paf`, `ancestral-quest`, `geneanet`, `geneweb`, `heredis` |
+| 2 | `rootsmagic`, `legacy`, `family-historian`, `gramps`, `macfamilytree`, `webtrees`, `gedcom-l` | `rootsmagic`, `legacy`, `gramps`, `webtrees`, `family-historian`, `macfamilytree` |
+| 3 | `brothers-keeper`, `tmg`, `geneatique`, `ancestrologie`, `aldfaer`, `pro-gen`, `reunion`, `tng`, `wikitree`, `geditcom`, `ahnenblatt`, `gensdatapro`, `embla`, `stamboom`, `family-for-windows`, `famberry`, `genealogos` | `ancestris`, `geneatique`, `tng`, `reunion`, `wikitree`, `findmypast`, `ahnenblatt` |
+
+Plus `generic` (any producer) and `oxidged` (what this crate exported,
+read as written: no rule, no hint) for reading, and `generic-551`/`generic-70`
+for writing. **The tier-1 profiles follow published and observed importer
+behaviour, much of it dated: they are to be re-verified against recent
+exports and imports** (`Profile::verification`); the others come from the
+research alone.
+
+---
 
 ---
 
@@ -329,7 +428,10 @@ times are written in the target's grammar (`@#DJULIAN@` and `JULIAN`,
 `Repair`; `.on_nonconformant(RepairPolicy::Error)` makes the writer fail
 instead. `.output_encoding(OutputEncoding::Ansel)` (or `Utf16Le`,
 `Ascii`) writes 5.5.1 bytes in another encoding, with a matching `CHAR`;
-`.line_ending(…)`, `.max_line_length(…)` and `.bom(…)` set the rest.
+`.line_ending(…)`, `.max_line_length(…)` and `.bom(…)` set the rest. The
+credentials some programs put in their files (`_PASS`, an `_USER` that is
+encrypted or a server login) are left out unless
+`.credentials(Credentials::Written)`; the dataset keeps them.
 
 ### Conversion between 5.5.1 and 7.x
 
@@ -447,6 +549,29 @@ Knowing one record at a time, it writes what `GedcomWriter` writes of the
 same records but where the records to come would change it (a later
 record named as an earlier one, the records a conversion adds, the
 extension tags a 7.x header declares); its documentation lists each case.
+
+A `Visitor` receives the records of a stream by their type and says
+whether to go on (`ControlFlow`); `GedcomStreamParser::visit` stops at the
+first break, leaving the rest unread:
+
+```rust
+use std::ops::ControlFlow;
+use ged_io::model::{Individual, View};
+use ged_io::stream::{GedcomStreamParser, StreamedRecord, Visitor};
+
+struct FirstNamed;
+
+impl Visitor for FirstNamed {
+    type Break = String;
+    fn individual(&mut self, i: View<'_, Individual>, _: &StreamedRecord) -> ControlFlow<String> {
+        i.full_name().map_or(ControlFlow::Continue(()), ControlFlow::Break)
+    }
+}
+
+let file: &[u8] = b"0 HEAD\n0 @I1@ INDI\n0 @I2@ INDI\n1 NAME Ann /Example/\n0 TRLR\n";
+let mut parser = GedcomStreamParser::new(file).unwrap();
+assert_eq!(parser.visit(&mut FirstNamed).unwrap(), ControlFlow::Break("Ann Example".into()));
+```
 
 ---
 
@@ -613,6 +738,15 @@ error: line 27: FAMC @F9@: no record has this identifier
 # converting a 5.5.1 file; --keep-obsolete keeps what 7.0 drops as extensions
 ged-io --write 7.0 family.ged > family70.ged
 ged-io --write 7.0 --keep-obsolete family.ged > family70.ged
+
+# Repair a file in its own version; re-encode a 5.5.1 file
+ged-io --sanitize family.ged > clean.ged
+ged-io --sanitize --convert-encoding ANSEL family.ged > family-ansel.ged
+
+# Which program wrote it; a file for an importer (lossy folds on standard error)
+ged-io --detect family.ged
+ged-io --profile geneanet family.ged > for-geneanet.ged
+ged-io --list-profiles
 ```
 
 `ged-io --help` lists every option. Exit codes: 0 success, 1 I/O error,
@@ -656,6 +790,23 @@ Large files, wall time (median of 5) and peak resident set (Linux
 | In memory (`GedcomBuilder::build_from_bytes`) | 1.9 GB (23× the input) | 161 MB (1.96×) |
 | Streaming read (`GedcomStreamParser`) | — (UTF-8 only) | 4.5 MB, any encoding |
 | Streaming write (`GedcomStreamParser` into `GedcomStreamWriter`, 147 MB/s) | — | 23 MB |
+
+Producer profiles, on the 100,000 generated individuals (47 MB) and two
+variants of them, wall time relative to reading without interpretation
+(`tools/perf`: `read-none`, `read`, `write-v7`, `export`):
+
+| Pipeline | Time | Peak memory |
+|---|---:|---:|
+| Read, `Interpretation::None` | 1× (as before profiles) | 2.3× the input |
+| Read, default: no rule's tag in the file | 1.03× | 2.3× |
+| Read, default: a PAF header, every `DATE` checked for a dialect, none found | 1.15× | 2.3× |
+| Read, default: an `_MILT` (FTM) in every individual, every record rewritten | 5× | 11.7× (transient) |
+| Write as 7.0 a PAF file with an `_UID` in every individual (`UID` once converted) | 18× the plain write | 10.5× |
+| Export for Geneanet (27 folds) | 25× the plain write | 15× |
+
+A file a rule changes is lexed again as a tree, interpreted and typed again:
+for a large file that a producer's conventions fill, `Interpretation::None`
+reads in the time and memory of the table above's first line.
 
 A dataset keeps the decoded input once and every structure as a row of
 the table of its type, pointing into it: the rows take about two thirds
