@@ -28,10 +28,12 @@ jobs:
 
     - name: Seed the corpora with the test fixtures
       run: |
-        for target in entry_points tree writer spec model convert editing; do
+        for target in entry_points tree writer spec model convert editing profiles; do
           mkdir -p fuzz/corpus/$target
           find tests/fixtures -name '*.ged' -size -64k -exec cp {} fuzz/corpus/$target/ \;
         done
+        # The producers' fixtures (the first byte chooses a profile).
+        find tests/profiles/fixtures -name '*.ged' -exec cp {} fuzz/corpus/profiles/ \;
 
     - name: Fuzz the entry points for five minutes
       run: cargo fuzz run entry_points -- -max_total_time=300 -max_len=65536
@@ -53,6 +55,9 @@ jobs:
 
     - name: Fuzz edit sequences (counts, lookups, dangling pointers, writes) for five minutes
       run: cargo fuzz run editing -- -max_total_time=300 -max_len=65536
+
+    - name: Fuzz producer profiles (interpretation and every export, conformant and idempotent) for five minutes
+      run: cargo fuzz run profiles -- -max_total_time=300 -max_len=20000
 
     - name: The repair's property over the fuzz corpus
       run: FUZZ_CORPUS=fuzz/corpus cargo test --test spec_conform -- --ignored every_fuzz_input
