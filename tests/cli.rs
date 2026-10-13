@@ -338,3 +338,76 @@ fn help_and_io_errors() {
     assert_eq!(output.status.code(), Some(1));
     assert!(stderr(&output).contains("I/O error"));
 }
+
+/// `--detect` names the producer from the header and the tags.
+#[test]
+fn detect_prints_the_producer() {
+    let file = TempFile::new(
+        "0 HEAD\n1 SOUR FTM\n2 VERS Family Tree Maker (22.2.5)\n2 CORP Ancestry.com\n0 @I1@ INDI\n\
+         1 NAME Ann /Example/\n0 TRLR\n",
+    );
+    let output = run(&["--detect", file.path()]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let out = stdout(&output);
+    assert!(
+        out.starts_with("producer: ftm (Family Tree Maker)\nversion: 22.2.5\n"),
+        "{out}"
+    );
+    assert!(out.contains("evidence: Sour"), "{out}");
+}
+
+/// `--sanitize` writes conformant GEDCOM of the file's own version, the
+/// repairs on standard error; `--convert-encoding` writes other bytes.
+#[test]
+fn sanitize_and_convert_encoding() {
+    let file = TempFile::new(
+        b"0 HEAD\r\n1 CHAR ANSI\r\n1 GEDC\r\n2 VERS 5.5.1\r\n0 @I1@ INDI\r\n1 NAME Ren\xE9e /Example/\r\n\
+          1 SEX female\r\n0 TRLR\r\n"
+            .as_slice(),
+    );
+    let output = run(&["--sanitize", file.path()]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let out = stdout(&output);
+    assert!(
+        out.contains("1 CHAR UTF-8\n") && out.contains("1 NAME Renée /Example/\n"),
+        "{out}"
+    );
+    assert!(ged_io::spec::validate_text(&out).is_empty(), "{out}");
+
+    let output = run(&["--convert-encoding", "ANSEL", file.path()]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let bytes = output.stdout;
+    assert!(bytes.windows(10).any(|w| w == b"CHAR ANSEL"));
+    let back = GedcomBuilder::new().build_from_bytes(bytes).unwrap();
+    assert_eq!(
+        back.individuals().first().unwrap().full_name().as_deref(),
+        Some("Renée Example")
+    );
+
+    let seven = TempFile::new("0 HEAD\n1 GEDC\n2 VERS 7.0\n0 TRLR\n");
+    let output = run(&["--convert-encoding", "ANSEL", seven.path()]);
+    assert_eq!(output.status.code(), Some(3), "{}", stderr(&output));
+    assert!(stderr(&output).contains("always UTF-8"));
+}
+
+/// `--profile` writes for an importer and lists what was lost.
+#[test]
+fn profile_export() {
+    let file = TempFile::new(
+        "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 NAME Ann /Example/\n1 OCCU Weaver\n\
+         1 OCCU Miller\n0 TRLR\n",
+    );
+    let output = run(&["--profile", "geneanet", file.path()]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let out = stdout(&output);
+    assert!(out.contains("1 OCCU Weaver, Miller\n"), "{out}");
+    assert!(out.contains("2 VERS 5.5.1\n"), "{out}");
+    assert!(stderr(&output).contains("lossy: @I1@: 2 occupations made one"));
+
+    let output = run(&["--profile", "nowhere", file.path()]);
+    assert_eq!(output.status.code(), Some(3));
+    let output = run(&["--list-profiles"]);
+    assert!(stdout(&output).contains("geneanet"));
+    let output = run(&["--profile", "geneanet", "--detect", file.path()]);
+    assert_eq!(output.status.code(), Some(3));
+}

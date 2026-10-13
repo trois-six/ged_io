@@ -7,7 +7,8 @@ use std::process::ExitCode;
 
 use ged_io::convert::ConversionOptions;
 use ged_io::model::{Dataset, Event, Individual, RecordRef, Sex, View};
-use ged_io::{GedcomBuilder, GedcomError, GedcomVersion, GedcomWriter, WriteError};
+use ged_io::profile::{self, Exporter, Interpretation};
+use ged_io::{GedcomBuilder, GedcomError, GedcomVersion, GedcomWriter, OutputEncoding, WriteError};
 
 const HELP: &str = "\
 ged-io - inspect, validate and rewrite GEDCOM files (5.5.1, 7.0, 7.1)
@@ -18,7 +19,11 @@ USAGE:
   ged-io --individual-lastname <LASTNAME> <file.ged>
   ged-io --individual-firstname <FIRSTNAME> <file.ged>
   ged-io --validate [--validation-level <LEVEL>] <file.ged>
-  ged-io --write <VERSION> [--keep-obsolete] <file.ged>
+  ged-io --write <VERSION> [--keep-obsolete] [--convert-encoding <ENC>] <file.ged>
+  ged-io --sanitize [--convert-encoding <ENC>] <file.ged>
+  ged-io --profile <NAME> <file.ged>
+  ged-io --detect <file.ged>
+  ged-io --list-profiles
 
 OPTIONS:
   -h, --help                         Print this help
@@ -37,10 +42,25 @@ OPTIONS:
                                      a 5.5.1 file is converted to 7.x and back
   --keep-obsolete                    With --write 7.0 or 7.1: keep the 5.5.1 structures 7.x
                                      drops (SUBN, HEAD.FILE, escapes) as declared extensions
+  --sanitize                         Read leniently and write the file to standard output as
+                                     conformant GEDCOM of its own version, listing the repairs
+                                     on standard error
+  --convert-encoding <ENC>           With --write or --sanitize (implied): write 5.5.1 bytes in
+                                     UTF-8, UTF-16 (little endian), ANSEL or ASCII; 7.x is
+                                     always UTF-8
+  --profile <NAME>                   Write the file to standard output for an importer (e.g.
+                                     geneanet, heredis, ancestry; see --list-profiles), listing
+                                     what was folded, lost or repaired on standard error
+  --detect                           Print the program that produced the file, as detected from
+                                     its header and tags
+  --list-profiles                    List the producer (import) and importer (export) profiles
+  --interpretation <LEVEL>           How a producer's conventions are read: none, lossless
+                                     (default) or best-effort
 
 NOTES:
   Any encoding is read. If both --individual-lastname and --individual-firstname are set,
-  the individuals matching both are listed.
+  the individuals matching both are listed. Written files leave out the credentials a
+  file may hold (_PASS, an encrypted or server login _USER).
 
 EXIT CODES:
   0 success, 1 I/O error, 2 validation errors, 3 usage error
@@ -56,6 +76,12 @@ struct Args {
     strict: Option<bool>,
     write: Option<GedcomVersion>,
     keep_obsolete: bool,
+    sanitize: bool,
+    encoding: Option<OutputEncoding>,
+    profile: Option<String>,
+    detect: bool,
+    list_profiles: bool,
+    interpretation: Option<Interpretation>,
     help: bool,
 }
 
@@ -113,6 +139,39 @@ fn parse_args(command_line: &[String]) -> Result<Args, CliError> {
             "--individual-firstname" => args.firstname = Some(value(arg, "a FIRSTNAME")?),
             "--validate" => args.validate = true,
             "--keep-obsolete" => args.keep_obsolete = true,
+            "--sanitize" => args.sanitize = true,
+            "--detect" => args.detect = true,
+            "--list-profiles" => args.list_profiles = true,
+            "--profile" => args.profile = Some(value(arg, "a profile name")?),
+            "--convert-encoding" => {
+                let v = value(arg, "an encoding")?;
+                args.encoding = Some(
+                    match v.to_ascii_uppercase().replace(['-', '_'], "").as_str() {
+                        "UTF8" => OutputEncoding::Utf8,
+                        "UTF16" | "UTF16LE" | "UNICODE" => OutputEncoding::Utf16Le,
+                        "ANSEL" => OutputEncoding::Ansel,
+                        "ASCII" => OutputEncoding::Ascii,
+                        _ => {
+                            return Err(usage(format!(
+                                "unknown encoding: {v} (expected UTF-8, UTF-16, ANSEL or ASCII)"
+                            )))
+                        }
+                    },
+                );
+            }
+            "--interpretation" => {
+                let v = value(arg, "none, lossless or best-effort")?;
+                args.interpretation = Some(match v.as_str() {
+                    "none" => Interpretation::None,
+                    "lossless" => Interpretation::Lossless,
+                    "best-effort" => Interpretation::BestEffort,
+                    _ => {
+                        return Err(usage(format!(
+                            "unknown interpretation: {v} (expected none, lossless or best-effort)"
+                        )))
+                    }
+                });
+            }
             "--validation-level" => {
                 args.strict = Some(match value(arg, "strict or lenient")?.as_str() {
                     "strict" => true,
@@ -169,6 +228,10 @@ fn run(command_line: &[String]) -> Result<ExitCode, CliError> {
         print!("{HELP}");
         return Ok(ExitCode::SUCCESS);
     }
+    if args.list_profiles {
+        print!("{}", list_profiles());
+        return Ok(ExitCode::SUCCESS);
+    }
     let file = args
         .file
         .as_deref()
@@ -180,29 +243,70 @@ fn run(command_line: &[String]) -> Result<ExitCode, CliError> {
     if args.keep_obsolete && args.write.is_none() {
         return Err(usage("--keep-obsolete requires --write"));
     }
-    if [args.validate, filters, args.write.is_some()]
-        .iter()
-        .filter(|&&b| b)
-        .count()
+    let writes = args.write.is_some() || args.sanitize || args.encoding.is_some();
+    if [
+        args.validate,
+        filters,
+        writes,
+        args.profile.is_some(),
+        args.detect,
+    ]
+    .iter()
+    .filter(|&&b| b)
+    .count()
         > 1
     {
         return Err(usage(
-            "--validate, --write and the --individual options cannot be combined",
+            "--validate, --write/--sanitize, --profile, --detect and the --individual options \
+             cannot be combined",
         ));
     }
+    let export = match &args.profile {
+        Some(name) => Some(
+            Exporter::named(name)
+                .ok_or_else(|| usage(format!("unknown profile: {name} (see --list-profiles)")))?,
+        ),
+        None => None,
+    };
     let bytes = fs::read(file)?;
     if args.validate {
         return Ok(validate(&bytes, args.strict.unwrap_or(false)));
     }
+    if args.detect {
+        print!("{}", detect(&bytes));
+        return Ok(ExitCode::SUCCESS);
+    }
     let data = GedcomBuilder::new()
+        .interpretation(args.interpretation.unwrap_or_default())
         .build_from_bytes(bytes)
         .map_err(CliError::Read)?;
     let mut out = io::stdout().lock();
-    if let Some(version) = args.write {
+    if let Some(exporter) = export {
+        let report = exporter.write(&mut out, &data).map_err(CliError::Write)?;
+        for fold in report.lossy() {
+            eprintln!("lossy: {fold}");
+        }
+        for limit in &report.limits {
+            eprintln!("limit: {limit}");
+        }
+        for repair in &report.repairs {
+            eprintln!("repair: {repair}");
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+    if writes {
+        let version = args.write.unwrap_or_else(|| data.version());
+        let encoding = args.encoding.unwrap_or_default();
+        if version.is_v7() && encoding != OutputEncoding::Utf8 {
+            return Err(usage(format!(
+                "GEDCOM {version} is always UTF-8: --convert-encoding {encoding} needs 5.5.1"
+            )));
+        }
         let conversion = ConversionOptions::default().keep_obsolete(args.keep_obsolete);
         let report = GedcomWriter::new()
             .gedcom_version(version)
             .conversion(conversion)
+            .output_encoding(encoding)
             .write(&mut out, &data)
             .map_err(CliError::Write)?;
         for repair in &report.repairs {
@@ -235,6 +339,59 @@ fn run(command_line: &[String]) -> Result<ExitCode, CliError> {
     };
     out.write_all(text.as_bytes())?;
     Ok(ExitCode::SUCCESS)
+}
+
+/// The program that produced the file: the detection, its evidence and
+/// hints.
+fn detect(bytes: &[u8]) -> String {
+    let d = profile::detect(bytes);
+    let mut text = String::new();
+    let _ = writeln!(
+        text,
+        "producer: {} ({})",
+        d.profile().id(),
+        d.profile().label()
+    );
+    if let Some(v) = d.producer_version() {
+        let _ = writeln!(text, "version: {v}");
+    }
+    let _ = writeln!(
+        text,
+        "score: {}{}",
+        d.score(),
+        if d.is_known() {
+            ""
+        } else {
+            " (not recognised)"
+        }
+    );
+    for e in d.evidence() {
+        let _ = writeln!(text, "  evidence: {e}");
+    }
+    for h in d.hints() {
+        let _ = writeln!(text, "hint: {} ({})", h.id(), h.label());
+    }
+    text
+}
+
+/// The import and export profiles, with their tier.
+fn list_profiles() -> String {
+    let mut text = String::from("Producers (read):\n");
+    for p in profile::import_profiles() {
+        let _ = writeln!(text, "  {:<20} tier {}  {}", p.id(), p.tier(), p.label());
+    }
+    text.push_str("Importers (--profile):\n");
+    for p in profile::export_profiles() {
+        let _ = writeln!(
+            text,
+            "  {:<20} tier {}  {}, GEDCOM {}",
+            p.id(),
+            p.tier(),
+            p.label(),
+            p.target().version()
+        );
+    }
+    text
 }
 
 /// Every deviation of the file from its specification, as errors in strict
