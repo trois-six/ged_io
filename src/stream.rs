@@ -29,13 +29,49 @@
 //! A dataset collects streamed records (`FromIterator`, `Extend`), so that
 //! a stream can be filtered into a smaller dataset without reading the
 //! whole file at once.
+//!
+//! A [`Visitor`] receives each record by its type and says whether to go
+//! on ([`ControlFlow`]): [`GedcomStreamParser::visit`] stops at the first
+//! [`ControlFlow::Break`], leaving the rest of the input unread.
+//!
+//! ```rust
+//! use std::ops::ControlFlow;
+//! use ged_io::model::{Individual, View};
+//! use ged_io::stream::{GedcomStreamParser, StreamedRecord, Visitor};
+//!
+//! /// Finds the first individual named in a file.
+//! struct FirstNamed;
+//!
+//! impl Visitor for FirstNamed {
+//!     type Break = String;
+//!     fn individual(&mut self, i: View<'_, Individual>, _: &StreamedRecord) -> ControlFlow<String> {
+//!         match i.full_name() {
+//!             Some(name) => ControlFlow::Break(name),
+//!             None => ControlFlow::Continue(()),
+//!         }
+//!     }
+//! }
+//!
+//! # fn main() -> Result<(), ged_io::GedcomError> {
+//! let file: &[u8] = b"0 HEAD\n0 @I1@ INDI\n0 @I2@ INDI\n1 NAME Ann /Example/\n0 @I3@ INDI\n0 TRLR\n";
+//! let mut parser = GedcomStreamParser::new(file)?;
+//! assert_eq!(parser.visit(&mut FirstNamed)?, ControlFlow::Break("Ann Example".to_string()));
+//! // The parser goes on from there.
+//! assert_eq!(parser.count(), 1);
+//! # Ok(())
+//! # }
+//! ```
 
 use std::collections::VecDeque;
 use std::io::BufRead;
+use std::ops::ControlFlow;
 
 use crate::encoding::GedcomEncoding;
 use crate::model::read::{Placed, RecordReader};
-use crate::model::{Dataset, Record, RecordRef, Store};
+use crate::model::{
+    Dataset, Family, HeaderRef, Individual, Multimedia, Node, Record, RecordRef, Repository,
+    SharedNote, Source, Store, Submission, Submitter, View,
+};
 use crate::tree::{RecordSource, TreeReader};
 use crate::version::GedcomVersion;
 use crate::GedcomError;
@@ -215,6 +251,147 @@ impl<R: BufRead> GedcomStreamParser<R> {
             self.pending.extend(records.into_iter().map(|r| (r, line)));
             self.data = Some(data);
         }
+    }
+}
+
+/// Receives the records of a stream ([`GedcomStreamParser::visit`]) by
+/// their type, and says whether to go on.
+///
+/// Every method has a default that goes on, so that a visitor implements
+/// the records it wants; [`record`](Self::record) dispatches each record to
+/// the method of its type, and can be implemented instead to see them all.
+/// Each method also receives the [`StreamedRecord`], whose store the views
+/// resolve against.
+pub trait Visitor {
+    /// What a visit stops with.
+    type Break;
+
+    /// Any record: dispatches it to the method of its type.
+    fn record(&mut self, record: &StreamedRecord) -> ControlFlow<Self::Break> {
+        match record.record() {
+            RecordRef::Header(h) => self.header(h, record),
+            RecordRef::Individual(r) => self.individual(r, record),
+            RecordRef::Family(r) => self.family(r, record),
+            RecordRef::Source(r) => self.source(r, record),
+            RecordRef::Repository(r) => self.repository(r, record),
+            RecordRef::Multimedia(r) => self.multimedia(r, record),
+            RecordRef::Submitter(r) => self.submitter(r, record),
+            RecordRef::Submission(r) => self.submission(r, record),
+            RecordRef::Note(r) => self.note(r, record),
+            RecordRef::Other(r) => self.other(r, record),
+        }
+    }
+
+    /// The header.
+    fn header(
+        &mut self,
+        _header: HeaderRef<'_>,
+        _record: &StreamedRecord,
+    ) -> ControlFlow<Self::Break> {
+        ControlFlow::Continue(())
+    }
+
+    /// An individual.
+    fn individual(
+        &mut self,
+        _individual: View<'_, Individual>,
+        _record: &StreamedRecord,
+    ) -> ControlFlow<Self::Break> {
+        ControlFlow::Continue(())
+    }
+
+    /// A family.
+    fn family(
+        &mut self,
+        _family: View<'_, Family>,
+        _record: &StreamedRecord,
+    ) -> ControlFlow<Self::Break> {
+        ControlFlow::Continue(())
+    }
+
+    /// A source.
+    fn source(
+        &mut self,
+        _source: View<'_, Source>,
+        _record: &StreamedRecord,
+    ) -> ControlFlow<Self::Break> {
+        ControlFlow::Continue(())
+    }
+
+    /// A repository.
+    fn repository(
+        &mut self,
+        _repository: View<'_, Repository>,
+        _record: &StreamedRecord,
+    ) -> ControlFlow<Self::Break> {
+        ControlFlow::Continue(())
+    }
+
+    /// A multimedia record.
+    fn multimedia(
+        &mut self,
+        _multimedia: View<'_, Multimedia>,
+        _record: &StreamedRecord,
+    ) -> ControlFlow<Self::Break> {
+        ControlFlow::Continue(())
+    }
+
+    /// A submitter.
+    fn submitter(
+        &mut self,
+        _submitter: View<'_, Submitter>,
+        _record: &StreamedRecord,
+    ) -> ControlFlow<Self::Break> {
+        ControlFlow::Continue(())
+    }
+
+    /// A 5.5.1 submission.
+    fn submission(
+        &mut self,
+        _submission: View<'_, Submission>,
+        _record: &StreamedRecord,
+    ) -> ControlFlow<Self::Break> {
+        ControlFlow::Continue(())
+    }
+
+    /// A shared note.
+    fn note(
+        &mut self,
+        _note: View<'_, SharedNote>,
+        _record: &StreamedRecord,
+    ) -> ControlFlow<Self::Break> {
+        ControlFlow::Continue(())
+    }
+
+    /// A record of no type the model has (an extension record).
+    fn other(
+        &mut self,
+        _record_node: View<'_, Node>,
+        _record: &StreamedRecord,
+    ) -> ControlFlow<Self::Break> {
+        ControlFlow::Continue(())
+    }
+}
+
+impl<R: BufRead> GedcomStreamParser<R> {
+    /// Gives `visitor` every record not read yet, in file order, until it
+    /// breaks: what it broke with, or [`ControlFlow::Continue`] at the end
+    /// of the input. The parser can go on after a break.
+    ///
+    /// # Errors
+    ///
+    /// [`GedcomError::Io`] when the input fails.
+    pub fn visit<V: Visitor + ?Sized>(
+        &mut self,
+        visitor: &mut V,
+    ) -> Result<ControlFlow<V::Break>, GedcomError> {
+        for record in self.by_ref() {
+            let record = record?;
+            if let ControlFlow::Break(b) = visitor.record(&record) {
+                return Ok(ControlFlow::Break(b));
+            }
+        }
+        Ok(ControlFlow::Continue(()))
     }
 }
 

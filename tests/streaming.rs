@@ -349,3 +349,63 @@ fn an_io_error_mid_stream_ends_it() {
     assert!(records > 1);
     assert!(parser.next().is_none());
 }
+
+/// A visitor sees every record, by its type, in file order; it can stop,
+/// and the parser goes on from there.
+#[test]
+fn visitors_see_records_by_type_and_can_stop() {
+    use ged_io::model::{Family, HeaderRef, Individual, Node, View};
+    use ged_io::stream::{StreamedRecord, Visitor};
+    use std::ops::ControlFlow;
+
+    #[derive(Default)]
+    struct Counter {
+        seen: Vec<String>,
+        stop_at: Option<&'static str>,
+    }
+    impl Visitor for Counter {
+        type Break = usize;
+        fn header(&mut self, _: HeaderRef<'_>, _: &StreamedRecord) -> ControlFlow<usize> {
+            self.seen.push("HEAD".into());
+            ControlFlow::Continue(())
+        }
+        fn individual(
+            &mut self,
+            i: View<'_, Individual>,
+            r: &StreamedRecord,
+        ) -> ControlFlow<usize> {
+            let x = r.store().xref(i.xref().unwrap()).to_string();
+            self.seen.push(x.clone());
+            if self.stop_at == Some(x.as_str()) {
+                return ControlFlow::Break(self.seen.len());
+            }
+            ControlFlow::Continue(())
+        }
+        fn family(&mut self, _: View<'_, Family>, _: &StreamedRecord) -> ControlFlow<usize> {
+            self.seen.push("FAM".into());
+            ControlFlow::Continue(())
+        }
+        fn other(&mut self, n: View<'_, Node>, _: &StreamedRecord) -> ControlFlow<usize> {
+            self.seen.push(n.tag().to_string());
+            ControlFlow::Continue(())
+        }
+    }
+
+    let file: &[u8] = b"0 HEAD\r1 GEDC\r2 VERS 7.0\r0 @I1@ INDI\r0 @F1@ FAM\r0 _LOC Here\r0 @I2@ INDI\r0 @I3@ INDI\r0 TRLR\r";
+    let mut all = Counter::default();
+    let flow = GedcomStreamParser::new(file)
+        .unwrap()
+        .visit(&mut all)
+        .unwrap();
+    assert_eq!(flow, ControlFlow::Continue(()));
+    assert_eq!(all.seen, ["HEAD", "@I1@", "FAM", "_LOC", "@I2@", "@I3@"]);
+
+    let mut parser = GedcomStreamParser::new(file).unwrap();
+    let mut stop = Counter {
+        stop_at: Some("@I2@"),
+        ..Counter::default()
+    };
+    assert_eq!(parser.visit(&mut stop).unwrap(), ControlFlow::Break(5));
+    let rest: Vec<_> = parser.map(Result::unwrap).collect();
+    assert_eq!(rest.len(), 1);
+}
