@@ -78,7 +78,7 @@ pub use encoding::GedcomEncoding;
 pub use error::GedcomError;
 pub use indexed::IndexedDataset;
 pub use model::Dataset;
-pub use stream::{GedcomStreamParser, StreamedRecord};
+pub use stream::{GedcomStreamParser, StreamedRecord, Visitor};
 pub use version::{GedcomVersion, VersionRules};
 /// The examples of the README, compiled and run as documentation tests.
 #[cfg(all(doctest, feature = "serde", feature = "gedzip"))]
