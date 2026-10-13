@@ -115,6 +115,11 @@ impl Decoder {
                 }
             }
         }
+        // Valid text, the common case, is checked a word at a time.
+        if let Ok(s) = std::str::from_utf8(input) {
+            self.marks.push_str(out, s);
+            return;
+        }
         let mut rest_len = input.len();
         for chunk in input.utf8_chunks() {
             self.marks.push_str(out, chunk.valid());
