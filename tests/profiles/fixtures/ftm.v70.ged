@@ -1,0 +1,46 @@
+0 HEAD
+1 GEDC
+2 VERS 7.0
+1 SOUR FTM
+2 VERS Family Tree Maker (22.2.5)
+2 NAME Family Tree Maker for Windows
+2 CORP Ancestry.com
+1 SCHMA
+2 TAG _APID https://github.com/trois-six/oxidged/blob/main/docs/extensions.md#ftm-_APID
+2 TAG _MREL https://github.com/trois-six/oxidged/blob/main/docs/extensions.md#ftm-_MREL
+0 @I1@ INDI
+1 NAME Jean /Exemple/
+1 SEX M
+1 FACT Lowlands
+2 TYPE Origin
+1 FACT Overseas
+2 TYPE Destination
+1 FACT Haplogroup X
+2 TYPE DNA
+1 BIRT
+2 DATE 4 JUL 1850
+2 SOUR @S1@
+3 _APID 1,7602::1234567
+1 OBJE @M1@
+1 OBJE @M2@
+0 @I2@ INDI
+1 NAME Paul /Exemple/
+1 FAMC @F1@
+2 PEDI ADOPTED
+0 @F1@ FAM
+1 HUSB @I1@
+1 CHIL @I2@
+2 _FREL Adopted
+2 _MREL Adopted
+1 EVEN
+2 DATE 1890
+2 TYPE Death of one spouse
+0 @S1@ SOUR
+1 TITL Example register
+0 @M1@ OBJE
+1 FILE portrait.jpg
+2 FORM image/jpeg
+0 @M2@ OBJE
+1 FILE other.jpg
+2 FORM image/jpeg
+0 TRLR

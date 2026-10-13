@@ -1,0 +1,15 @@
+HEAD.SOUR EXAMPLE_APP written as ged_io (relabelled; EXF-082, EXC-018, EXC-057)
+@I1@: 2 other names in one _AKA (merged, lossy; EXC-096)
+@I1@: 1 fields of BIRT in its note (as text, lossy; EXC-097)
+@F2@: 1 fields of MARR in its note (as text, lossy; EXC-097)
+@I1@: _UID in the PAF form (recoded; EXC-071)
+@I1@: _PRIM on the preferred image (added; EXC-067)
+@I1@: SDATE as _SDATE (relabelled; EXC-064)
+repair: HEAD.SCHMA: not permitted here, written as _SCHMA
+repair: INDI.BAPM.ASSO: not permitted here, written as _ASSO
+repair: INDI.BAPM.ASSO: not permitted here, written as _ASSO
+repair: INDI.BAPM.ASSO: not permitted here, written as _ASSO
+repair: _ASSO @VOID@ names no record: kept as text
+repair: INDI.BAPM.ASSO: not permitted here, written as _ASSO
+repair: INDI.OBJE.CROP: not permitted here, written as _CROP
+repair: FAM.NO: not permitted here, written as _NO

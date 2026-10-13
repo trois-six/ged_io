@@ -1,0 +1,13 @@
+HEAD.SOUR EXAMPLE_APP written as ged_io (relabelled; EXF-082, EXC-018, EXC-057)
+@I1@: an address of BURI as text (as text, lossy; EXC-054)
+@F2@: an address of MARR as text (as text, lossy; EXC-054)
+repair: HEAD.SCHMA: not permitted here, written as _SCHMA
+repair: INDI.BIRT.SDATE: not permitted here, written as _SDATE
+repair: INDI.BAPM.ASSO: not permitted here, written as _ASSO
+repair: INDI.BAPM.ASSO: not permitted here, written as _ASSO
+repair: INDI.BAPM.ASSO: not permitted here, written as _ASSO
+repair: _ASSO @VOID@ names no record: kept as text
+repair: INDI.BAPM.ASSO: not permitted here, written as _ASSO
+repair: INDI.OBJE.CROP: not permitted here, written as _CROP
+repair: INDI.UID: not permitted here, written as _UID
+repair: FAM.NO: not permitted here, written as _NO

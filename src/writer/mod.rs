@@ -507,6 +507,11 @@ impl GedcomWriter {
         mut writer: W,
         data: &Dataset,
     ) -> Result<WriteReport, WriteError> {
+        if let Some((records, mut report)) = self.reinterpreted(data) {
+            let more = self.write_structures(writer, &records)?;
+            report.repairs.extend(more.repairs);
+            return Ok(report);
+        }
         let built = data.built(self);
         let store = Some(data.store());
         let order = crate::model::field_order;
@@ -521,6 +526,46 @@ impl GedcomWriter {
             }
         }
         self.write_built(writer, &built, order, store, Some(data))
+    }
+
+    /// The records of a 5.5.1 dataset converted to the 7.x target and
+    /// interpreted there for the producer reading found (what only 7.x can
+    /// say: `UID`, `SDATE`, `CROP`, associations under events, …), when
+    /// that interprets anything ([`crate::profile`]).
+    fn reinterpreted(&self, data: &Dataset) -> Option<(Vec<Structure>, WriteReport)> {
+        let to = self.config.version?;
+        if !to.is_v7() || data.version().is_v7() {
+            return None;
+        }
+        let detection = data.producer()?;
+        let rules = crate::profile::RuleSet::of(detection, data.interpretation());
+        if !rules.has_v7_only()
+            || !rules.may_apply(
+                data.store().input(),
+                data.store().other_tags(),
+                false,
+                true,
+                true,
+            )
+        {
+            return None;
+        }
+        // The conversion as the writer makes it, read back to interpret.
+        let mut plain = self.clone().output_encoding(OutputEncoding::Utf8);
+        plain.config.bom = Bom::Never;
+        let (text, report) = plain.write_to_string_plain(data).ok()?;
+        let mut records = Tree::parse(text).to_structures();
+        let interpreted = crate::profile::interpret::interpret_with(&mut records, to, &rules);
+        if !interpreted.changed() {
+            return None;
+        }
+        // Typed again, so that the structures come in the model's order
+        // (what reading this output back gives).
+        let mut text = String::new();
+        for r in &records {
+            r.write_gedcom(&mut text, 0, to);
+        }
+        Some((Dataset::parse(text).to_structures(), report))
     }
 
     /// `data` written in a version of the other family with its header
@@ -608,6 +653,25 @@ impl GedcomWriter {
         &self,
         data: &Dataset,
     ) -> Result<(String, WriteReport), WriteError> {
+        if let Some((records, mut report)) = self.reinterpreted(data) {
+            let mut text = self.clone().output_encoding(OutputEncoding::Utf8);
+            if text.config.bom == Bom::Auto {
+                text.config.bom = Bom::Never;
+            }
+            let mut bytes = Vec::new();
+            let more = text.write_structures(&mut bytes, &records)?;
+            report.repairs.extend(more.repairs);
+            let text = String::from_utf8(bytes)
+                .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+            return Ok((text, report));
+        }
+        self.write_to_string_plain(data)
+    }
+
+    /// [`write_to_string_with_report`](Self::write_to_string_with_report)
+    /// without the interpretation a dataset's producer may still need in
+    /// 7.x.
+    fn write_to_string_plain(&self, data: &Dataset) -> Result<(String, WriteReport), WriteError> {
         let built = data.built(self);
         let size = data.store().input_len();
         let store = Some(data.store());

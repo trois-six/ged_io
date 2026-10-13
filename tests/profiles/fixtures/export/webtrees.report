@@ -1,0 +1,10 @@
+HEAD.SOUR EXAMPLE_APP written as ged_io (relabelled; EXF-082, EXC-018, EXC-057)
+@I1@: a witness of BAPM as _ASSO (relabelled; EXF-093)
+@I1@: a witness of BAPM as _ASSO (relabelled; EXF-093)
+@I1@: a witness of BAPM as _ASSO (relabelled; EXF-093)
+@I1@: a witness of BAPM as a note (as text, lossy; EXF-093)
+repair: HEAD.SCHMA: not permitted here, written as _SCHMA
+repair: INDI.BIRT.SDATE: not permitted here, written as _SDATE
+repair: INDI.OBJE.CROP: not permitted here, written as _CROP
+repair: INDI.UID: not permitted here, written as _UID
+repair: FAM.NO: not permitted here, written as _NO

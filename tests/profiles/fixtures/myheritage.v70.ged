@@ -1,0 +1,37 @@
+0 HEAD
+1 GEDC
+2 VERS 7.0
+1 SOUR MYHERITAGE
+2 VERS 8.0.0.8645
+2 NAME MyHeritage Family Tree Builder
+2 CORP MyHeritage.com
+2 _RTLSAVE RTL
+1 SCHMA
+2 TAG _FILESIZE https://github.com/trois-six/oxidged/blob/main/docs/extensions.md#myheritage-_FILESIZE
+2 TAG _PROJECT_GUID https://github.com/trois-six/oxidged/blob/main/docs/extensions.md#myheritage-_PROJECT_GUID
+2 TAG _RINS https://github.com/trois-six/oxidged/blob/main/docs/extensions.md#myheritage-_RINS
+2 TAG _RTLSAVE https://github.com/trois-six/oxidged/blob/main/docs/extensions.md#myheritage-_RTLSAVE
+1 _RINS I2,F1,N0
+1 _PROJECT_GUID 00000000-0000-4000-8000-000000000001
+0 @I1@ INDI
+1 NAME Anna /Example/
+1 NAME /Sample/
+2 TYPE MARRIED
+1 SEX F
+1 BIRT
+2 DATE 1 JAN 1880
+2 UID 0123456789ABCDEF0123456789ABCDE0
+1 CHAN
+2 DATE 30 MAY 2013
+3 TIME 00:38:06
+1 OBJE @M1@
+1 UID 0123456789ABCDEF0123456789ABCDEF
+1 EXID MH:I1
+2 TYPE https://gedcom.io/terms/v7/RIN#MYHERITAGE
+1 _UPD 30 MAY 2013 00:38:06 GMT -0500
+0 @M1@ OBJE
+1 FILE file:///C:/Photos/anna.jpg
+2 FORM image/jpeg
+1 _FILESIZE 27370
+1 _CUTOUT Y
+0 TRLR

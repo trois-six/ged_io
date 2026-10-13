@@ -1,0 +1,16 @@
+0 HEAD
+1 GEDC
+2 VERS 7.0
+1 SOUR AncestQuest
+2 VERS 14.00.6
+2 NAME Ancestral Quest
+2 CORP Incline Software, LC
+0 @I1@ INDI
+1 NAME Anna /Example/
+2 _AKA Annie /Example/
+1 NAME Annie /Example/
+2 TYPE AKA
+1 SEX F
+1 BIRT
+2 DATE ABT 1850
+0 TRLR

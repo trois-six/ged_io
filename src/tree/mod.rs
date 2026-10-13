@@ -619,14 +619,19 @@ impl Structure {
     /// `level`, with `@` escaped for `version`. See [`Tree::to_gedcom`].
     #[must_use]
     pub fn to_gedcom(&self, level: u8, version: GedcomVersion) -> String {
+        let mut out = String::new();
+        self.write_gedcom(&mut out, level, version);
+        out
+    }
+
+    /// Appends what [`Structure::to_gedcom`] gives to `out`.
+    pub(crate) fn write_gedcom(&self, out: &mut String, level: u8, version: GedcomVersion) {
         let escaping = if version.is_v7() {
             Escaping::V70
         } else {
             Escaping::V551
         };
-        let mut out = String::new();
-        self.write(&mut out, usize::from(level), escaping);
-        out
+        self.write(out, usize::from(level), escaping);
     }
 
     fn write(&self, out: &mut String, level: usize, escaping: Escaping) {

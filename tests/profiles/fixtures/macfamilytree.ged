@@ -1,0 +1,16 @@
+0 HEAD
+1 SOUR SyniumFamilyTree
+2 NAME MacFamilyTree
+2 VERS 9.0
+2 CORP Synium Software GmbH Germany (syniumsoftware.com)
+1 CHAR UTF-8
+1 GEDC
+2 VERS 7.0.3
+2 FORM LINEAGE-LINKED
+0 @I1@ INDI
+1 NAME Anna /Example/
+1 SEX F
+1 _FID ABCD-12X
+0 @P1@ _PLAC
+1 NAME Example town
+0 TRLR

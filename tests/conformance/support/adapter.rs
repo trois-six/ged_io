@@ -46,20 +46,25 @@ pub fn guard<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
     }
 }
 
-/// Reads bytes with the default (lenient) configuration.
+/// The reader of the suite: lenient, and without producer interpretation,
+/// which rewrites a producer's conventions as the standard says them (its
+/// own tests are `tests/profiles.rs`): the suite checks what the reader
+/// keeps as written.
+fn lenient() -> GedcomBuilder {
+    GedcomBuilder::new().interpretation(ged_io::profile::Interpretation::None)
+}
+
+/// Reads bytes with the default (lenient) configuration, interpreting
+/// nothing.
 pub fn read(bytes: &[u8]) -> Result<Model, String> {
-    guard(|| {
-        GedcomBuilder::new()
-            .build_from_bytes(bytes)
-            .map_err(|e| e.to_string())
-    })
+    guard(|| lenient().build_from_bytes(bytes).map_err(|e| e.to_string()))
 }
 
 /// Reads bytes and reports dangling pointers as an error (the reference
 /// check the README documents for application backends).
 pub fn read_checking_references(bytes: &[u8]) -> Result<Model, String> {
     guard(|| {
-        let data = GedcomBuilder::new()
+        let data = lenient()
             .build_from_bytes(bytes)
             .map_err(|e| e.to_string())?;
         match data.dangling_references().first() {
@@ -262,9 +267,7 @@ pub fn gedzip_round_trip(
             .iter()
             .map(|s| (*s).to_string())
             .collect();
-        let back = reader
-            .read_dataset(&GedcomBuilder::new())
-            .map_err(|e| e.to_string())?;
+        let back = reader.read_dataset(&lenient()).map_err(|e| e.to_string())?;
         Ok((back, names))
     })
 }

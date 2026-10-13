@@ -1,0 +1,17 @@
+0 HEAD
+1 GEDC
+2 VERS 7.0
+1 SOUR SyniumFamilyTree
+2 VERS 9.0
+2 NAME MacFamilyTree
+2 CORP Synium Software GmbH Germany (syniumsoftware.com)
+1 SCHMA
+2 TAG _PLAC https://github.com/trois-six/oxidged/blob/main/docs/extensions.md#macfamilytree-_PLAC
+0 @I1@ INDI
+1 NAME Anna /Example/
+1 SEX F
+1 EXID ABCD-12X
+2 TYPE https://gedcom.io/exid-type/FamilySearch-PersonId
+0 @P1@ _PLAC
+1 NAME Example town
+0 TRLR

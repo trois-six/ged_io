@@ -1,0 +1,32 @@
+0 HEAD
+1 SOUR FAMILY_HISTORIAN
+2 VERS 7.0.24
+2 NAME Family Historian
+2 CORP Calico Pie Limited
+1 GEDC
+2 VERS 7.0
+1 _ROOT @I1@
+0 @I1@ INDI
+1 NAME Tony /Example/
+2 _USED Tony
+1 SEX M
+1 _ATTR Singing
+2 TYPE Hobby
+1 BIRT
+2 DATE 1 JAN 1950
+2 _SHAR @I2@
+3 ROLE Witness
+2 _SHAN Fictive Witness
+3 ROLE Observer
+1 FAMC @F1@
+2 _PEDI Adopted (father)
+1 OBJE @M1@
+2 _AREA {154,46,243,127}
+0 @I2@ INDI
+1 NAME Sam /Example/
+0 @F1@ FAM
+1 CHIL @I1@
+0 @M1@ OBJE
+1 FILE photo.jpg
+2 FORM image/jpeg
+0 TRLR

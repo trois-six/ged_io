@@ -1,0 +1,14 @@
+0 HEAD
+1 SOUR FamilySearch
+1 GEDC
+2 VERS 7.0
+0 @I1@ INDI
+1 NAME Anna /Example/
+2 _RUFNAM Anna
+1 SEX F
+1 EXID ABCD-12X
+2 TYPE https://gedcom.io/exid-type/FamilySearch-PersonId
+1 BIRT
+2 PLAC Example
+3 _LANG de
+0 TRLR

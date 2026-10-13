@@ -1,0 +1,16 @@
+0 HEAD
+1 SOUR AncestQuest
+2 NAME Ancestral Quest
+2 VERS 14.00.6
+2 CORP Incline Software, LC
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @I1@ INDI
+1 NAME Anna /Example/
+2 _AKA Annie /Example/
+1 SEX F
+1 BIRT
+2 DATE CIR 1850
+0 TRLR

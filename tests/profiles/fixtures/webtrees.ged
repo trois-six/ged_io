@@ -1,0 +1,26 @@
+0 HEAD
+1 SOUR webtrees
+2 NAME webtrees
+2 VERS 2.2.0
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @I1@ INDI
+1 NAME Anna /Example/
+1 SEX F
+1 OBJE @M1@
+1 OBJE @M2@
+1 _WT_OBJE_SORT @M2@
+1 _WT_OBJE_SORT @M1@
+1 COMM A comment
+1 CHAN
+2 DATE 1 JAN 2020
+2 _WT_USER editor
+0 @M1@ OBJE
+1 FILE a.jpg
+2 FORM jpg
+0 @M2@ OBJE
+1 FILE b.jpg
+2 FORM jpg
+0 TRLR

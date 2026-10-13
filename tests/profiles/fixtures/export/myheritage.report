@@ -1,0 +1,21 @@
+HEAD.SOUR EXAMPLE_APP written as ged_io (relabelled; EXF-082, EXC-018, EXC-057)
+@I1@: the usual given name (merged, lossy; EXC-038)
+@I1@: FACT as EVEN (relabelled, lossy; EXC-039)
+@I1@: an association as EVEN TYPE Associate (as text, lossy; EXC-041)
+@I1@: an association as EVEN TYPE Associate (as text, lossy; EXC-041)
+@I1@: an association as EVEN TYPE Associate (as text, lossy; EXC-041)
+@I1@: an association as EVEN TYPE Associate (as text, lossy; EXC-041)
+@I1@: an association as EVEN TYPE Associate (as text, lossy; EXC-041)
+@I1@: an address of BURI as text (as text, lossy; EXC-042)
+@F2@: an address of MARR as text (as text, lossy; EXC-042)
+@I1@: the cause of BURI in its note (as text, lossy; EXC-043)
+@I1@: 1 fields of BIRT in its note (as text, lossy; EXC-043)
+@F2@: 1 fields of MARR in its note (as text, lossy; EXC-043)
+@I1@: identifiers in a note (as text, lossy; EXC-044)
+@I2@: an interpreted date's phrase in the note (as text, lossy; EXC-045)
+@I1@: _PRIM, _PRIM_CUTOUT on the preferred image (added; EXC-046, EXC-051)
+repair: HEAD.SCHMA: not permitted here, written as _SCHMA
+repair: INDI.BIRT.SDATE: not permitted here, written as _SDATE
+repair: INDI.OBJE.CROP: not permitted here, written as _CROP
+repair: INDI.UID: not permitted here, written as _UID
+repair: FAM.NO: not permitted here, written as _NO

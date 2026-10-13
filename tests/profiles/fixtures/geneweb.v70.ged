@@ -1,0 +1,54 @@
+0 HEAD
+1 GEDC
+2 VERS 7.0
+1 SOUR GeneWeb
+2 VERS 7.0.0
+2 NAME gwb2ged
+2 CORP INRIA
+2 DATA exemple.gwb
+1 SCHMA
+2 TAG _GWID https://github.com/trois-six/oxidged/blob/main/docs/extensions.md#geneweb-_GWID
+0 @I1@ INDI
+1 NAME Aubin /FICTIF/
+2 SURN FICTIF,FICTIVE
+1 NAME Le Fictif
+2 TYPE AKA
+1 SEX M
+1 BIRT
+2 DATE 125 BCE
+1 ADOP Y
+2 FAMC @F3@
+3 ADOP BOTH
+1 FAMC @F1@
+1 FAMC @F3@
+2 PEDI ADOPTED
+1 ASSO @I2@
+2 ROLE GODP
+3 PHRASE godfather
+1 _ASSO @F2@
+2 ROLE WITN
+3 PHRASE witness
+2 TYPE FAM
+1 _GWID 1234
+0 @I2@ INDI
+1 NAME Basile /FICTIF/
+1 SEX M
+0 @I3@ INDI
+1 NAME Cécile /EXEMPLE/
+1 SEX U
+0 @F1@ FAM
+1 CHIL @I1@
+0 @F2@ FAM
+1 HUSB @I2@
+1 WIFE @I3@
+1 MARR
+2 DATE 1850
+2 ASSO @I1@
+3 ROLE WITN
+4 PHRASE witness
+0 @F3@ FAM
+1 HUSB @I2@
+1 CHIL @I1@
+1 EVEN
+2 TYPE unmarried
+0 TRLR

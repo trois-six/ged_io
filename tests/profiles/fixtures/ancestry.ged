@@ -1,0 +1,37 @@
+0 HEAD
+1 SOUR Ancestry.com Family Trees
+2 NAME Ancestry.com Member Trees
+2 VERS 2021.07
+2 CORP Ancestry.com
+2 _TREE Example tree
+3 RIN 12345678
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @I1@ INDI
+1 NAME Ann /Example/
+1 SEX F
+1 BIRT
+2 DATE 28 Oct 1910
+2 SOUR @S1@
+3 PAGE Entry 4
+3 _APID 1,7602::1234567
+3 DATA
+4 NOTE Transcribed from the register
+1 _MILT
+2 DATE 1930
+1 OBJE @M1@
+1 OBJE @M2@
+2 _PRIM Y
+0 @S1@ SOUR
+1 TITL Example census
+1 _APID 1,7602::0
+1 NOTE &lt;i&gt;Example&lt;/i&gt; collection
+0 @M1@ OBJE
+1 FILE first.jpg
+2 FORM jpg
+0 @M2@ OBJE
+1 FILE preferred.jpg
+2 FORM jpg
+0 TRLR

@@ -1,0 +1,40 @@
+0 HEAD
+1 GEDC
+2 VERS 7.0
+1 SOUR RootsMagic
+2 VERS 7.0.2.2
+2 NAME RootsMagic
+2 CORP RootsMagic, Inc.
+1 SCHMA
+2 TAG _SUBQ https://github.com/trois-six/oxidged/blob/main/docs/extensions.md#rootsmagic-_SUBQ
+2 TAG _TMPLT https://github.com/trois-six/oxidged/blob/main/docs/extensions.md#rootsmagic-_TMPLT
+0 @I1@ INDI
+1 NAME Ann /Example/
+1 SEX F
+1 BIRT
+2 DATE 1 JAN 1850
+2 SDATE 1 JAN 1850
+2 ASSO @I2@
+3 ROLE WITN
+4 PHRASE Witness
+1 NOTE <p>Biography of <b>Ann</b></p>
+2 MIME text/html
+1 OBJE @M2@
+1 OBJE @M1@
+1 UID 0123456789ABCDEF0123456789ABCDEF1A2B
+1 EXID ABCD-12X
+2 TYPE https://gedcom.io/exid-type/FamilySearch-PersonId
+0 @I2@ INDI
+1 NAME Bob /Example/
+0 @S1@ SOUR
+1 TITL Example
+1 _SUBQ Short
+1 _TMPLT
+2 TID 372
+0 @M1@ OBJE
+1 FILE a.jpg
+2 FORM image/jpeg
+0 @M2@ OBJE
+1 FILE b.jpg
+2 FORM image/jpeg
+0 TRLR

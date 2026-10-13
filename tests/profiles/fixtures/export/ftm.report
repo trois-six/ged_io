@@ -1,0 +1,26 @@
+HEAD.SOUR EXAMPLE_APP written as ged_io (relabelled; EXF-082, EXC-018, EXC-057)
+@I1@: the name prefix as a title (moved, lossy; EXC-021)
+@I1@: an association as EVEN TYPE Associate (as text, lossy; EXC-022)
+@I1@: an association as EVEN TYPE Associate (as text, lossy; EXC-022)
+@I1@: an association as EVEN TYPE Associate (as text, lossy; EXC-022)
+@I1@: an association as EVEN TYPE Associate (as text, lossy; EXC-022)
+@I1@: an association as EVEN TYPE Associate (as text, lossy; EXC-022)
+@I1@: IDNO as FACT + TYPE ID number (relabelled, lossy; EXC-023)
+@I1@: 1 fields of BIRT in its note (as text, lossy; EXC-024)
+@F2@: 1 fields of MARR in its note (as text, lossy; EXC-024)
+@I1@: an address of BURI as text (as text, lossy; EXC-025)
+@F2@: an address of MARR as text (as text, lossy; EXC-025)
+@I1@: the cause of BURI in its note (as text, lossy; EXC-026)
+@F1@: _FREL and _MREL beside the child's PEDI (added; EXC-017, EXC-027)
+@F2@: _FREL and _MREL beside the child's PEDI (added; EXC-017, EXC-027)
+@F3@: _FREL and _MREL beside the child's PEDI (added; EXC-017, EXC-027)
+@I1@: record citations on an EVEN TYPE Whole Record Citation (moved, lossy; EXC-028)
+@F2@: record citations on an EVEN TYPE Whole Record Citation (moved, lossy; EXC-028)
+@I1@: _PHOTO for the preferred image (added; EXC-029)
+@S1@: source fields in its note (as text, lossy; EXC-030)
+@R1@: contact details joined (merged, lossy; EXC-031)
+repair: HEAD.SCHMA: not permitted here, written as _SCHMA
+repair: INDI.BIRT.SDATE: not permitted here, written as _SDATE
+repair: INDI.OBJE.CROP: not permitted here, written as _CROP
+repair: INDI.UID: not permitted here, written as _UID
+repair: FAM.NO: not permitted here, written as _NO

@@ -1,0 +1,41 @@
+0 HEAD
+1 SOUR FTM
+2 VERS Family Tree Maker (22.2.5)
+2 NAME Family Tree Maker for Windows
+2 CORP Ancestry.com
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @I1@ INDI
+1 NAME Jean /Exemple/
+1 SEX M
+1 _ORIG Lowlands
+1 _DEST Overseas
+1 _DNA Haplogroup X
+1 BIRT
+2 DATE 4 Jul 1850
+2 SOUR @S1@
+3 _APID 1,7602::1234567
+1 _PHOTO @M1@
+1 OBJE @M2@
+1 OBJE @M1@
+0 @I2@ INDI
+1 NAME Paul /Exemple/
+1 FAMC @F1@
+0 @F1@ FAM
+1 HUSB @I1@
+1 CHIL @I2@
+2 _FREL Adopted
+2 _MREL Adopted
+1 _DETS
+2 DATE 1890
+0 @S1@ SOUR
+1 TITL Example register
+0 @M1@ OBJE
+1 FILE portrait.jpg
+2 FORM jpg
+0 @M2@ OBJE
+1 FILE other.jpg
+2 FORM jpg
+0 TRLR
