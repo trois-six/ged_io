@@ -10,6 +10,12 @@ use super::{ansel_nfc, code_pages};
 pub(crate) enum SingleByte {
     /// Windows-1252, also used to read ISO-8859-1 (a superset in practice).
     Cp1252,
+    /// Windows-1250 (Central European).
+    Cp1250,
+    /// Windows-1251 (Cyrillic).
+    Cp1251,
+    /// ISO-8859-2 (Latin-2).
+    Iso8859_2,
     /// ISO-8859-15 (Latin-9).
     Iso8859_15,
     /// IBM PC code page 437.
@@ -39,6 +45,9 @@ impl SingleByte {
         let upper = usize::from(byte & 0x7F);
         let table = match self {
             SingleByte::Cp1252 => &code_pages::CP1252,
+            SingleByte::Cp1250 => &code_pages::CP1250,
+            SingleByte::Cp1251 => &code_pages::CP1251,
+            SingleByte::Iso8859_2 => &code_pages::ISO_8859_2,
             SingleByte::Iso8859_15 => &code_pages::ISO_8859_15,
             SingleByte::Cp437 => &code_pages::CP437,
             SingleByte::MacRoman => &code_pages::MAC_ROMAN,
@@ -66,6 +75,9 @@ impl SingleByte {
         }
         let table = match self {
             SingleByte::Cp1252 => &code_pages::CP1252,
+            SingleByte::Cp1250 => &code_pages::CP1250,
+            SingleByte::Cp1251 => &code_pages::CP1251,
+            SingleByte::Iso8859_2 => &code_pages::ISO_8859_2,
             SingleByte::Iso8859_15 => &code_pages::ISO_8859_15,
             SingleByte::Cp437 => &code_pages::CP437,
             SingleByte::MacRoman => &code_pages::MAC_ROMAN,
@@ -403,6 +415,9 @@ mod tests {
     fn code_pages_round_trip_their_upper_half() {
         for set in [
             SingleByte::Cp1252,
+            SingleByte::Cp1250,
+            SingleByte::Cp1251,
+            SingleByte::Iso8859_2,
             SingleByte::Iso8859_15,
             SingleByte::Cp437,
             SingleByte::MacRoman,

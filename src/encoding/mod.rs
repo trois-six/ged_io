@@ -83,6 +83,12 @@ pub enum GedcomEncoding {
     Iso8859_15,
     /// Windows-1252 (`CHAR ANSI`, `WINDOWS-1252`, `CP1252`).
     Windows1252,
+    /// Windows-1250, Central European (`CHAR WINDOWS-1250`, `CP1250`).
+    Windows1250,
+    /// Windows-1251, Cyrillic (`CHAR WINDOWS-1251`, `CP1251`).
+    Windows1251,
+    /// ISO-8859-2, Latin-2 (`CHAR ISO-8859-2`, `LATIN2`).
+    Iso8859_2,
     /// IBM PC code page 437 (`CHAR IBMPC`, `CP437`).
     Cp437,
     /// Mac OS Roman (`CHAR MACINTOSH`, `MACROMAN`).
@@ -118,10 +124,13 @@ impl GedcomEncoding {
             b"UTF16BE" => Self::Utf16Be,
             b"ASCII" | b"USASCII" => Self::Ascii,
             b"ANSEL" | b"MARC8" => Self::Ansel,
-            b"ISO88591" | b"LATIN1" | b"ISOLATIN1" => Self::Iso8859_1,
+            b"ISO88591" | b"LATIN1" | b"ISOLATIN1" | b"ISO8859" => Self::Iso8859_1,
             b"ISO885915" | b"LATIN9" => Self::Iso8859_15,
             b"ANSI" | b"WINDOWS1252" | b"CP1252" | b"WIN1252" | b"MSANSI" => Self::Windows1252,
-            b"IBMPC" | b"CP437" | b"IBM437" | b"DOS" => Self::Cp437,
+            b"WINDOWS1250" | b"CP1250" | b"WIN1250" => Self::Windows1250,
+            b"WINDOWS1251" | b"CP1251" | b"WIN1251" => Self::Windows1251,
+            b"ISO88592" | b"LATIN2" | b"ISOLATIN2" => Self::Iso8859_2,
+            b"IBMPC" | b"CP437" | b"IBM437" | b"DOS" | b"IBM" | b"OEM" => Self::Cp437,
             b"MACINTOSH" | b"MACROMAN" | b"MAC" => Self::MacRoman,
             _ => return None,
         })
@@ -139,6 +148,9 @@ impl std::fmt::Display for GedcomEncoding {
             GedcomEncoding::Iso8859_1 => "ISO-8859-1",
             GedcomEncoding::Iso8859_15 => "ISO-8859-15",
             GedcomEncoding::Windows1252 => "WINDOWS-1252",
+            GedcomEncoding::Windows1250 => "WINDOWS-1250",
+            GedcomEncoding::Windows1251 => "WINDOWS-1251",
+            GedcomEncoding::Iso8859_2 => "ISO-8859-2",
             GedcomEncoding::Cp437 => "IBMPC",
             GedcomEncoding::MacRoman => "MACINTOSH",
         })
@@ -326,6 +338,9 @@ pub fn encode(text: &str, encoding: GedcomEncoding) -> Result<Vec<u8>, EncodeErr
         }
         GedcomEncoding::Iso8859_1 | GedcomEncoding::Windows1252 => SingleByte::Cp1252,
         GedcomEncoding::Iso8859_15 => SingleByte::Iso8859_15,
+        GedcomEncoding::Windows1250 => SingleByte::Cp1250,
+        GedcomEncoding::Windows1251 => SingleByte::Cp1251,
+        GedcomEncoding::Iso8859_2 => SingleByte::Iso8859_2,
         GedcomEncoding::Cp437 => SingleByte::Cp437,
         GedcomEncoding::MacRoman => SingleByte::MacRoman,
     };
@@ -497,6 +512,8 @@ mod tests {
             GedcomEncoding::Iso8859_1,
             GedcomEncoding::Iso8859_15,
             GedcomEncoding::Windows1252,
+            GedcomEncoding::Windows1250,
+            GedcomEncoding::Iso8859_2,
             GedcomEncoding::Cp437,
             GedcomEncoding::MacRoman,
             GedcomEncoding::Ansel,
@@ -504,6 +521,9 @@ mod tests {
             let bytes = encode(text, encoding).unwrap();
             assert_eq!(decode_as(&bytes, encoding), text, "{encoding}");
         }
+        let cyrillic = "0 HEAD\n1 NAME \u{418}\u{432}\u{430}\u{43d} /\u{41f}\u{440}\u{438}\u{43c}\u{435}\u{440}/\n";
+        let bytes = encode(cyrillic, GedcomEncoding::Windows1251).unwrap();
+        assert_eq!(decode_as(&bytes, GedcomEncoding::Windows1251), cyrillic);
         assert!(encode("Zoë", GedcomEncoding::Ascii).is_err());
         assert!(encode("中", GedcomEncoding::Ansel).is_err());
     }
@@ -514,6 +534,7 @@ mod tests {
             ("UTF-8", GedcomEncoding::Utf8),
             ("unicode", GedcomEncoding::Utf16Le),
             ("Windows-1252", GedcomEncoding::Windows1252),
+            ("windows-1250", GedcomEncoding::Windows1250),
             ("IBM PC", GedcomEncoding::Cp437),
             ("Macintosh", GedcomEncoding::MacRoman),
             ("Latin_9", GedcomEncoding::Iso8859_15),
