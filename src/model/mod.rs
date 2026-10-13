@@ -52,6 +52,26 @@
 //! out as its owned type ([`Individual`], [`Event`], …), which is what
 //! records are built and edited as.
 //!
+//! A view's accessors are inherent methods of `View<'_, T>` for each `T`,
+//! so that they need no import and each type's documentation lists its
+//! own. Several types share names (`xref`, `value`, `date`, …): a method
+//! *path* such as `View::xref` names all of them and does not compile
+//! (E0034), whatever clippy's pedantic `redundant_closure_for_method_calls`
+//! suggests. Call the method instead, or name the type:
+//!
+//! ```rust
+//! use ged_io::model::{Dataset, Individual, View};
+//!
+//! let data = Dataset::parse("0 HEAD\n0 @I1@ INDI\n0 @I2@ INDI\n0 TRLR\n");
+//! let ids: Vec<_> = data.individuals().iter().map(|i| i.xref()).collect();
+//! let same: Vec<_> = data.individuals().iter().map(View::<Individual>::xref).collect();
+//! assert_eq!(ids, same);
+//! ```
+//!
+//! Traits for the shared accessors would make the bare path compile, but
+//! every call would then need the trait in scope, for a gain to
+//! point-free style only; the accessors stay inherent (decided in PR13).
+//!
 //! # Texts and identifiers
 //!
 //! A dataset keeps the decoded text it was read from in its [`Store`], and
