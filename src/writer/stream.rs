@@ -9,8 +9,9 @@ use super::emit::{candidate_xref, is_valid_pointer, new_xref, LineSink};
 use super::head;
 use super::xref::{numbered_xref, XrefIndex};
 use super::{
-    map_pointers, put_flat, put_record, put_structure, record_prefix, Emitter, GedcomWriter,
-    Pointers, Repair, RepairKind, RepairPolicy, WriteError, WriteReport, WriterConfig,
+    drop_credentials, holds_credentials, map_pointers, put_flat, put_record, put_structure,
+    record_prefix, Credentials, Emitter, GedcomWriter, Pointers, Repair, RepairKind, RepairPolicy,
+    WriteError, WriteReport, WriterConfig,
 };
 use crate::convert::{built_structure, Converter, Entry, Fate, Fresh, Out, Watch};
 use crate::model::driver::{ToNodes, WriteCx};
@@ -139,6 +140,8 @@ pub struct GedcomStreamWriter<W: io::Write> {
     /// identifiers: repaired and written last, as [`GedcomWriter`] writes
     /// them.
     held_converted: Vec<(Structure, Option<String>)>,
+    /// Whether credentials are written ([`Credentials`]).
+    credentials: Credentials,
 }
 
 /// The conversion of the records a [`GedcomStreamWriter`] writes, when they
@@ -179,6 +182,7 @@ impl<W: io::Write> GedcomStreamWriter<W> {
     ) -> Result<Self, WriteError> {
         let store = store.as_ref();
         let policy = config.on_nonconformant;
+        let credentials = config.credentials;
         let gw = GedcomWriter::with_config(config);
         let rules = gw.rules_for(header.declared_version(store).as_deref());
         let encoding = gw.encoding(rules);
@@ -222,6 +226,7 @@ impl<W: io::Write> GedcomStreamWriter<W> {
             held: Vec::new(),
             convert,
             held_converted: Vec::new(),
+            credentials,
         };
         this.repairs_since(0)?;
         let stub = stubbed.then(|| {
@@ -255,9 +260,14 @@ impl<W: io::Write> GedcomStreamWriter<W> {
     pub fn write_record(&mut self, record: RecordRef<'_>) -> Result<(), WriteError> {
         let cx = WriteCx::of(record.dataset(), self.rules.version, true);
         let mark = self.conform.repairs.len();
+        let credentials = self.credentials == Credentials::LeftOut
+            && holds_credentials(record.dataset().store().other_tags());
         match record {
             RecordRef::Header(_) => {
                 let mut s = record.to_structure(&cx);
+                if credentials {
+                    drop_credentials(&mut s);
+                }
                 s.tag = Tag::new("_HEAD");
                 self.conform.repairs.push(Repair::new(
                     0,
@@ -270,6 +280,9 @@ impl<W: io::Write> GedcomStreamWriter<W> {
             RecordRef::Other(n) if n.tag() == "TRLR" => {
                 if !record.is_empty() || n.xref().is_some() {
                     let mut s = record.to_structure(&cx);
+                    if credentials {
+                        drop_credentials(&mut s);
+                    }
                     s.tag = Tag::new("_TRLR");
                     s.xref = None;
                     self.conform.repairs.push(Repair::new(
@@ -281,6 +294,7 @@ impl<W: io::Write> GedcomStreamWriter<W> {
                     self.put_owned(&s, &|x| cx.store.find_xref(x).is_some())?;
                 }
             }
+            _ if credentials && self.wrote_without_credentials(record)? => {}
             _ => {
                 let own = record.xref().map(|id| cx.store.xref(id));
                 let tag = record.tag(self.rules.version);
@@ -315,6 +329,26 @@ impl<W: io::Write> GedcomStreamWriter<W> {
             }
         }
         self.sink.drain_to(&mut self.writer, false)
+    }
+
+    /// Writes `record` without the credentials it holds
+    /// ([`Credentials`]), read again from its text without
+    /// them; `false` (nothing written) when it holds none.
+    fn wrote_without_credentials(&mut self, record: RecordRef<'_>) -> Result<bool, WriteError> {
+        let version = record.dataset().version();
+        let mut s = record.to_structure(&WriteCx::of(record.dataset(), version, true));
+        if drop_credentials(&mut s) == 0 {
+            return Ok(false);
+        }
+        let mut text = format!("0 HEAD\n1 GEDC\n2 VERS {}\n", version.as_str());
+        s.write_gedcom(&mut text, 0, version);
+        let without = crate::Dataset::parse(text);
+        for r in without.records() {
+            if !matches!(r, RecordRef::Header(_)) {
+                self.write_record(r)?;
+            }
+        }
+        Ok(true)
     }
 
     /// Converts `built`, a record tagged `tag` written with the identifier

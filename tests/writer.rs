@@ -826,3 +826,84 @@ fn pointer_typing_follows_what_is_written() {
         assert_eq!(write(&read(&out), version), out);
     }
 }
+
+/// A file holding credentials: a server login (PhpGedView's `_DBID`) and
+/// an encrypted uploader (Ancestry's `_USER` + `_ENCR`); the `_USER` of a
+/// submitter is no credential.
+const CREDENTIALS: &str = "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n2 FORM LINEAGE-LINKED\n1 CHAR UTF-8\n\
+    0 @S1@ SOUR\n1 TITL Example register\n1 _DBID example-db\n2 _USER reader\n2 _PASS secret\n\
+    0 @M1@ OBJE\n1 FILE photo.jpg\n2 FORM jpg\n1 _USER ZXhhbXBsZQ==\n2 _ENCR 1\n\
+    0 @U1@ SUBM\n1 NAME Example Submitter\n1 _USER example\n0 TRLR\n";
+
+/// What a writer wrote of `CREDENTIALS` with credentials, but the lines
+/// of the credentials.
+fn without_credentials(all: &str) -> String {
+    let mut out = String::new();
+    let mut skip = None;
+    for line in all.lines() {
+        let level: usize = line.split(' ').next().unwrap().parse().unwrap();
+        if skip.is_some_and(|l| level > l) {
+            continue;
+        }
+        skip = None;
+        let credential = ["_PASS secret", "_USER reader", "_USER ZXhhbXBsZQ=="]
+            .iter()
+            .any(|c| line.ends_with(&format!(" {c}")));
+        if credential {
+            skip = Some(level);
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// Credentials are left out unless asked for, whatever writes them; the
+/// dataset keeps them, and the rest is written as it is.
+#[test]
+fn credentials_are_left_out_by_default() {
+    let data = read(CREDENTIALS);
+    for version in VERSIONS {
+        let all = GedcomWriter::new()
+            .gedcom_version(version)
+            .credentials(ged_io::Credentials::Written)
+            .write_to_string(&data)
+            .unwrap();
+        assert!(
+            all.contains(" _PASS secret\n") && all.contains("_ENCR 1\n"),
+            "{all}"
+        );
+        let out = write(&data, version);
+        assert_eq!(out, without_credentials(&all), "{version}");
+        assert!(out.contains("1 _USER example\n") && out.contains("_DBID example-db\n"));
+        let mut bytes = Vec::new();
+        GedcomWriter::new()
+            .gedcom_version(version)
+            .bom(Bom::Never)
+            .write(&mut bytes, &data)
+            .unwrap();
+        assert_eq!(String::from_utf8(bytes).unwrap(), out, "{version}");
+        let tree = Tree::parse(CREDENTIALS);
+        let mut bytes = Vec::new();
+        GedcomWriter::new()
+            .gedcom_version(version)
+            .bom(Bom::Never)
+            .write_tree(&mut bytes, &tree)
+            .unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(!text.contains("secret") && !text.contains("ZXhh"), "{text}");
+        let mut bytes = Vec::new();
+        GedcomWriter::new()
+            .gedcom_version(version)
+            .bom(Bom::Never)
+            .write_structures(&mut bytes, &tree.to_structures())
+            .unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(!text.contains("secret") && !text.contains("ZXhh"), "{text}");
+    }
+    assert!(data
+        .to_structures()
+        .iter()
+        .any(|r| r.first("_DBID").and_then(|d| d.first("_PASS")).is_some()));
+}

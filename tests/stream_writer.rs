@@ -383,3 +383,39 @@ fn streaming_keeps_the_pointer_rules_between_records() {
         validate_text(&text)
     );
 }
+
+/// The streaming writer leaves credentials out too, unless asked for.
+#[test]
+fn credentials_are_left_out_by_default() {
+    let file = "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n2 FORM LINEAGE-LINKED\n1 CHAR UTF-8\n\
+        0 @S1@ SOUR\n1 TITL Example register\n1 _DBID example-db\n2 _USER reader\n\
+        2 _PASS secret\n0 @M1@ OBJE\n1 FILE photo.jpg\n2 FORM jpg\n1 _USER ZXhhbXBsZQ==\n\
+        2 _ENCR 1\n0 TRLR\n";
+    let data = Dataset::parse(file);
+    for version in [GedcomVersion::V5_5_1, GedcomVersion::V7_0] {
+        let config = WriterConfig {
+            version: Some(version),
+            ..WriterConfig::default()
+        };
+        let (out, _) = streamed(&data, config.clone());
+        assert!(
+            !out.contains("secret") && !out.contains("ZXhh") && !out.contains("_ENCR"),
+            "{out}"
+        );
+        assert!(
+            out.contains("_DBID example-db\n") && out.contains("1 FILE photo.jpg\n"),
+            "{out}"
+        );
+        let (all, _) = streamed(
+            &data,
+            WriterConfig {
+                credentials: ged_io::Credentials::Written,
+                ..config
+            },
+        );
+        assert!(
+            all.contains(" _PASS secret\n") && all.contains("_ENCR 1\n"),
+            "{all}"
+        );
+    }
+}
