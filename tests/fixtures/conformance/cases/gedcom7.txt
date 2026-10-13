@@ -509,3 +509,15 @@
 0 @I2@ INDI
 0 TRLR
 #want 1 HUSB @I1@
+
+### G7-OBJE-URL-SPACE | L | a web-address FILE with a space and a stray `%` (not a valid URL string): percent-encoded on write, the OBJE kept (OxidGene port)
+0 HEAD
+1 GEDC
+2 VERS 7.0
+0 @M1@ OBJE
+1 FILE https://example.org/a b.jpg?size=100%#top
+2 FORM image/jpeg
+0 TRLR
+#want 1 FILE https://example.org/a%20b.jpg?size=100%25#top
+#lacks _OBJE
+#lacks _FILE
