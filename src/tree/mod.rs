@@ -206,6 +206,11 @@ impl Tree {
         self.vers.as_deref()
     }
 
+    /// The tags read that are not standard, once each.
+    pub(crate) fn other_tags(&self) -> impl Iterator<Item = &str> {
+        self.tags.iter().map(|t| &**t)
+    }
+
     /// The number of structures, records included.
     #[must_use]
     pub fn len(&self) -> usize {

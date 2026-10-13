@@ -1013,6 +1013,40 @@ fn export_options_leave_out_only_when_asked() {
     assert!(ged_io::spec::validate_text(&out).is_empty());
 }
 
+/// Exports leave the credentials a file holds out, and say so, unless
+/// asked to keep them.
+#[test]
+fn exports_leave_credentials_out() {
+    let data = Dataset::parse(
+        "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @S1@ SOUR\n1 TITL Example register\n\
+         1 _DBID example-db\n2 _USER reader\n2 _PASS secret\n0 TRLR\n",
+    );
+    for p in export_profiles() {
+        let (out, report) = Exporter::new(p).write_to_string(&data).unwrap();
+        assert!(
+            !out.contains("secret") && !out.contains("reader"),
+            "{}: {out}",
+            p.id()
+        );
+        let fold = report.for_record("@S1@").next();
+        assert!(
+            fold.is_some_and(|f| f.lossy && f.detail.contains("credentials")),
+            "{}: {report:?}",
+            p.id()
+        );
+    }
+    let (out, report) = Exporter::named("generic-551")
+        .unwrap()
+        .options(ExportOptions {
+            credentials: ged_io::Credentials::Written,
+            ..ExportOptions::default()
+        })
+        .write_to_string(&data)
+        .unwrap();
+    assert!(out.contains("2 _PASS secret\n"), "{out}");
+    assert!(report.lossy().next().is_none(), "{report:?}");
+}
+
 /// `docs/extensions.md` documents every extension tag a profile keeps and
 /// declares in 7.x with oxidged's URI: its anchor is the URI's fragment.
 #[test]

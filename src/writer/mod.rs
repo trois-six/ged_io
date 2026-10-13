@@ -100,6 +100,19 @@ impl LineEnding {
     }
 }
 
+/// Whether the credentials a file may hold are written: `_PASS`, an
+/// `_USER` that is encrypted (`_ENCR`, as Ancestry writes the uploader of
+/// a medium) or a server login (under `PhpGedView`'s `_DBID`). A dataset
+/// keeps them; only the output leaves them out.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Credentials {
+    /// Left out (the default).
+    #[default]
+    LeftOut,
+    /// Written as the data holds them.
+    Written,
+}
+
 /// Whether written bytes start with a byte order mark.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Bom {
@@ -329,6 +342,9 @@ pub struct WriterConfig {
     /// How data is converted when the target version is of the other
     /// family than the data's (5.5.1 and 7.x, [`crate::convert`]).
     pub conversion: ConversionOptions,
+    /// Whether the credentials a file may hold are written (by default they
+    /// are left out).
+    pub credentials: Credentials,
 }
 
 impl Default for WriterConfig {
@@ -341,6 +357,7 @@ impl Default for WriterConfig {
             output_encoding: OutputEncoding::Utf8,
             on_nonconformant: RepairPolicy::Repair,
             conversion: ConversionOptions::default(),
+            credentials: Credentials::LeftOut,
         }
     }
 }
@@ -434,6 +451,14 @@ impl GedcomWriter {
         self
     }
 
+    /// Sets whether the credentials a file may hold are written
+    /// ([`Credentials`]; by default they are left out).
+    #[must_use]
+    pub fn credentials(mut self, credentials: Credentials) -> Self {
+        self.config.credentials = credentials;
+        self
+    }
+
     /// The configuration.
     #[must_use]
     pub fn config(&self) -> &WriterConfig {
@@ -507,8 +532,8 @@ impl GedcomWriter {
         mut writer: W,
         data: &Dataset,
     ) -> Result<WriteReport, WriteError> {
-        if let Some((records, mut report)) = self.reinterpreted(data) {
-            let more = self.write_structures(writer, &records)?;
+        if let Some((records, mut report, typed)) = self.rewritten(data) {
+            let more = self.write_rewritten(writer, &records, data, typed)?;
             report.repairs.extend(more.repairs);
             return Ok(report);
         }
@@ -526,6 +551,45 @@ impl GedcomWriter {
             }
         }
         self.write_built(writer, &built, order, store, Some(data))
+    }
+
+    /// The records written instead of `data`'s own, and the report so far:
+    /// those [`reinterpreted`](Self::reinterpreted) for 7.x, or `data`'s
+    /// own structures (`true`: typed, in the model's order); either without
+    /// the credentials [`Credentials::LeftOut`] leaves out. `None` when
+    /// the dataset is written as it is.
+    fn rewritten(&self, data: &Dataset) -> Option<(Vec<Structure>, WriteReport, bool)> {
+        let credentials = self.config.credentials == Credentials::LeftOut
+            && holds_credentials(data.store().other_tags());
+        if let Some((mut records, report)) = self.reinterpreted(data) {
+            if credentials {
+                for r in &mut records {
+                    drop_credentials(r);
+                }
+            }
+            return Some((records, report, false));
+        }
+        if !credentials {
+            return None;
+        }
+        let mut records = data.to_structures();
+        let dropped: usize = records.iter_mut().map(drop_credentials).sum();
+        (dropped > 0).then(|| (records, WriteReport::default(), true))
+    }
+
+    /// Writes the records [`rewritten`](Self::rewritten) gave for `data`.
+    fn write_rewritten<W: io::Write>(
+        &self,
+        writer: W,
+        records: &[Structure],
+        data: &Dataset,
+        typed: bool,
+    ) -> Result<WriteReport, WriteError> {
+        if typed {
+            self.write_model_structures(writer, records, data.version(), crate::model::field_order)
+        } else {
+            self.write_given(writer, records)
+        }
     }
 
     /// The records of a 5.5.1 dataset converted to the 7.x target and
@@ -653,13 +717,13 @@ impl GedcomWriter {
         &self,
         data: &Dataset,
     ) -> Result<(String, WriteReport), WriteError> {
-        if let Some((records, mut report)) = self.reinterpreted(data) {
+        if let Some((records, mut report, typed)) = self.rewritten(data) {
             let mut text = self.clone().output_encoding(OutputEncoding::Utf8);
             if text.config.bom == Bom::Auto {
                 text.config.bom = Bom::Never;
             }
             let mut bytes = Vec::new();
-            let more = text.write_structures(&mut bytes, &records)?;
+            let more = text.write_rewritten(&mut bytes, &records, data, typed)?;
             report.repairs.extend(more.repairs);
             let text = String::from_utf8(bytes)
                 .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
@@ -704,6 +768,13 @@ impl GedcomWriter {
         mut writer: W,
         tree: &Tree,
     ) -> Result<WriteReport, WriteError> {
+        if self.config.credentials == Credentials::LeftOut && holds_credentials(tree.other_tags()) {
+            let mut records = tree.to_structures();
+            for r in &mut records {
+                drop_credentials(r);
+            }
+            return self.write_given(writer, &records);
+        }
         let rules = self.rules_for(tree.declared_version());
         let given: Vec<_> = tree.records().collect();
         let records = match self.plan_nodes(&given, tree.version(), rules, None) {
@@ -721,6 +792,23 @@ impl GedcomWriter {
     ///
     /// As [`write`](Self::write).
     pub fn write_structures<W: io::Write>(
+        &self,
+        writer: W,
+        records: &[Structure],
+    ) -> Result<WriteReport, WriteError> {
+        if self.config.credentials == Credentials::LeftOut && records.iter().any(has_credentials) {
+            let mut records = records.to_vec();
+            for r in &mut records {
+                drop_credentials(r);
+            }
+            return self.write_given(writer, &records);
+        }
+        self.write_given(writer, records)
+    }
+
+    /// [`write_structures`](Self::write_structures) of `records` as they
+    /// are.
+    fn write_given<W: io::Write>(
         &self,
         mut writer: W,
         records: &[Structure],
@@ -758,7 +846,6 @@ impl GedcomWriter {
     /// [`write_structures`](Self::write_structures) of the owned structures
     /// of a typed model, repaired in its order ([`FieldOrder`]), as the
     /// model itself is written ([`write_built`](Self::write_built)).
-    #[cfg(test)]
     pub(crate) fn write_model_structures<W: io::Write>(
         &self,
         mut writer: W,
@@ -1039,6 +1126,36 @@ impl GedcomWriter {
 
 /// The version owned records declare (`HEAD.GEDC.VERS`), 5.5.1 when they
 /// declare none.
+/// The extension tags that tell a file holds credentials
+/// ([`Credentials`]).
+const CREDENTIAL_TAGS: [&str; 3] = ["_PASS", "_ENCR", "_DBID"];
+
+/// Whether a file whose extension tags are `tags` may hold credentials.
+pub(crate) fn holds_credentials<'t>(mut tags: impl Iterator<Item = &'t str>) -> bool {
+    tags.any(|t| CREDENTIAL_TAGS.contains(&t))
+}
+
+/// Whether `s` holds credentials ([`Credentials`]).
+fn has_credentials(s: &Structure) -> bool {
+    CREDENTIAL_TAGS.iter().any(|t| s.tag == *t) || s.substructures.iter().any(has_credentials)
+}
+
+/// Leaves out the credentials `s` holds ([`Credentials`]):
+/// `_PASS`, and an `_USER` encrypted (`_ENCR`) or under `_DBID`. The
+/// number left out.
+pub(crate) fn drop_credentials(s: &mut Structure) -> usize {
+    let login = s.tag == "_DBID";
+    let before = s.substructures.len();
+    s.substructures.retain(|c| {
+        !(c.tag == "_PASS" || (c.tag == "_USER" && (login || c.first("_ENCR").is_some())))
+    });
+    let mut dropped = before - s.substructures.len();
+    for c in &mut s.substructures {
+        dropped += drop_credentials(c);
+    }
+    dropped
+}
+
 fn declared_version(records: &[Structure]) -> GedcomVersion {
     records
         .iter()

@@ -24,7 +24,9 @@ use std::io;
 use crate::convert::{convert_structures, ConversionOptions};
 use crate::model::Dataset;
 use crate::tree::{Payload, Structure, Xref};
-use crate::writer::{Bom, GedcomWriter, LineEnding, OutputEncoding, Repair, WriteError};
+use crate::writer::{
+    Bom, Credentials, GedcomWriter, LineEnding, OutputEncoding, Repair, WriteError,
+};
 use crate::GedcomVersion;
 
 use super::util::{
@@ -159,6 +161,9 @@ pub struct ExportOptions {
     pub home: Option<String>,
     /// The folder media paths are made relative to.
     pub media_root: Option<String>,
+    /// Whether the credentials the data holds are written ([`Credentials`];
+    /// by default they are left out, and the report says so).
+    pub credentials: Credentials,
 }
 
 /// What kind of change a fold made.
@@ -202,7 +207,8 @@ impl fmt::Display for FoldKind {
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Fold {
-    /// The rows of `export.tsv` it follows.
+    /// The rows of `export.tsv` it follows (none for what every export
+    /// does: leaving credentials out).
     pub rows: &'static [&'static str],
     /// What kind of change.
     pub kind: FoldKind,
@@ -223,7 +229,10 @@ impl fmt::Display for Fold {
         if self.lossy {
             f.write_str(", lossy")?;
         }
-        write!(f, "; {})", self.rows.join(", "))
+        if !self.rows.is_empty() {
+            write!(f, "; {}", self.rows.join(", "))?;
+        }
+        f.write_str(")")
     }
 }
 
@@ -561,6 +570,7 @@ impl Exporter {
             .max_line_length(t.max_line_length)
             .bom(if t.bom { Bom::Always } else { Bom::Never })
             .output_encoding(t.encoding)
+            .credentials(self.options.credentials)
     }
 
     /// The records the profile writes for `data`, before the writer's
@@ -593,6 +603,9 @@ impl Exporter {
             place_style: None,
         };
         own_source(&mut records, &mut cx);
+        if self.options.credentials == Credentials::LeftOut {
+            omit_credentials(&mut records, &mut cx);
+        }
         if self.options.omit_private {
             omit_private(&mut records, &mut cx);
         }
@@ -3903,6 +3916,24 @@ fn own_source(records: &mut [Structure], cx: &mut Cx<'_>) {
 }
 
 /// Leaves out the records `RESN` restricts, and the pointers to them.
+/// Leaves out the credentials the records hold, as the writer does
+/// ([`Credentials`]), saying so.
+fn omit_credentials(records: &mut [Structure], cx: &mut Cx<'_>) {
+    for r in records {
+        let dropped = crate::writer::drop_credentials(r);
+        if dropped > 0 {
+            let x = r.xref.clone();
+            cx.fold(
+                &[],
+                FoldKind::Omitted,
+                true,
+                x.as_ref(),
+                format!("{dropped} credentials (_PASS, _USER) left out"),
+            );
+        }
+    }
+}
+
 fn omit_private(records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
     const ROWS: &[&str] = &["EXF-022", "EXC-056", "EXC-074"];
     let private: Vec<Xref> = records
