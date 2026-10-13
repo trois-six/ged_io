@@ -18,7 +18,7 @@
 //! for record in GedcomStreamParser::new(file)? {
 //!     let record = record?;
 //!     if let RecordRef::Individual(indi) = record.record() {
-//!         names.extend(indi.full_name(&record));
+//!         names.extend(indi.full_name());
 //!     }
 //! }
 //! assert_eq!(names, ["Ann Example"]);
@@ -34,20 +34,18 @@ use std::collections::VecDeque;
 use std::io::BufRead;
 
 use crate::encoding::GedcomEncoding;
-use crate::model::read::RecordReader;
-use crate::model::relocate::{Relocate, Relocation};
+use crate::model::read::{Placed, RecordReader};
 use crate::model::{Dataset, Record, RecordRef, Store};
 use crate::tree::{RecordSource, TreeReader};
 use crate::version::GedcomVersion;
 use crate::GedcomError;
 
-/// A record read by a [`GedcomStreamParser`], with the store its texts and
-/// identifiers resolve against.
+/// A record read by a [`GedcomStreamParser`]: a dataset of that record
+/// alone, whose store holds its text.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StreamedRecord {
-    record: Record,
-    store: Store,
-    version: GedcomVersion,
+    data: Dataset,
+    placed: Placed,
     line: u32,
     /// On a header, the `HEAD.GEDC.VERS` payload as written, as the parser
     /// read it (the typed header holds no `VERS` that has substructures).
@@ -58,25 +56,33 @@ impl StreamedRecord {
     /// The record.
     #[must_use]
     pub fn record(&self) -> RecordRef<'_> {
-        self.record.record_ref()
+        let record = match self.placed {
+            Placed::Header => self.data.header_ref().map(RecordRef::Header),
+            Placed::Record(kind, pos) => self.data.record_at(kind, pos),
+        };
+        match record {
+            Some(r) => r,
+            // The parser makes a streamed record of a record it placed.
+            None => unreachable!("a streamed record holds its record"),
+        }
     }
 
-    /// The record, owned.
-    #[cfg(feature = "serde")]
-    pub(crate) fn record_owned(&self) -> &Record {
-        &self.record
+    /// The dataset of the record alone.
+    #[must_use]
+    pub fn dataset(&self) -> &Dataset {
+        &self.data
     }
 
     /// The store the record's texts and identifiers resolve against.
     #[must_use]
     pub fn store(&self) -> &Store {
-        &self.store
+        self.data.store()
     }
 
     /// The version of the file.
     #[must_use]
     pub fn version(&self) -> GedcomVersion {
-        self.version
+        self.data.version()
     }
 
     /// The line the record starts on.
@@ -85,16 +91,17 @@ impl StreamedRecord {
         self.line
     }
 
-    /// The record and its store.
+    /// The record, copied out as its owned type, and its store.
     #[must_use]
     pub fn into_parts(self) -> (Record, Store) {
-        (self.record, self.store)
+        let record = self.record().into_owned();
+        (record, self.data.store)
     }
 }
 
 impl AsRef<Store> for StreamedRecord {
     fn as_ref(&self) -> &Store {
-        &self.store
+        self.data.store()
     }
 }
 
@@ -114,9 +121,9 @@ pub struct GedcomStreamParser<R> {
     reader: RecordReader,
     /// Records read from the last text and not yet yielded, with the line
     /// of that text.
-    pending: VecDeque<(Record, u32)>,
-    /// The store of the pending records.
-    store: Option<Store>,
+    pending: VecDeque<(Placed, u32)>,
+    /// The dataset of the pending records.
+    data: Option<Dataset>,
     done: bool,
 }
 
@@ -131,7 +138,7 @@ impl<R: BufRead> GedcomStreamParser<R> {
             source: RecordSource::new(reader)?,
             reader: RecordReader::new(),
             pending: VecDeque::new(),
-            store: None,
+            data: None,
             done: false,
         })
     }
@@ -160,11 +167,15 @@ impl<R: BufRead> GedcomStreamParser<R> {
     #[must_use]
     pub fn nodes(self) -> TreeReader<R> {
         let version = self.source.version();
-        let pending = match &self.store {
-            Some(store) => self
+        let pending = match &self.data {
+            Some(data) => self
                 .pending
                 .iter()
-                .map(|(r, _)| r.record_ref().to_structure_in(store, version))
+                .filter_map(|(placed, _)| match *placed {
+                    Placed::Header => data.header_ref().map(RecordRef::Header),
+                    Placed::Record(kind, pos) => data.record_at(kind, pos),
+                })
+                .map(|r| r.to_structure_in(version))
                 .collect(),
             None => VecDeque::new(),
         };
@@ -173,22 +184,22 @@ impl<R: BufRead> GedcomStreamParser<R> {
 
     fn read_next(&mut self) -> Result<Option<StreamedRecord>, GedcomError> {
         loop {
-            if let Some((record, line)) = self.pending.pop_front() {
-                // The last record of a text takes its store; the others,
+            if let Some((placed, line)) = self.pending.pop_front() {
+                // The last record of a text takes its dataset; the others,
                 // seldom any, a copy.
-                let store = if self.pending.is_empty() {
-                    self.store.take().unwrap_or_default()
+                let mut data = if self.pending.is_empty() {
+                    self.data.take().unwrap_or_default()
                 } else {
-                    self.store.clone().unwrap_or_default()
+                    self.data.clone().unwrap_or_default()
                 };
-                let declared = match record {
-                    Record::Header(_) => self.source.declared_version().map(Into::into),
-                    _ => None,
+                data.version = self.source.version();
+                let declared = match placed {
+                    Placed::Header => self.source.declared_version().map(Into::into),
+                    Placed::Record(..) => None,
                 };
                 return Ok(Some(StreamedRecord {
-                    record,
-                    store,
-                    version: self.source.version(),
+                    data,
+                    placed,
                     line,
                     declared,
                 }));
@@ -200,9 +211,9 @@ impl<R: BufRead> GedcomStreamParser<R> {
             self.reader
                 .set_version(self.source.version(), self.source.escaping());
             let mut records = Vec::new();
-            let store = self.reader.read(text, line, &mut records);
+            let data = self.reader.read(text, line, &mut records);
             self.pending.extend(records.into_iter().map(|r| (r, line)));
-            self.store = Some(store);
+            self.data = Some(data);
         }
     }
 }
@@ -229,43 +240,14 @@ impl Extend<StreamedRecord> for Dataset {
     fn extend<I: IntoIterator<Item = StreamedRecord>>(&mut self, iter: I) {
         for streamed in iter {
             let StreamedRecord {
-                mut record,
-                store,
-                version,
+                data,
+                placed,
                 declared,
                 ..
             } = streamed;
-            {
-                let mut r = Relocation::new(&store, &mut self.store);
-                record.relocate(&mut r);
-            }
-            match record {
-                Record::Header(header) if self.header.is_some() => {
-                    let cx_version = self.version;
-                    let node = header_as_node(&header, &mut self.store, cx_version);
-                    self.push_record(Record::Other(Box::new(node)));
-                }
-                Record::Header(header) => {
-                    if self.record_count() == 0 {
-                        self.version = version;
-                    }
-                    self.declared_version = declared;
-                    self.set_header(Some(*header));
-                }
-                other => self.push_record(other),
-            }
+            self.adopt(data, placed, declared);
         }
     }
-}
-
-/// A header the dataset has already one of, as an untyped record.
-fn header_as_node(
-    header: &crate::model::Header,
-    store: &mut Store,
-    version: GedcomVersion,
-) -> crate::model::Node {
-    let structure = RecordRef::Header(header).to_structure_in(store, version);
-    crate::model::Node::from_structure(&structure, store)
 }
 
 impl FromIterator<StreamedRecord> for Dataset {
@@ -273,23 +255,6 @@ impl FromIterator<StreamedRecord> for Dataset {
         let mut data = Dataset::default();
         data.extend(iter);
         data
-    }
-}
-
-impl Relocate for Record {
-    fn relocate(&mut self, r: &mut Relocation<'_>) {
-        match self {
-            Record::Header(x) => x.relocate(r),
-            Record::Individual(x) => x.relocate(r),
-            Record::Family(x) => x.relocate(r),
-            Record::Source(x) => x.relocate(r),
-            Record::Repository(x) => x.relocate(r),
-            Record::Multimedia(x) => x.relocate(r),
-            Record::Submitter(x) => x.relocate(r),
-            Record::Submission(x) => x.relocate(r),
-            Record::Note(x) => x.relocate(r),
-            Record::Other(x) => x.relocate(r),
-        }
     }
 }
 
@@ -316,8 +281,8 @@ mod tests {
             panic!()
         };
         assert_eq!(records[1].line(), 4);
-        assert_eq!(indi.full_name(&records[1]).as_deref(), Some("Ann Example"));
-        assert_eq!(records[1].store().tag(indi.extra[0].tag), "_X");
+        assert_eq!(indi.full_name().as_deref(), Some("Ann Example"));
+        assert_eq!(indi.extra().first().unwrap().tag(), "_X");
         assert!(matches!(records[3].record(), RecordRef::Other(_)));
     }
 
@@ -329,7 +294,7 @@ mod tests {
         assert_eq!(collected.version(), whole.version());
         assert_eq!(collected.declared_version(), Some("5.5.1"));
         let indi = collected.find_individual("@I1@").unwrap();
-        assert_eq!(collected.families_as_spouse(indi.xref).count(), 1);
+        assert_eq!(collected.families_as_spouse(indi.xref()).count(), 1);
     }
 
     #[test]
@@ -359,7 +324,7 @@ mod tests {
         let RecordRef::Individual(indi) = records[1].record() else {
             panic!()
         };
-        assert_eq!(indi.notes.len(), 1);
+        assert_eq!(indi.notes().len(), 1);
     }
 
     #[test]

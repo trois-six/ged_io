@@ -1,10 +1,10 @@
-//! Memory layout of the typed model (`ged_io::model`), checked at compile
-//! time.
+//! Memory layout of the owned types of the typed model (`ged_io::model`),
+//! checked at compile time.
 //!
-//! The model reads into one shared text store (§1.13 of the redesign
-//! plan): its budget is a peak of at most three times the decoded input,
-//! the model itself at most twice. A GEDCOM line averages 20 to 30 bytes;
-//! the targets below keep each line's share of the model under that:
+//! A dataset keeps every structure as a row of the table of its type
+//! (their layout is checked in `src/model/table.rs`); the owned types are
+//! what a record is built, edited and copied out as. They keep the
+//! layout that makes a record cheap to hold and to move:
 //!
 //! - a text (payload, value) is 16 bytes, and so is an optional one,
 //!   whether a span of the input, pieces of it or owned; an identifier or

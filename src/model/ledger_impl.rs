@@ -134,23 +134,25 @@ pub(crate) fn untyped(data: &Dataset) -> Vec<String> {
     let mut out = Vec::new();
     let mut path = Vec::new();
     for record in data.records() {
-        let cx_tag = match record {
-            super::RecordRef::Other(node) => {
+        // Copied out as owned types, which the driver walks.
+        let owned = record.into_owned();
+        let cx_tag = match &owned {
+            super::Record::Other(node) => {
                 let tag = data.store.tag(node.tag);
                 if RECORD_TAGS.contains(&tag) {
                     out.push(tag.to_string());
                 }
                 continue;
             }
-            super::RecordRef::Header(r) => ("HEAD", r as &dyn Fields),
-            super::RecordRef::Individual(r) => ("INDI", r as &dyn Fields),
-            super::RecordRef::Family(r) => ("FAM", r as &dyn Fields),
-            super::RecordRef::Source(r) => ("SOUR", r as &dyn Fields),
-            super::RecordRef::Repository(r) => ("REPO", r as &dyn Fields),
-            super::RecordRef::Multimedia(r) => ("OBJE", r as &dyn Fields),
-            super::RecordRef::Submitter(r) => ("SUBM", r as &dyn Fields),
-            super::RecordRef::Submission(r) => ("SUBN", r as &dyn Fields),
-            super::RecordRef::Note(r) => ("SNOTE", r as &dyn Fields),
+            super::Record::Header(r) => ("HEAD", &**r as &dyn Fields),
+            super::Record::Individual(r) => ("INDI", &**r as &dyn Fields),
+            super::Record::Family(r) => ("FAM", &**r as &dyn Fields),
+            super::Record::Source(r) => ("SOUR", &**r as &dyn Fields),
+            super::Record::Repository(r) => ("REPO", &**r as &dyn Fields),
+            super::Record::Multimedia(r) => ("OBJE", &**r as &dyn Fields),
+            super::Record::Submitter(r) => ("SUBM", &**r as &dyn Fields),
+            super::Record::Submission(r) => ("SUBN", &**r as &dyn Fields),
+            super::Record::Note(r) => ("SNOTE", &**r as &dyn Fields),
         };
         path.push(cx_tag.0);
         check(cx_tag.1, &data.store, &mut path, &mut out);

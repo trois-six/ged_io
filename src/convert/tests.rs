@@ -224,10 +224,10 @@ fn a_dataset_converts() {
     ));
     let v7 = convert_dataset(&data, V70, &ConversionOptions::default());
     assert_eq!(v7.version(), V70);
-    assert_eq!(v7.multimedia.len(), 1);
+    assert_eq!(v7.multimedia().len(), 1);
     let back = convert_dataset(&v7, V551, &ConversionOptions::default());
     assert_eq!(back.version(), V551);
-    assert_eq!(back.multimedia.len(), 1);
+    assert_eq!(back.multimedia().len(), 1);
 }
 
 /// The records a conversion adds and those it makes extension records go

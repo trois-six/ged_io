@@ -68,7 +68,7 @@ fn stream(path: &str, write: bool) -> usize {
     };
     let default = ged_io::model::Header::default();
     let header = match head.record() {
-        RecordRef::Header(h) => h,
+        RecordRef::Header(h) => h.header(),
         _ => &default,
     };
     let mut writer =
@@ -77,9 +77,7 @@ fn stream(path: &str, write: bool) -> usize {
     let mut n = 1;
     for record in records {
         let record = record.expect("reads");
-        writer
-            .write_record(record.record(), &record)
-            .expect("writes");
+        writer.write_record(record.record()).expect("writes");
         n += 1;
     }
     writer.finish().expect("writes");

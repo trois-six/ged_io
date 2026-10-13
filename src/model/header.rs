@@ -22,7 +22,7 @@ gedcom_struct! {
     /// The writer completes it for the target version: it writes `GEDC`
     /// (and in 5.5.1 `CHAR`, `SOUR` and `SUBM`) as that version requires,
     /// whatever the header holds.
-    pub struct Header {
+    pub struct Header => HeaderRow {
         /// The GEDCOM version and form (`GEDC`).
         "GEDC" => gedcom: Option<GedcomInfo>,
         /// The character set of a 5.5.1 file (`CHAR`).
@@ -64,7 +64,7 @@ gedcom_struct! {
 gedcom_struct! {
     /// What a file is (`GEDC`): the GEDCOM version (`VERS`) and, in 5.5.1,
     /// its form (`FORM`), any value of which is kept.
-    pub struct GedcomInfo {
+    pub struct GedcomInfo => GedcomInfoRow {
         /// The version (`VERS`).
         "VERS" => version: Option<Text>,
         /// The form (5.5.1 `FORM`).
@@ -164,7 +164,7 @@ impl Header {
 
 gedcom_struct! {
     /// The character set of a 5.5.1 file (`CHAR`) and its version.
-    pub struct Charset {
+    pub struct Charset => CharsetRow {
         @payload
         /// The character set.
         value: CharacterSet;
@@ -182,7 +182,7 @@ gedcom_struct! {
     /// The product that wrote a file (`SOUR` of `HEAD`): its identifier,
     /// version and name, its maker (`CORP`) and the data it was taken from
     /// (`DATA`).
-    pub struct HeaderSource {
+    pub struct HeaderSource => HeaderSourceRow {
         @payload
         /// The product's identifier.
         product: Text;
@@ -205,7 +205,7 @@ gedcom_struct! {
 gedcom_struct! {
     /// The maker of a product (`CORP`): its name, address and contacts,
     /// every one kept.
-    pub struct Corporation {
+    pub struct Corporation => CorporationRow {
         @payload
         /// The name.
         name: Text;
@@ -230,7 +230,7 @@ gedcom_struct! {
 gedcom_struct! {
     /// The data a product took a file from (`DATA` of `HEAD.SOUR`): its
     /// name, date and copyright.
-    pub struct HeaderSourceData {
+    pub struct HeaderSourceData => HeaderSourceDataRow {
         @payload
         /// The name of the data.
         name: Text;
@@ -248,7 +248,7 @@ gedcom_struct! {
 
 gedcom_struct! {
     /// The default jurisdictions of a file's places (`PLAC` of `HEAD`).
-    pub struct HeaderPlace {
+    pub struct HeaderPlace => HeaderPlaceRow {
         /// The jurisdictions, comma-separated (`FORM`).
         "FORM" => form: Option<Text>,
     }
@@ -263,7 +263,7 @@ gedcom_struct! {
     /// The extension tags a file uses (7.x `SCHMA`): each `TAG` is a tag
     /// definition (the `TagDef` data type, 7.0.17), an extension tag, a
     /// space and a URI reference (`_LOC http://…`).
-    pub struct Schema {
+    pub struct Schema => SchemaRow {
         /// The tags and their URIs (`TAG`).
         "TAG" => tags: Vec<Text>,
     }
@@ -277,7 +277,7 @@ gedcom_struct! {
 gedcom_struct! {
     /// A title or description of a file (7.1 `TITL` or `DESC` of `HEAD`),
     /// its language and translations.
-    pub struct HeaderText {
+    pub struct HeaderText => HeaderTextRow {
         @payload
         /// The text.
         text: Text;

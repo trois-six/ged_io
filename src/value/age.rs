@@ -474,12 +474,14 @@ mod test {
             "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 NAME Test /Person/\n1 DEAT Y\n2 AGE {age_value}\n0 TRLR"
         );
         let data = Dataset::parse(sample);
-        data.individuals[0].events[0]
-            .detail()
-            .age
-            .as_ref()
+        let event = data
+            .individuals()
+            .first()
             .unwrap()
-            .texts(&data)
+            .events()
+            .first()
+            .unwrap();
+        event.age().unwrap().into_owned().texts(&data)
     }
 
     fn duration(
@@ -753,10 +755,10 @@ mod test {
     fn test_phrase_is_read() {
         let sample = "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 DEAT Y\n2 AGE 0y\n3 PHRASE STILLBORN\n1 BURI\n2 AGE\n3 PHRASE of full age\n0 TRLR";
         let data = Dataset::parse(sample);
-        let events = &data.individuals[0].events;
+        let events = data.individuals().first().unwrap().events();
         let age = |i: usize| {
-            let e: &crate::model::Event = &events[i];
-            e.detail().age.as_ref().map(|a| a.texts(&data))
+            let e = events.get(i).unwrap();
+            e.age().map(|a| a.into_owned().texts(&data))
         };
         assert_eq!(
             age(0),

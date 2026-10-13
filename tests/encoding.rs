@@ -27,7 +27,7 @@ fn read(bytes: impl Into<Vec<u8>>) -> Dataset {
 
 /// The first name of the `index`th individual, as written.
 fn name(data: &Dataset, index: usize) -> String {
-    data.individuals()[index].names[0]
+    data.individuals().get(index).unwrap().into_owned().names[0]
         .value
         .to_str(data)
         .into_owned()
@@ -35,7 +35,7 @@ fn name(data: &Dataset, index: usize) -> String {
 
 /// The text of the first note of the first individual.
 fn note(data: &Dataset) -> String {
-    match &data.individuals()[0].notes[0].content {
+    match &data.individuals().get(0).unwrap().into_owned().notes[0].content {
         NoteContent::Text(text) => text.to_str(data).into_owned(),
         NoteContent::Shared(_) => panic!("a shared note"),
     }
@@ -339,7 +339,12 @@ fn ansel_combining_marks_are_composed() {
     assert_eq!(data.individuals().len(), 1);
     assert_eq!(name(&data, 0), "Zoé /Exámple/");
     assert_eq!(
-        data.individuals()[0].full_name(&data).as_deref(),
+        data.individuals()
+            .get(0)
+            .unwrap()
+            .into_owned()
+            .full_name(&data)
+            .as_deref(),
         Some("Zoé Exámple")
     );
 }
@@ -402,13 +407,15 @@ fn complete_iso8859_1_file() {
     assert!(data.dangling_references().is_empty());
 
     assert_eq!(name(&data, 0), "Zoé /Exámple/");
-    let birth = data.individuals()[0].birth().unwrap();
+    let birth_record = data.individuals().get(0).unwrap().into_owned();
+    let birth = birth_record.birth().unwrap();
     assert_eq!(
         birth.place.as_ref().unwrap().name.to_str(&data),
         "Sampléton, Exámplia"
     );
     assert_eq!(name(&data, 1), "Jörg /Müstermann/");
-    let marriage = &data.families()[0].events[0];
+    let marriage_record = data.families().get(0).unwrap().into_owned();
+    let marriage = &marriage_record.events[0];
     assert_eq!(
         marriage.place.as_ref().unwrap().name.to_str(&data),
         "Exámpleville, Exámplia"

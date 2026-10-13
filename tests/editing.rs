@@ -78,7 +78,8 @@ fn references_are_counted() {
     assert_eq!(data.references("@U1@"), 1); // the header's
     assert_eq!(data.references("@X9@"), 0);
     assert_counts(&data);
-    let i1 = data.find_individual("@I1@").unwrap().xref.unwrap();
+    let i1_record = data.find_individual("@I1@").unwrap().into_owned();
+    let i1 = i1_record.xref.unwrap();
     let mut holders = data.referrers(i1);
     holders.sort_by_key(|h| format!("{h:?}"));
     assert_eq!(holders.len(), 3);
@@ -95,7 +96,7 @@ fn handles_survive_edits() {
     data.remove(bob, Removal::Detach).unwrap();
     assert_eq!(data.position(cal), Some(1));
     assert_eq!(
-        data.get(cal).unwrap().full_name(&data).as_deref(),
+        data.get(cal).unwrap().full_name().as_deref(),
         Some("Cal Example")
     );
     // A removed record's handle finds nothing, not even its successor.
@@ -130,7 +131,7 @@ fn lookups_are_by_index_and_find_the_first() {
     let Some(ged_io::model::RecordRef::Individual(first)) = data.find("@X1@") else {
         panic!()
     };
-    assert_eq!(first.names[0].full(&data), "First");
+    assert_eq!(first.names().first().unwrap().full(), "First");
     assert_eq!(data.find_individual("@X1@"), Some(first));
     assert!(data.find_family("@X1@").is_some());
     assert!(data.find_source("@X1@").is_none());
@@ -141,7 +142,7 @@ fn add_checks_identifiers_and_pointers() {
     let mut data = family();
     // A record without an identifier gets a free one.
     let h = data.add(Individual::default()).unwrap();
-    let id = data.get(h).unwrap().xref.unwrap();
+    let id = data.get(h).unwrap().xref().unwrap();
     assert_eq!(data.store().xref(id), "@I4@");
     // An identifier another record has.
     let i1 = data.pointer("@I1@").unwrap();
@@ -198,11 +199,11 @@ fn records_without_identifiers_and_extension_records() {
     let r = data.add(Repository::default()).unwrap();
     let u = data.add(Submitter::default()).unwrap();
     let ids: Vec<String> = [
-        data.get(f).unwrap().xref,
-        data.get(s).unwrap().xref,
-        data.get(n).unwrap().xref,
-        data.get(r).unwrap().xref,
-        data.get(u).unwrap().xref,
+        data.get(f).unwrap().xref(),
+        data.get(s).unwrap().xref(),
+        data.get(n).unwrap().xref(),
+        data.get(r).unwrap().xref(),
+        data.get(u).unwrap().xref(),
     ]
     .iter()
     .map(|x| data.store().xref(x.unwrap()).to_string())
@@ -211,7 +212,7 @@ fn records_without_identifiers_and_extension_records() {
     // An extension record keeps no identifier unless it has one.
     let tag = data.store_mut().intern_tag("_LOC");
     let loc = data.add(Node::new(tag)).unwrap();
-    assert_eq!(data.get(loc).unwrap().xref, None);
+    assert_eq!(data.get(loc).unwrap().xref(), None);
     assert_eq!(data.extra().len(), 1);
 }
 
@@ -264,7 +265,7 @@ fn a_duplicate_identifier_keeps_its_pointers_resolved() {
     let first = data.handle::<Individual>("@I1@").unwrap();
     data.remove(first, Removal::Refuse).unwrap();
     assert_eq!(
-        data.find_individual("@I1@").unwrap().names[0].full(&data),
+        data.find_individual("@I1@").unwrap().into_owned().names[0].full(&data),
         "Second"
     );
     let second = data.handle::<Individual>("@I1@").unwrap();
@@ -319,7 +320,7 @@ fn rename_moves_every_pointer() {
         })
         .unwrap();
     assert_eq!(
-        data.store().xref(data.get(h).unwrap().xref.unwrap()),
+        data.store().xref(data.get(h).unwrap().xref().unwrap()),
         "@I1@"
     );
     assert_counts(&data);
@@ -347,7 +348,7 @@ fn links_of_every_kind() {
     let note = data.handle::<SharedNote>("@N1@").unwrap();
     let sub = data.handle::<Submitter>("@U1@").unwrap();
     let obje = data.add(ged_io::model::Multimedia::default()).unwrap();
-    let obje_id = data.get(obje).unwrap().xref.unwrap();
+    let obje_id = data.get(obje).unwrap().xref().unwrap();
     let ext = data.store_mut().intern_tag("_WITNESS");
     let cases: &[(Holder, Link, &str)] = &[
         (ann.into(), Link::ChildOf, "@F1@"),
@@ -491,18 +492,18 @@ fn children_and_spouses_both_ways() {
     // One side already there: the other is added.
     data.unlink(cal, Link::ChildOf, "@F1@").unwrap();
     data.link_child(fam, cal).unwrap();
-    assert_eq!(data.get(cal).unwrap().child_of.len(), 1);
+    assert_eq!(data.get(cal).unwrap().child_of().len(), 1);
     assert_eq!(data.unlink_child(fam, cal), Ok(2));
     assert_eq!(
         data.unlink_child(fam, cal),
         Err(EditError::NotLinked(Link::ChildOf))
     );
     assert_eq!(data.unlink_spouse(fam, ann), Ok(2));
-    assert!(data.get(fam).unwrap().husband.is_none());
+    assert!(data.get(fam).unwrap().husband().is_none());
     data.link_spouse(fam, dan).unwrap();
     assert_eq!(
         data.get(fam).unwrap().husband_id(),
-        data.get(dan).unwrap().xref
+        data.get(dan).unwrap().xref()
     );
     assert_counts(&data);
     assert!(data.dangling_references().is_empty());
@@ -530,7 +531,7 @@ fn edits_through_a_lent_record_are_counted() {
     let i2 = data.pointer("@I2@").unwrap();
     data.get_mut(ann).unwrap().xref = Some(i2);
     assert_eq!(
-        data.find_individual("@I2@").unwrap().names[0].full(&data),
+        data.find_individual("@I2@").unwrap().into_owned().names[0].full(&data),
         "Ann Example"
     );
     assert!(data.find_individual("@I1@").is_none());
@@ -538,25 +539,29 @@ fn edits_through_a_lent_record_are_counted() {
     assert!(ged_io::spec::validate_text(&out).is_empty(), "{out}");
     // Every individual, in turn.
     data.edit_all::<Individual>(|i| i.names.push(Name::new("Also /Known/")));
-    assert!(data.individuals().iter().all(|i| i.names.len() == 2));
+    assert!(data.individuals().iter().all(|i| i.names().len() == 2));
     assert_counts(&data);
 }
 
 #[test]
-fn a_forgotten_guard_is_settled_by_the_next_edit() {
+fn a_forgotten_guard_changes_nothing() {
     let mut data = family();
+    let before = write(&data);
     let ann = data.handle::<Individual>("@I1@").unwrap();
     let mut guard = data.get_mut(ann).unwrap();
     guard.citations.clear();
     std::mem::forget(guard);
-    // Queries read the lent record where it is.
-    assert_eq!(data.references("@S1@"), 0);
+    // The guard held a copy: the record and its counts are as they were.
+    assert_eq!(data.references("@S1@"), 1);
     assert_eq!(data.references("@I1@"), 3);
     assert!(data.find_individual("@I1@").is_some());
     assert!(data.dangling_references().is_empty());
-    let out = write(&data);
-    assert!(ged_io::spec::validate_text(&out).is_empty(), "{out}");
-    // The next edit settles it.
+    assert_eq!(write(&data), before);
+    assert_counts(&data);
+    // Edits go on, another loan of the same record included.
+    data.get_mut(ann).unwrap().citations.clear();
+    assert_eq!(data.references("@S1@"), 0);
+    assert_counts(&data);
     let source = data.handle::<Source>("@S1@").unwrap();
     data.remove(source, Removal::Detach).unwrap();
     assert_counts(&data);
@@ -605,7 +610,14 @@ fn push_is_unchecked() {
     let h = data.push(Record::Individual(Box::new(twin))).unwrap();
     assert_eq!(h.kind(), RecordKind::Individual);
     assert_eq!(data.dangling_references().len(), 1);
-    assert_eq!(data.find_individual("@I1@").unwrap().names.len(), 1);
+    assert_eq!(
+        data.find_individual("@I1@")
+            .unwrap()
+            .into_owned()
+            .names
+            .len(),
+        1
+    );
     // Written conformant all the same: the duplicate renamed, the pointer
     // to no record kept.
     let out = write(&data);

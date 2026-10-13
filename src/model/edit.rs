@@ -22,13 +22,18 @@
 //!   records before it are removed, and refuses to give a removed record's
 //!   successor (a generation).
 //!
-//! Records are reached for writing only through the dataset, which counts
-//! a record's pointers out when it lends it ([`Dataset::get_mut`]) and in
-//! again when the loan ends ([`RecordMut`]'s drop): any field may be edited,
+//! Records are reached for writing only through the dataset, which lends a
+//! copy of a record as its owned type ([`Dataset::get_mut`]) and stores it
+//! back when the loan ends ([`RecordMut`]'s drop), counting the pointers of
+//! the record replaced out and the new ones in: any field may be edited,
 //! pointer fields and extension structures included, and the counts stay
 //! exact, at a cost of the record's size per loan. A loan that is never
-//! returned (a guard forgotten with `mem::forget`) is settled by the next
-//! edit; until then the queries fall back to walking the records.
+//! returned (a guard forgotten with `mem::forget`) changes nothing.
+//!
+//! A record stored back takes new rows in the dataset's tables; its old
+//! rows hold nothing any more. When as many rows hold nothing as hold the
+//! records, the dataset copies its records into new tables: the cost of
+//! edits stays proportional to what they change.
 //!
 //! A pointer per `Arc` (each pointer a counted reference to its target's
 //! name) would count by construction too, but at 16 bytes and an atomic
@@ -42,6 +47,10 @@
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::OnceLock;
+
+use super::table::{
+    CopyCx, HasTable, Item, Items, List, Listed, Moved, StoreCx, Stored, Table, Tables, View,
+};
 
 use super::citation::{Citation, CitationSource, RepositoryCitation};
 use super::dataset::{Dataset, Record, RecordRef, XrefKey};
@@ -409,34 +418,53 @@ impl fmt::Display for EditError {
 impl std::error::Error for EditError {}
 
 pub(crate) mod sealed {
-    use super::super::dataset::Dataset;
+    use super::super::dataset::{Dataset, RecordRef};
     use super::super::text::XrefId;
 
     /// What the dataset needs of a record type: where its records are,
     /// and their pointers. Not nameable outside the crate, so that only the
-    /// dataset reaches its lists.
-    pub trait Record: Sized {
-        fn list(data: &Dataset) -> &[Self];
-        fn at_mut(data: &mut Dataset, pos: usize) -> Option<&mut Self>;
-        fn push_to(data: &mut Dataset, record: Self);
-        fn remove_from(data: &mut Dataset, pos: usize) -> Self;
+    /// dataset reaches its tables.
+    pub trait Record: Sized + super::super::table::sealed::Listed {
+        /// The number of records of the type.
+        fn count(data: &Dataset) -> usize;
+        /// The rows of the records of the type.
+        fn records_in(data: &Dataset) -> &[Self::Elem];
+        /// The record at `pos`.
+        fn record_ref(data: &Dataset, pos: usize) -> Option<RecordRef<'_>>;
+        /// The identifier of the record at `pos`.
+        fn xref_at(data: &Dataset, pos: usize) -> Option<XrefId>;
+        /// The record at `pos`, copied out.
+        fn load_at(data: &Dataset, pos: usize) -> Option<Self>;
+        /// Stores the record at `pos` (replacing the one there), or after
+        /// the last one: its position.
+        fn store_at(&self, data: &mut Dataset, pos: Option<usize>) -> usize;
+        /// Removes the record at `pos`: those after it move back by one.
+        fn remove_at(data: &mut Dataset, pos: usize);
         fn xref_of(&self) -> Option<XrefId>;
         fn set_xref(&mut self, xref: Option<XrefId>);
         fn pointers(&self, f: &mut dyn FnMut(XrefId));
     }
 
     /// What can be lent by [`RecordMut`](super::RecordMut): a record or
-    /// the header.
-    pub trait Edit {
-        fn lent(data: &Dataset, pos: usize) -> Option<&Self>;
-        fn lent_mut(data: &mut Dataset, pos: usize) -> Option<&mut Self>;
+    /// the header, copied out and stored back.
+    pub trait Edit: Sized + Send + Sync + 'static {
+        /// The record at `pos` (the header: any), copied out.
+        fn take(data: &Dataset, pos: usize) -> Option<Self>;
+        /// Stores the record back at `pos`, its pointers counted again.
+        fn put(self, data: &mut Dataset, pos: usize);
     }
 }
 
 /// A type of record: [`Individual`], [`Family`], [`Source`],
 /// [`Repository`], [`Multimedia`], [`Submitter`], [`Submission`],
 /// [`SharedNote`], or [`Node`] for the records of no type the model has.
-pub trait RecordType: sealed::Record + Editable + 'static {
+pub trait RecordType:
+    sealed::Record
+    + Editable
+    + Stored
+    + for<'a> Listed<View<'a> = View<'a, Self>, Elem = <Self as super::table::sealed::Stored>::Row>
+    + 'static
+{
     /// The kind of record.
     const KIND: RecordKind;
 }
@@ -445,20 +473,61 @@ pub trait RecordType: sealed::Record + Editable + 'static {
 /// [`Header`].
 pub trait Editable: sealed::Edit {}
 
+/// The rows of a type of record: its table of records and the identifier
+/// of a row. The crate's side of [`RecordType`].
+pub(crate) trait RecordRows: Item + Stored {
+    /// The kind of record.
+    const ROWS_KIND: RecordKind;
+    fn records(t: &Tables) -> &Table<Self::Elem>;
+    fn records_mut(t: &mut Tables) -> &mut Table<Self::Elem>;
+    fn row_xref(row: &Self::Elem) -> Option<XrefId>;
+}
+
 macro_rules! record_type {
-    ($($ty:ty => $kind:ident, $list:ident;)*) => {$(
+    ($($ty:ty => $kind:ident, |$t:ident| $table:expr, |$m:ident| $table_mut:expr;)*) => {$(
+        impl RecordRows for $ty {
+            const ROWS_KIND: RecordKind = RecordKind::$kind;
+            #[inline]
+            fn records($t: &Tables) -> &Table<Self::Elem> {
+                $table
+            }
+            #[inline]
+            fn records_mut($m: &mut Tables) -> &mut Table<Self::Elem> {
+                $table_mut
+            }
+            #[inline]
+            fn row_xref(row: &Self::Elem) -> Option<XrefId> {
+                row.xref
+            }
+        }
+
         impl sealed::Record for $ty {
-            fn list(data: &Dataset) -> &[Self] {
-                &data.$list
+            fn count(data: &Dataset) -> usize {
+                <$ty as RecordRows>::records(&data.tables).len()
             }
-            fn at_mut(data: &mut Dataset, pos: usize) -> Option<&mut Self> {
-                data.$list.get_mut(pos)
+            fn records_in(data: &Dataset) -> &[Self::Elem] {
+                &<$ty as RecordRows>::records(&data.tables).rows
             }
-            fn push_to(data: &mut Dataset, record: Self) {
-                data.$list.push(record);
+            fn record_ref(data: &Dataset, pos: usize) -> Option<RecordRef<'_>> {
+                data.record_at(RecordKind::$kind, pos)
             }
-            fn remove_from(data: &mut Dataset, pos: usize) -> Self {
-                data.$list.remove(pos)
+            fn xref_at(data: &Dataset, pos: usize) -> Option<XrefId> {
+                <$ty as RecordRows>::records(&data.tables)
+                    .rows
+                    .get(pos)
+                    .and_then(|r| r.xref)
+            }
+            fn load_at(data: &Dataset, pos: usize) -> Option<Self> {
+                let row = <$ty as RecordRows>::records(&data.tables).rows.get(pos)?;
+                Some(<$ty as Item>::load_elem(row, u32::try_from(pos).ok()?, &data.tables))
+            }
+            fn store_at(&self, data: &mut Dataset, pos: Option<usize>) -> usize {
+                data.store_record::<$ty>(self, pos)
+            }
+            fn remove_at(data: &mut Dataset, pos: usize) {
+                if let Ok(at) = u32::try_from(pos) {
+                    <$ty as RecordRows>::records_mut(&mut data.tables).remove(at);
+                }
             }
             fn xref_of(&self) -> Option<XrefId> {
                 self.xref
@@ -472,11 +541,11 @@ macro_rules! record_type {
         }
 
         impl sealed::Edit for $ty {
-            fn lent(data: &Dataset, pos: usize) -> Option<&Self> {
-                data.$list.get(pos)
+            fn take(data: &Dataset, pos: usize) -> Option<Self> {
+                <$ty as sealed::Record>::load_at(data, pos)
             }
-            fn lent_mut(data: &mut Dataset, pos: usize) -> Option<&mut Self> {
-                data.$list.get_mut(pos)
+            fn put(self, data: &mut Dataset, pos: usize) {
+                data.replace_record::<$ty>(&self, pos);
             }
         }
 
@@ -489,61 +558,68 @@ macro_rules! record_type {
 }
 
 record_type! {
-    Submitter => Submitter, submitters;
-    Submission => Submission, submissions;
-    Individual => Individual, individuals;
-    Family => Family, families;
-    SharedNote => Note, notes;
-    Source => Source, sources;
-    Repository => Repository, repositories;
-    Multimedia => Multimedia, multimedia;
-    Node => Other, extra;
+    Submitter => Submitter, |t| Submitter::table(t), |t| Submitter::table_mut(t);
+    Submission => Submission, |t| Submission::table(t), |t| Submission::table_mut(t);
+    Individual => Individual, |t| Individual::table(t), |t| Individual::table_mut(t);
+    Family => Family, |t| Family::table(t), |t| Family::table_mut(t);
+    SharedNote => Note, |t| SharedNote::table(t), |t| SharedNote::table_mut(t);
+    Source => Source, |t| Source::table(t), |t| Source::table_mut(t);
+    Repository => Repository, |t| Repository::table(t), |t| Repository::table_mut(t);
+    Multimedia => Multimedia, |t| Multimedia::table(t), |t| Multimedia::table_mut(t);
+    Node => Other, |t| &t.others, |t| &mut t.others;
 }
 
 impl sealed::Edit for Header {
-    fn lent(data: &Dataset, _pos: usize) -> Option<&Self> {
-        data.header.as_ref()
+    fn take(data: &Dataset, _pos: usize) -> Option<Self> {
+        data.header.as_deref().cloned()
     }
-    fn lent_mut(data: &mut Dataset, _pos: usize) -> Option<&mut Self> {
-        data.header.as_mut()
+    fn put(self, data: &mut Dataset, _pos: usize) {
+        data.set_header(Some(self));
     }
 }
 
 impl Editable for Header {}
 
-/// Runs `$body` with `$r` the record of `$kind` at `$pos` of `$data`
-/// (mutable), whatever its type: `Some` of the result, `None` when there
-/// is no such record.
-macro_rules! on_record_mut {
-    ($data:expr, $kind:expr, $pos:expr, |$r:ident| $body:expr) => {
+/// Runs `$body` with `$t` the type of record of `$kind`.
+macro_rules! with_kind {
+    ($kind:expr, |$t:ident| $body:expr) => {
         match $kind {
-            RecordKind::Submitter => $data.submitters.get_mut($pos).map(|$r| $body),
-            RecordKind::Submission => $data.submissions.get_mut($pos).map(|$r| $body),
-            RecordKind::Individual => $data.individuals.get_mut($pos).map(|$r| $body),
-            RecordKind::Family => $data.families.get_mut($pos).map(|$r| $body),
-            RecordKind::Note => $data.notes.get_mut($pos).map(|$r| $body),
-            RecordKind::Source => $data.sources.get_mut($pos).map(|$r| $body),
-            RecordKind::Repository => $data.repositories.get_mut($pos).map(|$r| $body),
-            RecordKind::Multimedia => $data.multimedia.get_mut($pos).map(|$r| $body),
-            RecordKind::Other => $data.extra.get_mut($pos).map(|$r| $body),
-        }
-    };
-}
-
-/// The record of `$kind` at `$pos` of `$data`, as a [`RecordRef`],
-/// borrowing only the list it is in.
-macro_rules! record_ref {
-    ($data:expr, $kind:expr, $pos:expr) => {
-        match $kind {
-            RecordKind::Submitter => $data.submitters.get($pos).map(RecordRef::Submitter),
-            RecordKind::Submission => $data.submissions.get($pos).map(RecordRef::Submission),
-            RecordKind::Individual => $data.individuals.get($pos).map(RecordRef::Individual),
-            RecordKind::Family => $data.families.get($pos).map(RecordRef::Family),
-            RecordKind::Note => $data.notes.get($pos).map(RecordRef::Note),
-            RecordKind::Source => $data.sources.get($pos).map(RecordRef::Source),
-            RecordKind::Repository => $data.repositories.get($pos).map(RecordRef::Repository),
-            RecordKind::Multimedia => $data.multimedia.get($pos).map(RecordRef::Multimedia),
-            RecordKind::Other => $data.extra.get($pos).map(RecordRef::Other),
+            RecordKind::Submitter => {
+                type $t = Submitter;
+                $body
+            }
+            RecordKind::Submission => {
+                type $t = Submission;
+                $body
+            }
+            RecordKind::Individual => {
+                type $t = Individual;
+                $body
+            }
+            RecordKind::Family => {
+                type $t = Family;
+                $body
+            }
+            RecordKind::Note => {
+                type $t = SharedNote;
+                $body
+            }
+            RecordKind::Source => {
+                type $t = Source;
+                $body
+            }
+            RecordKind::Repository => {
+                type $t = Repository;
+                $body
+            }
+            RecordKind::Multimedia => {
+                type $t = Multimedia;
+                $body
+            }
+            RecordKind::Other => {
+                type $t = Node;
+                $body
+            }
         }
     };
 }
@@ -556,10 +632,10 @@ struct Slot {
     tag: u32,
 }
 
-/// Where a lent record is: the header, or a record's kind and position.
+/// A record whose pointers and identifier are counted: its kind and
+/// position.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Lent {
-    Header,
     Record(RecordKind, usize),
 }
 
@@ -719,9 +795,6 @@ pub(crate) struct Index {
     refs: OnceLock<Vec<u32>>,
     /// The handles; built when first asked for.
     handles: OnceLock<Box<Handles>>,
-    /// The record lent out and not given back yet, which the other tables
-    /// leave out.
-    lent: Option<Lent>,
 }
 
 impl PartialEq for Index {
@@ -741,6 +814,28 @@ impl fmt::Debug for Index {
 }
 
 impl Index {
+    /// Notes, as a reader places it, that the record at `pos` of `kind` has
+    /// identifier `id` (the store not yet at hand: [`Dataset::index_read`]
+    /// completes the tables).
+    #[inline]
+    pub(crate) fn define_read(&mut self, kind: RecordKind, pos: usize, id: Option<XrefId>) {
+        if let Some(id) = id {
+            self.place_def(id, place(kind, pos));
+        }
+    }
+
+    /// Bytes held.
+    pub(crate) fn heap_size(&self) -> usize {
+        self.defs.capacity() * 4
+            + self.more.capacity() * 8
+            + self.refs.get().map_or(0, |r| r.capacity() * 4)
+            + self.handles.get().map_or(0, |h| {
+                h.slots.capacity() * 8
+                    + h.free.capacity() * 4
+                    + h.order.iter().map(|o| o.capacity() * 4).sum::<usize>()
+            })
+    }
+
     fn def(&self, id: XrefId) -> Place {
         self.defs.get(id.index()).copied().unwrap_or(0)
     }
@@ -840,39 +935,76 @@ impl Index {
 }
 
 /// A record or the header, lent by [`Dataset::get_mut`] or
-/// [`Dataset::header_mut`]: it dereferences to the structure, every field
-/// of which may be edited. When it is dropped, the dataset counts the
-/// structure's pointers and identifier again.
+/// [`Dataset::header_mut`]: a copy of it, as its owned type, which
+/// dereferences to the structure, every field of which may be edited. When
+/// it is dropped, the dataset stores it back in place of the record and
+/// counts its pointers and identifier again. The copy is kept by the
+/// dataset while it is lent: a guard forgotten (`mem::forget`) leaves the
+/// dataset as it was, and the copy is dropped with the next one lent.
 pub struct RecordMut<'a, T: Editable> {
     data: &'a mut Dataset,
     pos: usize,
-    record: PhantomData<fn() -> T>,
+    lent: std::marker::PhantomData<T>,
+}
+
+impl<'a, T: Editable> RecordMut<'a, T> {
+    fn new(data: &'a mut Dataset, pos: usize, value: T) -> Self {
+        data.tables.lent.0 = Some(Box::new(value));
+        Self {
+            data,
+            pos,
+            lent: std::marker::PhantomData,
+        }
+    }
 }
 
 impl<T: Editable> std::ops::Deref for RecordMut<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &T {
-        match T::lent(self.data, self.pos) {
-            Some(r) => r,
-            // Lent with the dataset borrowed: it stays where it was.
-            None => unreachable!("a lent record is where it was"),
+        match self
+            .data
+            .tables
+            .lent
+            .0
+            .as_deref()
+            .and_then(|v| v.downcast_ref::<T>())
+        {
+            Some(v) => v,
+            // Taken only by the drop.
+            None => unreachable!("a lent record is held until it is dropped"),
         }
     }
 }
 
 impl<T: Editable> std::ops::DerefMut for RecordMut<'_, T> {
     fn deref_mut(&mut self) -> &mut T {
-        match T::lent_mut(self.data, self.pos) {
-            Some(r) => r,
-            None => unreachable!("a lent record is where it was"),
+        match self
+            .data
+            .tables
+            .lent
+            .0
+            .as_deref_mut()
+            .and_then(|v| v.downcast_mut::<T>())
+        {
+            Some(v) => v,
+            None => unreachable!("a lent record is held until it is dropped"),
         }
     }
 }
 
 impl<T: Editable> Drop for RecordMut<'_, T> {
     fn drop(&mut self) {
-        self.data.settle();
+        if let Some(value) = self
+            .data
+            .tables
+            .lent
+            .0
+            .take()
+            .and_then(|v| v.downcast::<T>().ok())
+        {
+            (*value).put(self.data, self.pos);
+        }
     }
 }
 
@@ -896,72 +1028,10 @@ fn is_xref_shaped(xref: &str) -> bool {
 }
 
 impl Dataset {
-    // ---- Reading the records ------------------------------------------
-
-    /// The header (`HEAD`), when the file has one.
-    #[must_use]
-    pub fn header(&self) -> Option<&Header> {
-        self.header.as_ref()
-    }
-
-    /// The individuals (`INDI`), in order.
-    #[must_use]
-    pub fn individuals(&self) -> &[Individual] {
-        &self.individuals
-    }
-
-    /// The families (`FAM`), in order.
-    #[must_use]
-    pub fn families(&self) -> &[Family] {
-        &self.families
-    }
-
-    /// The sources (`SOUR`), in order.
-    #[must_use]
-    pub fn sources(&self) -> &[Source] {
-        &self.sources
-    }
-
-    /// The repositories (`REPO`), in order.
-    #[must_use]
-    pub fn repositories(&self) -> &[Repository] {
-        &self.repositories
-    }
-
-    /// The multimedia objects (`OBJE`), in order.
-    #[must_use]
-    pub fn multimedia(&self) -> &[Multimedia] {
-        &self.multimedia
-    }
-
-    /// The submitters (`SUBM`), in order.
-    #[must_use]
-    pub fn submitters(&self) -> &[Submitter] {
-        &self.submitters
-    }
-
-    /// The submissions (5.5.1 `SUBN`), in order.
-    #[must_use]
-    pub fn submissions(&self) -> &[Submission] {
-        &self.submissions
-    }
-
-    /// The shared notes (5.5.1 `NOTE`, 7.x `SNOTE`), in order.
-    #[must_use]
-    pub fn notes(&self) -> &[SharedNote] {
-        &self.notes
-    }
-
-    /// The records of no type the model has, in order.
-    #[must_use]
-    pub fn extra(&self) -> &[Node] {
-        &self.extra
-    }
-
     /// The records of type `T`, in order.
     #[must_use]
-    pub fn all<T: RecordType>(&self) -> &[T] {
-        T::list(self)
+    pub fn all<T: RecordType>(&self) -> Items<'_, T> {
+        Items::new(self, T::records_in(self), 0)
     }
 
     // ---- Handles --------------------------------------------------------
@@ -992,17 +1062,12 @@ impl Dataset {
     }
 
     fn len_of(&self, kind: RecordKind) -> usize {
-        match kind {
-            RecordKind::Submitter => self.submitters.len(),
-            RecordKind::Submission => self.submissions.len(),
-            RecordKind::Individual => self.individuals.len(),
-            RecordKind::Family => self.families.len(),
-            RecordKind::Note => self.notes.len(),
-            RecordKind::Source => self.sources.len(),
-            RecordKind::Repository => self.repositories.len(),
-            RecordKind::Multimedia => self.multimedia.len(),
-            RecordKind::Other => self.extra.len(),
-        }
+        with_kind!(kind, |R| <R as RecordRows>::records(&self.tables).len())
+    }
+
+    /// The identifier of the record of `kind` at `pos`.
+    fn xref_of_record(&self, kind: RecordKind, pos: usize) -> Option<XrefId> {
+        with_kind!(kind, |R| <R as sealed::Record>::xref_at(self, pos))
     }
 
     /// The handles of the records of type `T`, in order.
@@ -1024,23 +1089,10 @@ impl Dataset {
     }
 
     /// The position of the first record of `kind` with identifier `id`, in
-    /// constant time (but for a record lent, or past 2^28 records of its
-    /// kind: then a search).
+    /// constant time (but past 2^28 records of its kind: then a search).
     pub(crate) fn first_of(&self, kind: RecordKind, id: XrefId) -> Option<usize> {
-        let search = || match kind {
-            RecordKind::Submitter => self.submitters.iter().position(|r| r.xref == Some(id)),
-            RecordKind::Submission => self.submissions.iter().position(|r| r.xref == Some(id)),
-            RecordKind::Individual => self.individuals.iter().position(|r| r.xref == Some(id)),
-            RecordKind::Family => self.families.iter().position(|r| r.xref == Some(id)),
-            RecordKind::Note => self.notes.iter().position(|r| r.xref == Some(id)),
-            RecordKind::Source => self.sources.iter().position(|r| r.xref == Some(id)),
-            RecordKind::Repository => self.repositories.iter().position(|r| r.xref == Some(id)),
-            RecordKind::Multimedia => self.multimedia.iter().position(|r| r.xref == Some(id)),
-            RecordKind::Other => self.extra.iter().position(|r| r.xref == Some(id)),
-        };
-        if self.index.lent.is_some() {
-            return search();
-        }
+        let search =
+            || (0..self.len_of(kind)).find(|&pos| self.xref_of_record(kind, pos) == Some(id));
         let first = self.index.def(id);
         // The first of its kind: where the index says, else among those
         // after a record of another kind.
@@ -1071,11 +1123,6 @@ impl Dataset {
     /// The first record with identifier `id`, whatever its type: its kind
     /// and position.
     fn first_record(&self, id: XrefId) -> Option<(RecordKind, usize)> {
-        if self.index.lent.is_some() {
-            return KINDS
-                .into_iter()
-                .find_map(|kind| Some((kind, self.first_of(kind, id)?)));
-        }
         let kind = place_kind(self.index.def(id))?;
         Some((kind, self.first_of(kind, id)?))
     }
@@ -1114,9 +1161,9 @@ impl Dataset {
 
     /// The record of a handle.
     #[must_use]
-    pub fn get<T: RecordType>(&self, handle: Handle<T>) -> Option<&T> {
+    pub fn get<T: RecordType>(&self, handle: Handle<T>) -> Option<View<'_, T>> {
         let (_, pos) = self.handle_table().locate(handle.raw)?;
-        T::list(self).get(pos)
+        self.all::<T>().get(pos)
     }
 
     /// The record of a handle, whatever its type.
@@ -1133,39 +1180,27 @@ impl Dataset {
     }
 
     /// The record of a handle, to edit: any field, pointers and
-    /// identifier included. The dataset counts its pointers and its
-    /// identifier again when the returned guard is dropped (see
-    /// [`RecordMut`]); an identifier another record has is kept as reading
-    /// keeps one, the first record having it ([`Dataset::rename`] refuses
-    /// it instead).
+    /// identifier included. The guard holds a copy of the record, which
+    /// the dataset stores in its place, counting its pointers and its
+    /// identifier again, when the guard is dropped (see [`RecordMut`]); an
+    /// identifier another record has is kept as reading keeps one, the
+    /// first record having it ([`Dataset::rename`] refuses it instead).
     pub fn get_mut<T: RecordType>(&mut self, handle: Handle<T>) -> Option<RecordMut<'_, T>> {
-        self.settle();
-        let (kind, pos) = self.handle_table().locate(handle.raw)?;
-        self.lend(Lent::Record(kind, pos));
-        Some(RecordMut {
-            data: self,
-            pos,
-            record: PhantomData,
-        })
+        let (_, pos) = self.handle_table().locate(handle.raw)?;
+        self.get_mut_at(pos)
     }
 
     /// The record of type `T` at `position` in its list, to edit (see
     /// [`Dataset::get_mut`]).
     pub fn get_mut_at<T: RecordType>(&mut self, position: usize) -> Option<RecordMut<'_, T>> {
-        self.settle();
-        T::list(self).get(position)?;
-        self.lend(Lent::Record(T::KIND, position));
-        Some(RecordMut {
-            data: self,
-            pos: position,
-            record: PhantomData,
-        })
+        let value = <T as sealed::Edit>::take(self, position)?;
+        Some(RecordMut::new(self, position, value))
     }
 
     /// Edits every record of type `T` in turn, in order: each is lent to
     /// `edit` as [`Dataset::get_mut`] lends it.
     pub fn edit_all<T: RecordType>(&mut self, mut edit: impl FnMut(&mut T)) {
-        for position in 0..T::list(self).len() {
+        for position in 0..<T as sealed::Record>::count(self) {
             if let Some(mut record) = self.get_mut_at::<T>(position) {
                 edit(&mut record);
             }
@@ -1174,24 +1209,17 @@ impl Dataset {
 
     /// The header, to edit (see [`Dataset::get_mut`]).
     pub fn header_mut(&mut self) -> Option<RecordMut<'_, Header>> {
-        self.settle();
-        self.header.as_ref()?;
-        self.lend(Lent::Header);
-        Some(RecordMut {
-            data: self,
-            pos: 0,
-            record: PhantomData,
-        })
+        let value = self.header.as_deref().cloned()?;
+        Some(RecordMut::new(self, 0, value))
     }
 
     /// Replaces the header (with none: removes it); the one it had.
     pub fn set_header(&mut self, header: Option<Header>) -> Option<Header> {
-        self.settle();
         if let Some(old) = &self.header {
             self.index
                 .count(-1, self.store.xref_count(), |f| old.each(f));
         }
-        let old = std::mem::replace(&mut self.header, header);
+        let old = std::mem::replace(&mut self.header, header.map(Box::new)).map(|h| *h);
         if let Some(new) = &self.header {
             self.index
                 .count(1, self.store.xref_count(), |f| new.each(f));
@@ -1202,8 +1230,28 @@ impl Dataset {
     // ---- The tables -----------------------------------------------------
 
     /// The record of `kind` at `pos`.
-    fn record_at(&self, kind: RecordKind, pos: usize) -> Option<RecordRef<'_>> {
-        record_ref!(self, kind, pos)
+    pub(crate) fn record_at(&self, kind: RecordKind, pos: usize) -> Option<RecordRef<'_>> {
+        macro_rules! view {
+            ($t:ty, $variant:ident) => {{
+                let row = <$t as RecordRows>::records(&self.tables).rows.get(pos)?;
+                Some(RecordRef::$variant(View::new(
+                    self,
+                    row,
+                    u32::try_from(pos).ok()?,
+                )))
+            }};
+        }
+        match kind {
+            RecordKind::Submitter => view!(Submitter, Submitter),
+            RecordKind::Submission => view!(Submission, Submission),
+            RecordKind::Individual => view!(Individual, Individual),
+            RecordKind::Family => view!(Family, Family),
+            RecordKind::Note => view!(SharedNote, Note),
+            RecordKind::Source => view!(Source, Source),
+            RecordKind::Repository => view!(Repository, Repository),
+            RecordKind::Multimedia => view!(Multimedia, Multimedia),
+            RecordKind::Other => view!(Node, Other),
+        }
     }
 
     /// The tables built anew from the records, in one pass over their
@@ -1212,34 +1260,14 @@ impl Dataset {
     #[cfg(feature = "serde")]
     pub(crate) fn reindex(&mut self) {
         self.index = Index::default();
-        macro_rules! walk {
-            ($kind:ident, $list:expr) => {
-                for (pos, r) in $list.iter().enumerate() {
-                    if let Some(id) = r.xref {
-                        self.index.place_def(id, place(RecordKind::$kind, pos));
-                    }
+        for kind in KINDS {
+            for pos in 0..self.len_of(kind) {
+                if let Some(id) = self.xref_of_record(kind, pos) {
+                    self.index.place_def(id, place(kind, pos));
                 }
-            };
+            }
         }
-        walk!(Submitter, self.submitters);
-        walk!(Submission, self.submissions);
-        walk!(Individual, self.individuals);
-        walk!(Family, self.families);
-        walk!(Note, self.notes);
-        walk!(Source, self.sources);
-        walk!(Repository, self.repositories);
-        walk!(Multimedia, self.multimedia);
-        walk!(Other, self.extra);
         self.index_read();
-    }
-
-    /// Notes, as a reader places it, that the record at `pos` of `kind` has
-    /// identifier `id` (the store not yet at hand: [`Dataset::index_read`]
-    /// completes the tables).
-    pub(crate) fn define_read(&mut self, kind: RecordKind, pos: usize, id: Option<XrefId>) {
-        if let Some(id) = id {
-            self.index.place_def(id, place(kind, pos));
-        }
     }
 
     /// Completes the tables once every record is read and the store is
@@ -1283,8 +1311,7 @@ impl Dataset {
         invalid
     }
 
-    /// Every pointer of the dataset, counted by id, leaving out the record
-    /// lent.
+    /// Every pointer of the dataset, counted by id.
     fn count_all(&self) -> Vec<u32> {
         let mut refs = vec![0_u32; self.store.xref_count()];
         let mut add = |p: XrefId| {
@@ -1292,37 +1319,8 @@ impl Dataset {
                 *c += 1;
             }
         };
-        if self.index.lent != Some(Lent::Header) {
-            if let Some(h) = &self.header {
-                h.each(&mut add);
-            }
-        }
-        let lent = match self.index.lent {
-            Some(Lent::Record(kind, pos)) => Some((kind, pos)),
-            _ => None,
-        };
-        for kind in KINDS {
-            let skip = lent.filter(|(k, _)| *k == kind).map(|(_, pos)| pos);
-            macro_rules! walk {
-                ($list:expr) => {
-                    for (pos, r) in $list.iter().enumerate() {
-                        if Some(pos) != skip {
-                            r.each(&mut add);
-                        }
-                    }
-                };
-            }
-            match kind {
-                RecordKind::Submitter => walk!(self.submitters),
-                RecordKind::Submission => walk!(self.submissions),
-                RecordKind::Individual => walk!(self.individuals),
-                RecordKind::Family => walk!(self.families),
-                RecordKind::Note => walk!(self.notes),
-                RecordKind::Source => walk!(self.sources),
-                RecordKind::Repository => walk!(self.repositories),
-                RecordKind::Multimedia => walk!(self.multimedia),
-                RecordKind::Other => walk!(self.extra),
-            }
+        for record in self.records() {
+            record.each_pointer(&mut add);
         }
         refs
     }
@@ -1340,37 +1338,22 @@ impl Dataset {
         }
     }
 
-    /// Takes a record or the header out of the tables, before lending it.
-    fn lend(&mut self, at: Lent) {
-        self.counted();
-        self.unlist(at);
-        self.index.lent = Some(at);
-    }
-
-    /// Gives the record lent back to the tables. Every edit begins with
-    /// it: a guard forgotten instead of dropped leaves its record lent.
-    pub(crate) fn settle(&mut self) {
-        if let Some(at) = self.index.lent.take() {
-            self.list(at);
-        }
-    }
-
     /// Takes the identifier and pointers of the structure at `at` out of
     /// the tables (`delta` -1), or puts them in (+1).
     fn tally(&mut self, at: Lent, delta: i64) {
         let limit = self.store.xref_count();
         match at {
-            Lent::Header => {
-                if let Some(h) = &self.header {
-                    self.index.count(delta, limit, |f| h.each(f));
-                }
-            }
             Lent::Record(kind, pos) => {
-                let Some(record) = record_ref!(self, kind, pos) else {
+                let Some(record) = self.record_at(kind, pos) else {
                     return;
                 };
                 let xref = record.xref();
-                self.index.count(delta, limit, |f| record.each_pointer(f));
+                let mut pointers = Vec::new();
+                if self.index.refs.get().is_some() {
+                    record.each_pointer(&mut |p| pointers.push(p));
+                }
+                self.index
+                    .count(delta, limit, |f| pointers.into_iter().for_each(f));
                 if let Some(id) = xref {
                     if delta < 0 {
                         self.index.undefine(id, place(kind, pos), &self.store);
@@ -1382,12 +1365,75 @@ impl Dataset {
         }
     }
 
-    fn unlist(&mut self, at: Lent) {
-        self.tally(at, -1);
+    /// Stores a record of type `T` at `pos`, in place of the one there, or
+    /// after the last one: its position. Nothing is counted.
+    pub(crate) fn store_record<T: RecordRows>(&mut self, record: &T, pos: Option<usize>) -> usize {
+        let table = T::records_mut(&mut self.tables);
+        let pos = match pos {
+            Some(pos) if pos < table.len() => {
+                // The untyped substructures of the record replaced go
+                // with it.
+                table.set_extra(u32::try_from(pos).unwrap_or(u32::MAX), List::EMPTY);
+                pos
+            }
+            _ => {
+                table.rows.push(T::fill());
+                table.len() - 1
+            }
+        };
+        let at = u32::try_from(pos).unwrap_or(u32::MAX);
+        let mut cx = StoreCx {
+            tables: &mut self.tables,
+            store: &mut self.store,
+        };
+        let row = record.store_elem(at, &mut cx);
+        if let Some(slot) = T::records_mut(&mut self.tables).rows.get_mut(pos) {
+            *slot = row;
+        }
+        pos
     }
 
-    fn list(&mut self, at: Lent) {
+    /// Stores a record back at `pos` in place of the one there, its
+    /// pointers and identifier counted out, then in again. The rows of the
+    /// record replaced are left where they are, until the tables are
+    /// compacted.
+    pub(crate) fn replace_record<T: RecordRows>(&mut self, record: &T, pos: usize) {
+        if pos >= T::records(&self.tables).len() {
+            return;
+        }
+        self.counted();
+        let at = Lent::Record(T::ROWS_KIND, pos);
+        self.tally(at, -1);
+        let before = self.tables.rows();
+        self.store_record(record, Some(pos));
+        self.tables.garbage += self.tables.rows().saturating_sub(before);
         self.tally(at, 1);
+        self.compact_if_wasteful();
+    }
+
+    /// Copies every record into new tables when as many rows hold nothing
+    /// any more as hold the records: what edits left behind.
+    fn compact_if_wasteful(&mut self) {
+        let garbage = self.tables.garbage;
+        if garbage > 4096 && garbage * 2 > self.tables.rows() {
+            self.compact();
+        }
+    }
+
+    /// Copies every record into new tables, each structure's rows
+    /// contiguous again: the records keep their positions, and handles
+    /// stay valid.
+    pub(crate) fn compact(&mut self) {
+        let old = std::mem::take(&mut *self.tables);
+        let mut cx = CopyCx {
+            from: &old,
+            to: &mut self.tables,
+            moved: Moved::Same,
+        };
+        for kind in KINDS {
+            with_kind!(kind, |R| copy_records::<R>(&mut cx));
+        }
+        self.tables.shrink();
     }
 
     /// Whether a pointer to `id` points to nothing by definition: 7.x
@@ -1403,20 +1449,15 @@ impl Dataset {
 
     /// Whether a record has `id`.
     fn is_defined(&self, id: XrefId) -> bool {
-        if self.index.lent.is_some() {
-            return self.records().any(|r| r.xref() == Some(id));
-        }
         self.index.def(id) != 0
     }
 
     /// Whether the identifiers of the records are unique and valid in the
-    /// grammar of `rules`, and no record is lent: the writer then renames
-    /// none, and the index tells the record of each identifier. Constant
-    /// time.
+    /// grammar of `rules`: the writer then renames none, and the index
+    /// tells the record of each identifier. Constant time.
     pub(crate) fn xrefs_conform(&self, rules: &crate::version::VersionRules) -> bool {
         let i = usize::from(matches!(rules.xref, crate::version::XrefGrammar::V7));
-        self.index.lent.is_none()
-            && self.index.more.is_empty()
+        self.index.more.is_empty()
             && self
                 .index
                 .invalid
@@ -1442,12 +1483,7 @@ impl Dataset {
         let Some(id) = xref.id_in(&self.store) else {
             return 0;
         };
-        let mut n = self.refs().get(id.index()).copied().unwrap_or(0) as usize;
-        if let Some(at) = self.index.lent {
-            // The record lent is out of the counts.
-            self.each_pointer_at(at, &mut |p| n += usize::from(p == id));
-        }
-        n
+        self.refs().get(id.index()).copied().unwrap_or(0) as usize
     }
 
     /// The header and records holding a pointer to this identifier, in
@@ -1477,21 +1513,6 @@ impl Dataset {
             }
         }
         out
-    }
-
-    fn each_pointer_at(&self, at: Lent, f: &mut dyn FnMut(XrefId)) {
-        match at {
-            Lent::Header => {
-                if let Some(h) = &self.header {
-                    h.each(f);
-                }
-            }
-            Lent::Record(kind, pos) => {
-                if let Some(r) = self.record_at(kind, pos) {
-                    r.each_pointer(f);
-                }
-            }
-        }
     }
 
     /// The id of the identifier of a record of the dataset, to point to it.
@@ -1542,7 +1563,8 @@ impl Dataset {
     /// dataset (or to itself, or nowhere by definition: 7.x `@VOID@`).
     /// A record without an identifier is given a free one of its type
     /// (`@I1@`, `@F1@`, …, numbered on from the last one given; an
-    /// extension record none). Its handle.
+    /// extension record none). Its handle. The dataset stores it in its
+    /// tables, its texts copied into its store.
     ///
     /// Its identifier and pointers are ids of this dataset's store
     /// ([`Dataset::pointer`], [`Dataset::store_mut`]).
@@ -1559,7 +1581,7 @@ impl Dataset {
     ///
     /// let mut data = Dataset::new(GedcomVersion::V7_0);
     /// let ann = data.add(Individual::default()).unwrap();
-    /// let ann_id = data.get(ann).unwrap().xref.unwrap();
+    /// let ann_id = data.get(ann).unwrap().xref().unwrap();
     /// assert_eq!(data.store().xref(ann_id), "@I1@");
     /// let family = data
     ///     .add(Family { children: vec![IndividualRef::new(ann_id)], ..Family::default() })
@@ -1567,7 +1589,6 @@ impl Dataset {
     /// assert_eq!(data.references(ann_id), 1);
     /// ```
     pub fn add<T: RecordType>(&mut self, mut record: T) -> Result<Handle<T>, EditError> {
-        self.settle();
         let own = if let Some(id) = record.xref_of() {
             if !self.store.has_xref(id) {
                 return Err(EditError::ForeignXref);
@@ -1595,11 +1616,12 @@ impl Dataset {
         if let Some(problem) = problem {
             return Err(problem);
         }
-        Ok(self.place(record))
+        Ok(self.place(&record))
     }
 
-    /// Puts a record at the end of its list, in the tables: unchecked.
-    fn place<T: RecordType>(&mut self, record: T) -> Handle<T> {
+    /// Puts a record after the last one of its type, in the tables:
+    /// unchecked.
+    fn place<T: RecordType>(&mut self, record: &T) -> Handle<T> {
         // Built first, the handles take the record as it is placed.
         self.handle_table_mut();
         let pos = self.place_unhandled(record);
@@ -1615,52 +1637,13 @@ impl Dataset {
 
     /// [`Dataset::place`], making no handle unless the handles are built:
     /// the record's position.
-    fn place_unhandled<T: RecordType>(&mut self, record: T) -> usize {
-        let pos = T::list(self).len();
-        T::push_to(self, record);
-        self.list(Lent::Record(T::KIND, pos));
+    fn place_unhandled<T: RecordType>(&mut self, record: &T) -> usize {
+        let pos = record.store_at(self, None);
+        self.tally(Lent::Record(T::KIND, pos), 1);
         if let Some(handles) = self.index.handles.get_mut() {
             handles.alloc(T::KIND, pos);
         }
         pos
-    }
-
-    /// Adds a record as [`Dataset::push`] does, making no handle: for
-    /// readers, which add many.
-    pub(crate) fn push_record(&mut self, record: Record) {
-        self.settle();
-        match record {
-            Record::Header(r) => {
-                self.set_header(Some(*r));
-            }
-            Record::Individual(r) => {
-                self.place_unhandled(*r);
-            }
-            Record::Family(r) => {
-                self.place_unhandled(*r);
-            }
-            Record::Source(r) => {
-                self.place_unhandled(*r);
-            }
-            Record::Repository(r) => {
-                self.place_unhandled(*r);
-            }
-            Record::Multimedia(r) => {
-                self.place_unhandled(*r);
-            }
-            Record::Submitter(r) => {
-                self.place_unhandled(*r);
-            }
-            Record::Submission(r) => {
-                self.place_unhandled(*r);
-            }
-            Record::Note(r) => {
-                self.place_unhandled(*r);
-            }
-            Record::Other(n) => {
-                self.place_unhandled(*n);
-            }
-        }
     }
 
     /// Adds a record unchecked, as reading adds one: an identifier another
@@ -1669,21 +1652,20 @@ impl Dataset {
     /// Its texts and identifiers are of this dataset (owned texts, ids of
     /// [`Dataset::store_mut`]).
     pub fn push(&mut self, record: Record) -> Option<RecordHandle> {
-        self.settle();
         Some(match record {
             Record::Header(r) => {
                 self.set_header(Some(*r));
                 return None;
             }
-            Record::Individual(r) => self.place(*r).erase(),
-            Record::Family(r) => self.place(*r).erase(),
-            Record::Source(r) => self.place(*r).erase(),
-            Record::Repository(r) => self.place(*r).erase(),
-            Record::Multimedia(r) => self.place(*r).erase(),
-            Record::Submitter(r) => self.place(*r).erase(),
-            Record::Submission(r) => self.place(*r).erase(),
-            Record::Note(r) => self.place(*r).erase(),
-            Record::Other(n) => self.place(*n).erase(),
+            Record::Individual(r) => self.place(&*r).erase(),
+            Record::Family(r) => self.place(&*r).erase(),
+            Record::Source(r) => self.place(&*r).erase(),
+            Record::Repository(r) => self.place(&*r).erase(),
+            Record::Multimedia(r) => self.place(&*r).erase(),
+            Record::Submitter(r) => self.place(&*r).erase(),
+            Record::Submission(r) => self.place(&*r).erase(),
+            Record::Note(r) => self.place(&*r).erase(),
+            Record::Other(n) => self.place(&*n).erase(),
         })
     }
 
@@ -1715,7 +1697,7 @@ impl Dataset {
     }
 
     /// Removes a record, and its pointers from the counts: the record
-    /// removed, its pointers as they were.
+    /// removed (copied out), its pointers as they were.
     ///
     /// When other structures point to it (unless another record has its
     /// identifier too, which they then point to), `how` says what to do:
@@ -1735,7 +1717,7 @@ impl Dataset {
     /// let ann = data.handle::<Individual>("@I1@").unwrap();
     /// assert!(data.remove(ann, Removal::Refuse).is_err()); // the family's CHIL
     /// data.remove(ann, Removal::Detach).unwrap();
-    /// assert!(data.families()[0].children.is_empty());
+    /// assert!(data.families().first().unwrap().children().is_empty());
     /// assert!(data.dangling_references().is_empty());
     /// ```
     pub fn remove<T: RecordType>(
@@ -1743,13 +1725,12 @@ impl Dataset {
         handle: Handle<T>,
         how: Removal,
     ) -> Result<T, EditError> {
-        self.settle();
         self.counted();
         let (kind, pos) = self
             .handle_table()
             .locate(handle.raw)
             .ok_or(EditError::StaleHandle)?;
-        let record = T::list(self).get(pos).ok_or(EditError::StaleHandle)?;
+        let record = <T as sealed::Record>::load_at(self, pos).ok_or(EditError::StaleHandle)?;
         let xref = record.xref_of();
         // The pointers to it that its removal leaves without a record.
         let orphaned = match xref {
@@ -1770,9 +1751,9 @@ impl Dataset {
                 references: orphaned,
             });
         }
-        self.unlist(Lent::Record(kind, pos));
+        self.tally(Lent::Record(kind, pos), -1);
         self.handle_table_mut().release(kind, pos);
-        let record = T::remove_from(self, pos);
+        <T as sealed::Record>::remove_at(self, pos);
         self.shift_places(kind, pos);
         if let (Some(id), true, Removal::Detach) = (xref, orphaned > 0, how) {
             self.detach(id);
@@ -1783,33 +1764,16 @@ impl Dataset {
     /// The places of the records of `kind` from `pos` on, one back: the
     /// record that was at `pos` is gone.
     fn shift_places(&mut self, kind: RecordKind, pos: usize) {
-        let index = &mut self.index;
-        let mut shift = |at: usize, id: Option<XrefId>| {
-            let Some(id) = id else { return };
+        for at in pos..self.len_of(kind) {
+            let Some(id) = self.xref_of_record(kind, at) else {
+                continue;
+            };
             let (old, new) = (place(kind, at + 1), place(kind, at));
-            if let Some(d) = index.defs.get_mut(id.index()) {
+            if let Some(d) = self.index.defs.get_mut(id.index()) {
                 if *d == old {
                     *d = new;
                 }
             }
-        };
-        macro_rules! walk {
-            ($list:expr) => {
-                for (at, r) in $list.iter().enumerate().skip(pos) {
-                    shift(at, r.xref);
-                }
-            };
-        }
-        match kind {
-            RecordKind::Submitter => walk!(self.submitters),
-            RecordKind::Submission => walk!(self.submissions),
-            RecordKind::Individual => walk!(self.individuals),
-            RecordKind::Family => walk!(self.families),
-            RecordKind::Note => walk!(self.notes),
-            RecordKind::Source => walk!(self.sources),
-            RecordKind::Repository => walk!(self.repositories),
-            RecordKind::Multimedia => walk!(self.multimedia),
-            RecordKind::Other => walk!(self.extra),
         }
         for (_, p) in &mut self.index.more {
             if place_kind(*p) == Some(kind) && place_pos(*p).is_some_and(|at| at > pos) {
@@ -1843,7 +1807,6 @@ impl Dataset {
     /// assert!(out.contains("0 @ANN@ INDI\n") && out.contains("1 CHIL @ANN@\n"));
     /// ```
     pub fn rename(&mut self, xref: impl XrefKey, new: &str) -> Result<XrefId, EditError> {
-        self.settle();
         let unknown = EditError::UnknownXref(xref.text_in(&self.store));
         let id = xref.id_in(&self.store).ok_or(unknown)?;
         if !self.store.has_xref(id) {
@@ -1879,6 +1842,54 @@ impl Dataset {
         Ok(id)
     }
 
+    /// Runs `edit` on the record of `kind` at `pos`, copied out, and
+    /// stores it back when it says it changed it.
+    fn edit_record(
+        &mut self,
+        kind: RecordKind,
+        pos: usize,
+        edit: &mut dyn FnMut(HolderMut<'_>) -> bool,
+    ) {
+        macro_rules! edit {
+            ($t:ty, $variant:ident) => {{
+                if let Some(mut r) = <$t as sealed::Record>::load_at(self, pos) {
+                    if edit(HolderMut::$variant(&mut r)) {
+                        self.replace_record(&r, pos);
+                    }
+                }
+            }};
+        }
+        match kind {
+            RecordKind::Submitter => edit!(Submitter, Submitter),
+            RecordKind::Submission => edit!(Submission, Submission),
+            RecordKind::Individual => edit!(Individual, Individual),
+            RecordKind::Family => edit!(Family, Family),
+            RecordKind::Note => edit!(SharedNote, Note),
+            RecordKind::Source => edit!(Source, Source),
+            RecordKind::Repository => edit!(Repository, Repository),
+            RecordKind::Multimedia => edit!(Multimedia, Multimedia),
+            RecordKind::Other => edit!(Node, Other),
+        }
+    }
+
+    /// The records holding a pointer to `id`: their kinds and positions.
+    fn holders_of(&self, id: XrefId) -> Vec<(RecordKind, usize)> {
+        let mut out = Vec::new();
+        for kind in KINDS {
+            for pos in 0..self.len_of(kind) {
+                let Some(r) = self.record_at(kind, pos) else {
+                    continue;
+                };
+                let mut has = false;
+                r.each_pointer(&mut |p| has |= p == id);
+                if has {
+                    out.push((kind, pos));
+                }
+            }
+        }
+        out
+    }
+
     /// Points every pointer to `from` to `to` instead (to merge two
     /// records: redirect, then remove the one left without pointers). The
     /// number of pointers redirected.
@@ -1887,7 +1898,6 @@ impl Dataset {
     ///
     /// [`EditError::UnknownXref`] when no record has `to`.
     pub fn redirect(&mut self, from: impl XrefKey, to: impl XrefKey) -> Result<usize, EditError> {
-        self.settle();
         let to = self.pointer(to)?;
         let Some(from) = from.id_in(&self.store) else {
             return Ok(0);
@@ -1904,19 +1914,30 @@ impl Dataset {
                 p
             }
         };
-        if let Some(h) = &mut self.header {
+        if let Some(h) = self.header.as_deref_mut() {
             h.map(&mut f);
         }
-        for kind in KINDS {
-            for pos in 0..self.len_of(kind) {
-                on_record_mut!(self, kind, pos, |r| r.map(&mut f));
-            }
+        let delta_header = n;
+        let mut redirected = 0_usize;
+        for (kind, pos) in self.holders_of(from) {
+            // Stored back with its pointers counted again.
+            self.edit_record(kind, pos, &mut |mut h| {
+                h.map(&mut |p| {
+                    if p == from {
+                        redirected += 1;
+                        to
+                    } else {
+                        p
+                    }
+                });
+                true
+            });
         }
-        let delta = i64::try_from(n).unwrap_or(i64::MAX);
+        let delta = i64::try_from(delta_header).unwrap_or(i64::MAX);
         self.index
             .count(-delta, self.store.xref_count(), |c| c(from));
         self.index.count(delta, self.store.xref_count(), |c| c(to));
-        Ok(n)
+        Ok(delta_header + redirected)
     }
 
     /// Removes every structure that points to this identifier, with its
@@ -1925,36 +1946,35 @@ impl Dataset {
     /// substructures and loses its payload. Walks the records holding such
     /// pointers, unless the counts say none.
     pub fn detach(&mut self, xref: impl XrefKey) -> usize {
-        self.settle();
         let Some(id) = xref.id_in(&self.store) else {
             return 0;
         };
         if self.references(id) == 0 {
             return 0;
         }
-        let mut removed = Vec::new();
-        let mut keep = |p: XrefId| p != id;
-        let mut gone = |p: XrefId| removed.push(p);
-        let mut cut = Cut::new(&mut keep, &mut gone);
-        if let Some(h) = &mut self.header {
+        let mut n = 0;
+        if let Some(h) = self.header.as_deref_mut() {
+            let mut removed = Vec::new();
+            let mut keep = |p: XrefId| p != id;
+            let mut gone = |p: XrefId| removed.push(p);
+            let mut cut = Cut::new(&mut keep, &mut gone);
             h.retain(&mut cut);
+            n += cut.count;
+            self.index.count(-1, self.store.xref_count(), |c| {
+                removed.into_iter().for_each(c);
+            });
         }
-        for kind in KINDS {
-            for pos in 0..self.len_of(kind) {
-                on_record_mut!(self, kind, pos, |r| {
-                    let mut has = false;
-                    r.each(&mut |p| has |= p == id);
-                    if has {
-                        r.retain(&mut cut);
-                        r.cut_own(&mut cut);
-                    }
-                });
-            }
+        for (kind, pos) in self.holders_of(id) {
+            self.edit_record(kind, pos, &mut |mut h| {
+                let mut keep = |p: XrefId| p != id;
+                let mut gone = |_: XrefId| {};
+                let mut cut = Cut::new(&mut keep, &mut gone);
+                h.retain(&mut cut);
+                h.cut_own(&mut cut);
+                n += cut.count;
+                true
+            });
         }
-        let n = cut.count;
-        self.index.count(-1, self.store.xref_count(), |c| {
-            removed.into_iter().for_each(c);
-        });
         n
     }
 
@@ -1980,7 +2000,6 @@ impl Dataset {
         link: Link,
         target: impl XrefKey,
     ) -> Result<(), EditError> {
-        self.settle();
         let target = self.target(target, link.target())?;
         self.with_holder(holder.into(), |h| h.link(link, target))
     }
@@ -1999,7 +2018,6 @@ impl Dataset {
         link: Link,
         target: impl XrefKey,
     ) -> Result<usize, EditError> {
-        self.settle();
         let Some(target) = target.id_in(&self.store) else {
             return Err(EditError::NotLinked(link));
         };
@@ -2087,8 +2105,8 @@ impl Dataset {
         family: Handle<Family>,
         individual: Handle<Individual>,
     ) -> Result<(XrefId, XrefId), EditError> {
-        let f = self.get(family).ok_or(EditError::StaleHandle)?.xref;
-        let i = self.get(individual).ok_or(EditError::StaleHandle)?.xref;
+        let f = self.get(family).ok_or(EditError::StaleHandle)?.xref();
+        let i = self.get(individual).ok_or(EditError::StaleHandle)?.xref();
         f.zip(i).ok_or(EditError::NoXref)
     }
 
@@ -2099,13 +2117,15 @@ impl Dataset {
         family_side: &[Link],
         individual_side: Link,
     ) -> Result<(), EditError> {
-        self.settle();
         let (f, i) = self.ids_of(family, individual)?;
         let fam = self.get(family).ok_or(EditError::StaleHandle)?;
         let linked = |l: Link| match l {
             Link::Husband => fam.husband_id() == Some(i),
             Link::Wife => fam.wife_id() == Some(i),
-            _ => fam.children.iter().any(|c| c.individual == Some(i)),
+            _ => fam
+                .children()
+                .into_iter()
+                .any(|c| c.individual() == Some(i)),
         };
         let family_done = family_side.iter().any(|&l| linked(l));
         let free = family_side.iter().copied().find(|&l| match l {
@@ -2115,8 +2135,8 @@ impl Dataset {
         });
         let indi = self.get(individual).ok_or(EditError::StaleHandle)?;
         let individual_done = match individual_side {
-            Link::ChildOf => indi.child_of.iter().any(|c| c.family == Some(f)),
-            _ => indi.spouse_of.iter().any(|c| c.family == Some(f)),
+            Link::ChildOf => indi.child_of().into_iter().any(|c| c.family() == Some(f)),
+            _ => indi.spouse_of().into_iter().any(|c| c.family() == Some(f)),
         };
         if family_done && individual_done {
             return Err(EditError::AlreadyLinked(individual_side));
@@ -2142,7 +2162,6 @@ impl Dataset {
         family_side: &[Link],
         individual_side: Link,
     ) -> Result<usize, EditError> {
-        self.settle();
         let (f, i) = self.ids_of(family, individual)?;
         let mut n = 0;
         for &l in family_side {
@@ -2155,70 +2174,58 @@ impl Dataset {
         Ok(n)
     }
 
-    /// Runs `edit` on the holder lent, its pointers counted again after.
+    /// Runs `edit` on the holder, copied out, and stores it back (its
+    /// pointers counted again) when `edit` succeeds.
     fn with_holder<R>(
         &mut self,
         holder: Holder,
         edit: impl FnOnce(HolderMut<'_>) -> Result<R, EditError>,
     ) -> Result<R, EditError> {
-        let (at, kind, pos) = match holder {
+        match holder {
             Holder::Header => {
-                if self.header.is_none() {
-                    return Err(EditError::NoHeader);
+                let mut header = self.header.as_deref().cloned().ok_or(EditError::NoHeader)?;
+                let result = edit(HolderMut::Header(&mut header));
+                if result.is_ok() {
+                    self.counted();
+                    self.set_header(Some(header));
                 }
-                (Lent::Header, None, 0)
+                result
             }
             Holder::Record(h) => {
                 let (kind, pos) = self
                     .handle_table()
                     .locate(h)
                     .ok_or(EditError::StaleHandle)?;
-                (Lent::Record(kind, pos), Some(kind), pos)
+                let mut edit = Some(edit);
+                let mut result = Err(EditError::StaleHandle);
+                self.edit_record(kind, pos, &mut |holder| match edit.take() {
+                    Some(e) => {
+                        result = e(holder);
+                        result.is_ok()
+                    }
+                    None => false,
+                });
+                result
             }
-        };
-        self.lend(at);
-        let result = match kind {
-            None => match self.header.as_mut() {
-                Some(h) => edit(HolderMut::Header(h)),
-                None => Err(EditError::NoHeader),
-            },
-            Some(kind) => match kind {
-                RecordKind::Submitter => self.submitters.get_mut(pos).map(HolderMut::Submitter),
-                RecordKind::Submission => self.submissions.get_mut(pos).map(HolderMut::Submission),
-                RecordKind::Individual => self.individuals.get_mut(pos).map(HolderMut::Individual),
-                RecordKind::Family => self.families.get_mut(pos).map(HolderMut::Family),
-                RecordKind::Note => self.notes.get_mut(pos).map(HolderMut::Note),
-                RecordKind::Source => self.sources.get_mut(pos).map(HolderMut::Source),
-                RecordKind::Repository => self.repositories.get_mut(pos).map(HolderMut::Repository),
-                RecordKind::Multimedia => self.multimedia.get_mut(pos).map(HolderMut::Multimedia),
-                RecordKind::Other => self.extra.get_mut(pos).map(HolderMut::Other),
-            }
-            .map_or(Err(EditError::StaleHandle), edit),
-        };
-        self.settle();
-        result
-    }
-}
-
-impl RecordRef<'_> {
-    /// Calls `f` with every pointer of the record.
-    pub(crate) fn each_pointer(&self, f: &mut dyn FnMut(XrefId)) {
-        match self {
-            RecordRef::Header(r) => r.each(f),
-            RecordRef::Individual(r) => r.each(f),
-            RecordRef::Family(r) => r.each(f),
-            RecordRef::Source(r) => r.each(f),
-            RecordRef::Repository(r) => r.each(f),
-            RecordRef::Multimedia(r) => r.each(f),
-            RecordRef::Submitter(r) => r.each(f),
-            RecordRef::Submission(r) => r.each(f),
-            RecordRef::Note(r) => r.each(f),
-            RecordRef::Other(r) => r.each(f),
         }
     }
 }
 
-/// A holder lent to [`Dataset::link`] and [`Dataset::unlink`].
+/// Copies the records of type `R` of `cx.from` into `cx.to`, in order.
+fn copy_records<R: RecordRows>(cx: &mut CopyCx<'_>) {
+    let len = R::records(cx.from).len();
+    for pos in 0..len {
+        let Some(&row) = R::records(cx.from).rows.get(pos) else {
+            continue;
+        };
+        let at = u32::try_from(pos).unwrap_or(u32::MAX);
+        let copied = R::copy_elem(&row, at, cx, at);
+        R::records_mut(cx.to).rows.push(copied);
+    }
+}
+
+/// A holder lent to [`Dataset::link`] and [`Dataset::unlink`], and to the
+/// edits that rewrite or cut its pointers.
 enum HolderMut<'a> {
     Header(&'a mut Header),
     Submitter(&'a mut Submitter),
@@ -2523,6 +2530,37 @@ impl HolderMut<'_> {
             .unwrap_or(Err(EditError::NotApplicable(link)))
     }
 
+    /// The holder's pointers, to rewrite or cut.
+    fn pointers(&mut self) -> &mut dyn Pointers {
+        match self {
+            HolderMut::Header(r) => *r,
+            HolderMut::Submitter(r) => *r,
+            HolderMut::Submission(r) => *r,
+            HolderMut::Individual(r) => *r,
+            HolderMut::Family(r) => *r,
+            HolderMut::Note(r) => *r,
+            HolderMut::Source(r) => *r,
+            HolderMut::Repository(r) => *r,
+            HolderMut::Multimedia(r) => *r,
+            HolderMut::Other(r) => *r,
+        }
+    }
+
+    /// Rewrites every pointer to `f`'s.
+    fn map(&mut self, f: &mut dyn FnMut(XrefId) -> XrefId) {
+        self.pointers().map(f);
+    }
+
+    /// Removes the substructures whose own pointer `cut` refuses.
+    fn retain(&mut self, cut: &mut Cut<'_>) {
+        self.pointers().retain(cut);
+    }
+
+    /// Clears the holder's own pointer when `cut` refuses it.
+    fn cut_own(&mut self, cut: &mut Cut<'_>) {
+        self.pointers().cut_own(cut);
+    }
+
     fn unlink(self, link: Link, target: XrefId) -> Result<usize, EditError> {
         self.with_field(link, false, |f| f.cut(target))
             .ok_or(EditError::NotApplicable(link))
@@ -2562,5 +2600,90 @@ impl ExtensionList for Vec<Node> {
         let before = self.len();
         self.retain(|n| !cut(n));
         before - self.len()
+    }
+}
+
+impl Dataset {
+    /// Adds the record at `placed` of `from` (a dataset a stream read) to
+    /// this dataset, unchecked, as reading adds one: its rows are copied
+    /// into this dataset's tables, its text into its store. A header
+    /// becomes this dataset's (the version of an empty dataset with it);
+    /// a second one an untyped record.
+    pub(crate) fn adopt(
+        &mut self,
+        mut from: Dataset,
+        placed: super::read::Placed,
+        declared: Option<Box<str>>,
+    ) {
+        use super::read::Placed;
+        match placed {
+            Placed::Header => {
+                let Some(header) = from.header.take().map(|h| *h) else {
+                    return;
+                };
+                if self.header.is_some() {
+                    let cx = super::driver::WriteCx::owned(&from.store, self.version, false);
+                    let structure = super::driver::ToNodes::to_node(&header, "HEAD", &cx);
+                    let node = Node::from_structure(&structure, &mut self.store);
+                    self.place_unhandled(&node);
+                    return;
+                }
+                // Through the tables, which move texts and identifiers.
+                let idx = {
+                    let mut cx = StoreCx {
+                        tables: &mut from.tables,
+                        store: &mut from.store,
+                    };
+                    header.store_one(&mut cx)
+                };
+                let copied = {
+                    let mut cx = CopyCx {
+                        from: &from.tables,
+                        to: &mut self.tables,
+                        moved: Moved::Into(super::relocate::Relocation::new(
+                            &from.store,
+                            &mut self.store,
+                        )),
+                    };
+                    Header::copy_one(idx, &mut cx)
+                };
+                let header = Header::load_one(copied, &self.tables);
+                self.tables.garbage += 1;
+                if self.record_count() == 0 {
+                    self.version = from.version;
+                }
+                self.declared_version = declared;
+                self.set_header(Some(header));
+            }
+            Placed::Record(kind, pos) => {
+                with_kind!(kind, |R| self.adopt_record::<R>(&from, pos));
+            }
+        }
+    }
+
+    /// Copies the record of `R` at `pos` of `from` after the last one of
+    /// this dataset, and places it in the tables.
+    fn adopt_record<R: RecordRows + RecordType>(&mut self, from: &Dataset, pos: usize) {
+        let Some(&row) = R::records(&from.tables).rows.get(pos) else {
+            return;
+        };
+        let to = R::records(&self.tables).len();
+        let at = u32::try_from(to).unwrap_or(u32::MAX);
+        let copied = {
+            let mut cx = CopyCx {
+                from: &from.tables,
+                to: &mut self.tables,
+                moved: Moved::Into(super::relocate::Relocation::new(
+                    &from.store,
+                    &mut self.store,
+                )),
+            };
+            R::copy_elem(&row, u32::try_from(pos).unwrap_or(u32::MAX), &mut cx, at)
+        };
+        R::records_mut(&mut self.tables).rows.push(copied);
+        self.tally(Lent::Record(R::KIND, to), 1);
+        if let Some(handles) = self.index.handles.get_mut() {
+            handles.alloc(R::KIND, to);
+        }
     }
 }

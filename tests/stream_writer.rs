@@ -29,7 +29,7 @@ fn streamed(data: &Dataset, config: WriterConfig) -> (String, WriteReport) {
     let header = data.header().unwrap_or(&default);
     let mut w = GedcomStreamWriter::new(Vec::new(), config, header, data).unwrap();
     for r in data.records().skip(usize::from(data.header().is_some())) {
-        w.write_record(r, data).unwrap();
+        w.write_record(r).unwrap();
     }
     let (bytes, report) = w.finish().unwrap();
     (String::from_utf8(bytes).unwrap(), report)
@@ -190,8 +190,8 @@ fn strict_streaming_fails_on_the_first_repair() {
     let header = data.header().unwrap();
     let mut w = GedcomStreamWriter::new(Vec::new(), config, header, &data).unwrap();
     let mut records = data.records().skip(1);
-    w.write_record(records.next().unwrap(), &data).unwrap();
-    assert!(w.write_record(records.next().unwrap(), &data).is_err());
+    w.write_record(records.next().unwrap()).unwrap();
+    assert!(w.write_record(records.next().unwrap()).is_err());
 }
 
 /// Identifiers stay unique and valid, record by record: a repeated one is

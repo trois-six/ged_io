@@ -205,8 +205,8 @@ impl<'n> IdTypes<'n> {
             .extra()
             .iter()
             .filter_map(|n| {
-                let index = u32::try_from(n.xref?.index()).ok()?;
-                Some((index, type_of(data.store().tag(n.tag)).unwrap_or(EXTENSION)))
+                let index = u32::try_from(n.xref()?.index()).ok()?;
+                Some((index, type_of(n.tag()).unwrap_or(EXTENSION)))
             })
             .collect();
         Self {

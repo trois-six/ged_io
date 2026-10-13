@@ -35,7 +35,7 @@ impl<T> ThinVec<T> {
     pub fn push(&mut self, item: T) {
         match self.0.as_deref_mut() {
             None => self.0 = Some(Box::new(Inner::One(item))),
-            Some(Inner::Many(items)) => super::driver::push_exact(items, item),
+            Some(Inner::Many(items)) => push_exact(items, item),
             Some(inner @ Inner::One(_)) => {
                 let first = std::mem::replace(inner, Inner::Many(Vec::new()));
                 if let (Inner::One(first), Inner::Many(items)) = (first, inner) {
@@ -97,15 +97,6 @@ impl<T> ThinVec<T> {
             None => Vec::new(),
             Some(Inner::One(item)) => vec![item],
             Some(Inner::Many(items)) => items,
-        }
-    }
-
-    /// Releases spare capacity.
-    pub(crate) fn shrink(&mut self) {
-        if let Some(Inner::Many(items)) = self.0.as_deref_mut() {
-            if items.capacity() > items.len() {
-                items.shrink_to_fit();
-            }
         }
     }
 }
@@ -173,6 +164,20 @@ impl<T> IntoIterator for ThinVec<T> {
     fn into_iter(self) -> Self::IntoIter {
         self.into_vec().into_iter()
     }
+}
+
+/// Pushes onto a list that is usually short and is kept: short lists grow
+/// one item at a time, so that they need no shrinking (a reallocation);
+/// longer ones double.
+fn push_exact<T>(list: &mut Vec<T>, item: T) {
+    if list.len() == list.capacity() {
+        if list.len() < 8 {
+            list.reserve_exact(1);
+        } else {
+            list.reserve(list.len());
+        }
+    }
+    list.push(item);
 }
 
 #[cfg(test)]

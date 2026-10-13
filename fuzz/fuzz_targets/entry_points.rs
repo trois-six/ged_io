@@ -65,9 +65,9 @@ fn queries(data: Dataset) {
     let _ = data.dangling_references();
     let _ = data.search_individuals("a").count();
     for indi in data.individuals().iter().take(16) {
-        let _ = indi.full_name(&data);
-        let _ = data.families_as_spouse(indi.xref).count();
-        let _ = data.families_as_child(indi.xref).count();
+        let _ = indi.full_name();
+        let _ = data.families_as_spouse(indi.xref()).count();
+        let _ = data.families_as_child(indi.xref()).count();
     }
     for family in data.families().iter().take(16) {
         let _ = data.parents(family).count();
@@ -76,8 +76,8 @@ fn queries(data: Dataset) {
     let indexed = IndexedDataset::new(data);
     let _ = indexed.find("@I1@");
     for indi in indexed.individuals().iter().take(16) {
-        let _ = indexed.families_as_spouse(indi.xref).count();
-        let _ = indexed.families_as_child(indi.xref).count();
+        let _ = indexed.families_as_spouse(indi.xref()).count();
+        let _ = indexed.families_as_child(indi.xref()).count();
     }
 }
 

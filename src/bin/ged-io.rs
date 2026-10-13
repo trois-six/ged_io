@@ -6,7 +6,7 @@ use std::io::{self, Write as _};
 use std::process::ExitCode;
 
 use ged_io::convert::ConversionOptions;
-use ged_io::model::{Dataset, Event, Individual, RecordRef, Sex};
+use ged_io::model::{Dataset, Event, Individual, RecordRef, Sex, View};
 use ged_io::{GedcomBuilder, GedcomError, GedcomVersion, GedcomWriter, WriteError};
 
 const HELP: &str = "\
@@ -224,7 +224,7 @@ fn run(command_line: &[String]) -> Result<ExitCode, CliError> {
         };
         let mut text = String::new();
         for individual in data.individuals() {
-            let (given, surname) = name_parts(&data, individual);
+            let (given, surname) = name_parts(individual);
             if wanted(&args.lastname, surname) && wanted(&args.firstname, given) {
                 text.push_str(&describe(&data, individual));
             }
@@ -292,14 +292,14 @@ fn summary(data: &Dataset) -> String {
 
 /// The given names and surnames of an individual's names: their pieces,
 /// or the name's words, its surname between slashes.
-fn name_parts(data: &Dataset, individual: &Individual) -> (Vec<String>, Vec<String>) {
+fn name_parts(individual: View<'_, Individual>) -> (Vec<String>, Vec<String>) {
     let mut given = Vec::new();
     let mut surname = Vec::new();
-    for name in &individual.names {
-        given.extend(name.givens().map(|g| g.to_str(data).into_owned()));
-        surname.extend(name.surnames().map(|s| s.to_str(data).into_owned()));
-        let value = name.value.to_str(data);
-        if let Some(s) = name.surname_in_value(data) {
+    for name in individual.names() {
+        given.extend(name.givens().map(|g| g.to_string()));
+        surname.extend(name.surnames().map(|s| s.to_string()));
+        let value = name.value().to_str();
+        if let Some(s) = name.surname_in_value() {
             surname.push(s);
         }
         let before = value.split('/').next().unwrap_or_default().trim();
@@ -311,32 +311,32 @@ fn name_parts(data: &Dataset, individual: &Individual) -> (Vec<String>, Vec<Stri
 }
 
 /// An event's kind, date and place.
-fn event_line(data: &Dataset, label: &str, event: &Event) -> String {
+fn event_line(label: &str, event: View<'_, Event>) -> String {
     let mut line = format!("  {label}:");
-    if let Some(date) = &event.date {
-        let _ = write!(line, " {}", date.value.to_str(data));
+    if let Some(date) = event.date() {
+        let _ = write!(line, " {}", date.value());
     }
-    if let Some(place) = &event.place {
-        let _ = write!(line, ", {}", place.name.to_str(data));
+    if let Some(place) = event.place() {
+        let _ = write!(line, ", {}", place.name());
     }
     line.push('\n');
     line
 }
 
 /// An individual: names, sex, birth and death, families.
-fn describe(data: &Dataset, individual: &Individual) -> String {
+fn describe(data: &Dataset, individual: View<'_, Individual>) -> String {
     let mut text = String::new();
     let xref = individual
-        .xref
+        .xref()
         .map_or("(no identifier)", |x| data.store().xref(x));
     let name = individual
-        .full_name(data)
+        .full_name()
         .unwrap_or_else(|| "(no name)".to_string());
     let _ = writeln!(text, "{xref} {name}");
-    for other in individual.names.iter().skip(1) {
-        let _ = writeln!(text, "  also: {}", other.full(data));
+    for other in individual.names().iter().skip(1) {
+        let _ = writeln!(text, "  also: {}", other.full());
     }
-    if let Some(sex) = &individual.sex {
+    if let Some(sex) = individual.sex() {
         let sex = match sex {
             Sex::Male => "male",
             Sex::Female => "female",
@@ -345,39 +345,32 @@ fn describe(data: &Dataset, individual: &Individual) -> String {
         let _ = writeln!(text, "  sex: {sex}");
     }
     if let Some(birth) = individual.birth() {
-        text.push_str(&event_line(data, "born", birth));
+        text.push_str(&event_line("born", birth));
     }
     if let Some(death) = individual.death() {
-        text.push_str(&event_line(data, "died", death));
+        text.push_str(&event_line("died", death));
     }
-    for family in data.families_as_child(individual.xref) {
-        let parents: Vec<String> = data
-            .parents(family)
-            .filter_map(|p| p.full_name(data))
-            .collect();
+    for family in data.families_as_child(individual.xref()) {
+        let parents: Vec<String> = data.parents(family).filter_map(|p| p.full_name()).collect();
         if !parents.is_empty() {
             let _ = writeln!(text, "  child of: {}", parents.join(" and "));
         }
     }
-    for family in data.families_as_spouse(individual.xref) {
-        if let Some(spouse) = data.spouse(individual.xref, family) {
+    for family in data.families_as_spouse(individual.xref()) {
+        if let Some(spouse) = data.spouse(individual.xref(), family) {
             let _ = writeln!(
                 text,
                 "  partner: {}",
-                spouse.full_name(data).unwrap_or_default()
+                spouse.full_name().unwrap_or_default()
             );
         }
         for child in data.children(family) {
-            let _ = writeln!(
-                text,
-                "  child: {}",
-                child.full_name(data).unwrap_or_default()
-            );
+            let _ = writeln!(text, "  child: {}", child.full_name().unwrap_or_default());
         }
     }
     let records = data
         .records()
-        .filter(|r| matches!(r, RecordRef::Individual(i) if i.xref == individual.xref))
+        .filter(|r| matches!(r, RecordRef::Individual(i) if i.xref() == individual.xref()))
         .count();
     if records > 1 {
         let _ = writeln!(text, "  ({records} records have this identifier)");

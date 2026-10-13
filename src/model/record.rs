@@ -36,12 +36,12 @@ gedcom_struct! {
     /// use ged_io::model::{Dataset, Sex};
     ///
     /// let data = Dataset::parse("0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 NAME Ann /Example/\n1 SEX f\n1 FAMC @F1@\n1 FAMC @F1@\n2 PEDI adopted\n1 REFN 7\n0 @F1@ FAM\n0 TRLR\n");
-    /// let ann = &data.individuals()[0];
-    /// assert_eq!(ann.sex, Some(Sex::Female)); // 5.5.1 controlled values ignore case
-    /// assert_eq!(ann.child_of.len(), 2);
-    /// assert_eq!(ann.detail().refns[0].value.to_str(&data), "7");
+    /// let ann = data.individuals().first().unwrap();
+    /// assert_eq!(ann.sex(), Some(Sex::Female)); // 5.5.1 controlled values ignore case
+    /// assert_eq!(ann.child_of().len(), 2);
+    /// assert_eq!(ann.refns().first().unwrap().value(), "7");
     /// ```
-    pub struct Individual {
+    pub struct Individual => IndividualRow {
         @xref
         /// The record's identifier.
         xref;
@@ -69,7 +69,7 @@ gedcom_struct! {
         /// What fewer individuals have: a restriction, ordinances, events
         /// known not to have happened, associations, aliases, submitters,
         /// interests, media, identifiers and the creation date.
-        IndividualDetail {
+        IndividualDetail => IndividualDetailRow {
             /// Restrictions on the record (`RESN`).
             "RESN" => restriction: Option<EnumList<Restriction>>,
             /// Latter-day Saint ordinances (`BAPL`, `CONL`, `ENDL`, `INIL`,
@@ -121,7 +121,7 @@ gedcom_struct! {
     /// attributes (`NCHI` with its event detail), notes, sources and
     /// when the record changed; the rest is in its
     /// [`detail`](Self::detail).
-    pub struct Family {
+    pub struct Family => FamilyRow {
         @xref
         /// The record's identifier.
         xref;
@@ -144,7 +144,7 @@ gedcom_struct! {
         /// What fewer families have: a restriction, sealings, events known
         /// not to have happened, associations, submitters, media,
         /// identifiers and the creation date.
-        FamilyDetail {
+        FamilyDetail => FamilyDetailRow {
             /// Restrictions on the record (`RESN`).
             "RESN" => restriction: Option<EnumList<Restriction>>,
             /// Latter-day Saint sealings of the couple (`SLGS`).
@@ -227,7 +227,7 @@ gedcom_struct! {
     /// publication, its text, the data it records (`DATA`), the
     /// repositories holding it, notes, media, identifiers and its change
     /// and creation dates.
-    pub struct Source {
+    pub struct Source => SourceRow {
         @xref
         /// The record's identifier.
         xref;
@@ -274,7 +274,7 @@ gedcom_struct! {
 gedcom_struct! {
     /// What a source records (`DATA` of a source record): the events, the
     /// agency responsible, notes.
-    pub struct SourceData {
+    pub struct SourceData => SourceDataRow {
         /// The events recorded (`EVEN`).
         "EVEN" => events: ThinVec<RecordedEvents>,
         /// The agency responsible (`AGNC`).
@@ -292,7 +292,7 @@ gedcom_struct! {
 gedcom_struct! {
     /// Events a source records (`EVEN` of a source's `DATA`): their kinds,
     /// the period and the place they cover.
-    pub struct RecordedEvents {
+    pub struct RecordedEvents => RecordedEventsRow {
         @payload
         /// The kinds of event, comma-separated (`BIRT, DEAT`).
         kinds: EnumList<EventKind>;
@@ -311,7 +311,7 @@ gedcom_struct! {
 gedcom_struct! {
     /// A repository (`REPO` record): its name, address and contacts,
     /// notes, identifiers and change and creation dates.
-    pub struct Repository {
+    pub struct Repository => RepositoryRow {
         @xref
         /// The record's identifier.
         xref;
@@ -353,7 +353,7 @@ gedcom_struct! {
 
 gedcom_struct! {
     /// A multimedia object (`OBJE` record): its files, every one kept, notes, sources, identifiers and change and creation dates.
-    pub struct Multimedia {
+    pub struct Multimedia => MultimediaRow {
         @xref
         /// The record's identifier.
         xref;
@@ -389,7 +389,7 @@ gedcom_struct! {
     /// A submitter (`SUBM` record): name, address and contacts, languages
     /// (every one kept), media, notes, identifiers and change and
     /// creation dates.
-    pub struct Submitter {
+    pub struct Submitter => SubmitterRow {
         @xref
         /// The record's identifier.
         xref;
@@ -440,7 +440,7 @@ gedcom_struct! {
     /// submitter, the family file and temple, how many generations of
     /// ancestors and descendants, whether to process ordinances, notes and
     /// the change date. Every substructure is kept.
-    pub struct Submission {
+    pub struct Submission => SubmissionRow {
         @xref
         /// The record's identifier.
         xref;
@@ -479,11 +479,20 @@ fn shared_note_tag(_note: &SharedNote, _tag: StdTag, cx: &WriteCx<'_>) -> StdTag
     }
 }
 
+/// [`shared_note_tag`] of a row.
+fn shared_note_tag_row(_note: &SharedNoteRow, _tag: StdTag, cx: &WriteCx<'_>) -> StdTag {
+    if cx.version.is_v7() {
+        const { StdTag::new("SNOTE") }
+    } else {
+        const { StdTag::new("NOTE") }
+    }
+}
+
 gedcom_struct! {
     /// A note that structures point to (5.5.1 `NOTE` record, 7.x `SNOTE`
     /// record): its text, media type, language, translations and sources,
     /// identifiers, change and creation dates, and 7.1's kind.
-    pub struct SharedNote [tag = shared_note_tag] {
+    pub struct SharedNote => SharedNoteRow [tag = shared_note_tag, shared_note_tag_row] {
         @xref
         /// The record's identifier.
         xref;
@@ -521,5 +530,56 @@ gedcom_struct! {
         v551: ["NOTE_RECORD.NOTE"],
         v70: ["record-SNOTE"],
         v71: ["record-SNOTE"],
+    }
+}
+
+impl<'a> super::table::View<'a, Individual> {
+    /// The preferred name: the first one.
+    #[must_use]
+    pub fn name(self) -> Option<super::table::View<'a, Name>> {
+        self.names().first()
+    }
+
+    /// The preferred name as written, without its surname slashes
+    /// ([`Name::full`]).
+    #[must_use]
+    pub fn full_name(self) -> Option<String> {
+        self.name().map(super::table::View::<Name>::full)
+    }
+
+    /// The events and attributes of a kind, in order.
+    pub fn events_of(
+        self,
+        kind: EventKind,
+    ) -> impl Iterator<Item = super::table::View<'a, Event>> + 'a {
+        self.events().into_iter().filter(move |e| e.kind() == kind)
+    }
+
+    /// The first birth (`BIRT`).
+    #[must_use]
+    pub fn birth(self) -> Option<super::table::View<'a, Event>> {
+        self.events_of(EventKind::Birth).next()
+    }
+
+    /// The first death (`DEAT`).
+    #[must_use]
+    pub fn death(self) -> Option<super::table::View<'a, Event>> {
+        self.events_of(EventKind::Death).next()
+    }
+}
+
+impl super::table::View<'_, Family> {
+    /// The husband or first partner's identifier.
+    #[must_use]
+    pub fn husband_id(self) -> Option<XrefId> {
+        self.husband()
+            .and_then(super::table::View::<IndividualRef>::individual)
+    }
+
+    /// The wife or second partner's identifier.
+    #[must_use]
+    pub fn wife_id(self) -> Option<XrefId> {
+        self.wife()
+            .and_then(super::table::View::<IndividualRef>::individual)
     }
 }

@@ -17,14 +17,14 @@
 //! );
 //! let indexed = IndexedDataset::new(data);
 //! let ann = indexed.find_individual("@I1@").unwrap();
-//! let family = indexed.families_as_spouse(ann.xref).next().unwrap();
+//! let family = indexed.families_as_spouse(ann.xref()).next().unwrap();
 //! assert_eq!(indexed.children(family).count(), 1);
 //! assert_eq!(indexed.individuals().len(), 2); // a dataset still
 //! ```
 
 use std::ops::{Deref, DerefMut};
 
-use crate::model::{Dataset, Family, XrefId, XrefKey};
+use crate::model::{Dataset, Family, View, XrefId, XrefKey};
 
 /// Lists of positions per item, in one buffer: the families of each
 /// individual.
@@ -102,7 +102,7 @@ impl IndexedDataset {
         let mut spouses = Vec::new();
         let mut children = Vec::new();
         let index = |id: XrefId| u32::try_from(id.index()).ok();
-        for (at, family) in data.families.iter().enumerate() {
+        for (at, family) in data.families().into_iter().enumerate() {
             let Ok(at) = u32::try_from(at) else { break };
             for partner in [family.husband_id(), family.wife_id()]
                 .into_iter()
@@ -112,7 +112,11 @@ impl IndexedDataset {
                     spouses.push((i, at));
                 }
             }
-            for child in family.children.iter().filter_map(|c| c.individual) {
+            for child in family
+                .children()
+                .into_iter()
+                .filter_map(View::<crate::model::IndividualRef>::individual)
+            {
                 if let Some(i) = index(child) {
                     children.push((i, at));
                 }
@@ -148,24 +152,31 @@ impl IndexedDataset {
         &'s self,
         links: &'s Links,
         individual: impl XrefKey,
-    ) -> impl Iterator<Item = &'s Family> {
+    ) -> impl Iterator<Item = View<'s, Family>> {
         let positions = individual
             .id_in(self.data.store())
             .map_or(&[][..], |id| links.of(id.index()));
+        let families = self.data.families();
         positions
             .iter()
-            .filter_map(|&at| self.data.families.get(at as usize))
+            .filter_map(move |&at| families.get(at as usize))
     }
 
     /// The families in which this individual is a partner (`HUSB` or
     /// `WIFE`), in order.
-    pub fn families_as_spouse(&self, individual: impl XrefKey) -> impl Iterator<Item = &Family> {
+    pub fn families_as_spouse(
+        &self,
+        individual: impl XrefKey,
+    ) -> impl Iterator<Item = View<'_, Family>> {
         self.families_in(&self.as_spouse, individual)
     }
 
     /// The families in which this individual is a child (`CHIL`), in
     /// order.
-    pub fn families_as_child(&self, individual: impl XrefKey) -> impl Iterator<Item = &Family> {
+    pub fn families_as_child(
+        &self,
+        individual: impl XrefKey,
+    ) -> impl Iterator<Item = View<'_, Family>> {
         self.families_in(&self.as_child, individual)
     }
 }
@@ -230,7 +241,7 @@ mod tests {
     fn finds_every_record_type_first_wins() {
         let indexed = IndexedDataset::new(Dataset::parse(FILE));
         let ann = indexed.find_individual("@I1@").unwrap();
-        assert_eq!(ann.full_name(&*indexed).as_deref(), Some("Ann Example"));
+        assert_eq!(ann.full_name().as_deref(), Some("Ann Example"));
         assert!(indexed.find_family("@F1@").is_some());
         assert!(indexed.find_source("@S1@").is_some());
         assert!(indexed.find_repository("@R1@").is_some());
@@ -251,14 +262,14 @@ mod tests {
     fn navigates_families() {
         let indexed = IndexedDataset::from(Dataset::parse(FILE));
         let ann = indexed.find_individual("@I1@").unwrap();
-        let families: Vec<_> = indexed.families_as_spouse(ann.xref).collect();
+        let families: Vec<_> = indexed.families_as_spouse(ann.xref()).collect();
         assert_eq!(families.len(), 2);
         assert_eq!(indexed.parents(families[0]).count(), 2);
         assert_eq!(indexed.children(families[0]).count(), 1); // @I9@ has no record
         assert_eq!(
             indexed
                 .spouse("@I1@", families[0])
-                .and_then(|s| s.full_name(&*indexed)),
+                .and_then(|s| s.full_name()),
             Some("Bob Example".to_string())
         );
         assert_eq!(indexed.families_as_child("@I3@").count(), 1);

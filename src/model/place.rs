@@ -12,7 +12,7 @@ gedcom_struct! {
     /// translations (7.x `LANG`, `TRAN`), its coordinates (`MAP`),
     /// identifiers (7.x `EXID`), notes, and 5.5.1 phonetic and romanized
     /// variations (`FONE`, `ROMN`).
-    pub struct Place {
+    pub struct Place => PlaceRow {
         @payload
         /// The name, jurisdictions from the smallest.
         name: Text;
@@ -20,7 +20,7 @@ gedcom_struct! {
         /// What fewer places have besides their name: the form of the
         /// jurisdictions, a language, translations, coordinates,
         /// identifiers, notes and variations.
-        PlaceDetail {
+        PlaceDetail => PlaceDetailRow {
             /// The jurisdictions named, in order (`FORM`).
             "FORM" => form: Option<Text>,
             /// The language of the name (`LANG`).
@@ -48,7 +48,7 @@ gedcom_struct! {
 
 gedcom_struct! {
     /// A place name in another language (7.x `PLAC.TRAN`).
-    pub struct PlaceTranslation {
+    pub struct PlaceTranslation => PlaceTranslationRow {
         @payload
         /// The translated name.
         name: Text;
@@ -67,7 +67,7 @@ gedcom_struct! {
     /// `E168.150944`): in 7.x, the `Latitude` and `Longitude` data types
     /// (7.0.17), decimal degrees up to 90 and 180 after `N`/`S` and
     /// `E`/`W`.
-    pub struct Map {
+    pub struct Map => MapRow {
         /// Latitude (`LATI`).
         "LATI" => latitude: Option<Text>,
         /// Longitude (`LONG`).
@@ -83,7 +83,7 @@ gedcom_struct! {
 gedcom_struct! {
     /// A phonetic variation of a place name (5.5.1 `PLAC.FONE`) and its
     /// method (`TYPE`).
-    pub struct PhoneticVariation {
+    pub struct PhoneticVariation => PhoneticVariationRow {
         @payload
         /// The variation.
         name: Text;
@@ -100,7 +100,7 @@ gedcom_struct! {
 gedcom_struct! {
     /// A romanized variation of a place name (5.5.1 `PLAC.ROMN`) and its
     /// method (`TYPE`).
-    pub struct RomanizedVariation {
+    pub struct RomanizedVariation => RomanizedVariationRow {
         @payload
         /// The variation.
         name: Text;

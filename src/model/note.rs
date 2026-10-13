@@ -3,7 +3,7 @@
 use crate::tree::{FlatPayload, Payload};
 
 use super::citation::Citation;
-use super::driver::{gedcom_struct, NodeRef, PayloadField, ReadCx, StdTag, WriteCx};
+use super::driver::{gedcom_struct, PayloadField, StdTag, WriteCx};
 use super::enums::{NoteKind, Phrased};
 use super::text::{Text, XrefId};
 
@@ -24,13 +24,6 @@ impl Default for NoteContent {
 }
 
 impl PayloadField for NoteContent {
-    fn read(node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> Option<Self> {
-        match cx.pointer(node) {
-            Some(id) => Some(NoteContent::Shared(id)),
-            None => cx.text(node).map(NoteContent::Text),
-        }
-    }
-
     fn write(&self, cx: &WriteCx<'_>) -> Payload {
         match self {
             NoteContent::Text(t) => cx.text(t),
@@ -44,15 +37,8 @@ impl PayloadField for NoteContent {
             NoteContent::Shared(id) => cx.pointer_flat(*id),
         }
     }
-}
 
-impl super::relocate::Relocate for NoteContent {
-    fn relocate(&mut self, r: &mut super::relocate::Relocation<'_>) {
-        match self {
-            NoteContent::Text(t) => t.relocate(r),
-            NoteContent::Shared(id) => id.relocate(r),
-        }
-    }
+    super::driver::pointer_or_text_raw!(NoteContent, Shared, Text);
 }
 
 impl super::pointers::Pointers for NoteContent {
@@ -115,6 +101,15 @@ fn note_tag(note: &Note, tag: StdTag, cx: &WriteCx<'_>) -> StdTag {
     }
 }
 
+/// [`note_tag`] of a row.
+fn note_tag_row(note: &NoteRow, tag: StdTag, cx: &WriteCx<'_>) -> StdTag {
+    match note.content.as_pointer() {
+        Some(_) if cx.version.is_v7() => const { StdTag::new("SNOTE") },
+        Some(_) => const { StdTag::new("NOTE") },
+        None => tag,
+    }
+}
+
 gedcom_struct! {
     /// A note (`NOTE`), or a pointer to a shared note (5.5.1 `NOTE @N1@`,
     /// 7.x `SNOTE @N1@`).
@@ -122,14 +117,14 @@ gedcom_struct! {
     /// 7.x gives a note text a media type (`MIME`), a language (`LANG`),
     /// translations (`TRAN`) and citations (`SOUR`); 7.1 says what kind of
     /// note it is (`KIND`).
-    pub struct Note [tag = note_tag] [chain = citations: Citation] {
+    pub struct Note => NoteRow [tag = note_tag, note_tag_row] [chain = citations: Citation] {
         @payload
         /// The note's text, or the shared note it points to.
         content: NoteContent;
         @detail
         /// What few notes have besides their text: a media type, a
         /// language, translations, sources and kinds.
-        NoteDetail {
+        NoteDetail => NoteDetailRow {
             /// The media type of the text (`MIME`), `text/plain` when absent;
             /// besides `text/html`, another `text/` type is an extension that
             /// needs no extension tag (7.0.17).
@@ -174,7 +169,7 @@ impl Note {
 gedcom_struct! {
     /// A translation of a note (7.x `NOTE.TRAN`): the text in another
     /// language or media type.
-    pub struct NoteTranslation {
+    pub struct NoteTranslation => NoteTranslationRow {
         @payload
         /// The translated text.
         text: Text;
@@ -192,7 +187,7 @@ gedcom_struct! {
 
 gedcom_struct! {
     /// Text from a source (`TEXT`), with its media type and language (7.x).
-    pub struct SourceText {
+    pub struct SourceText => SourceTextRow {
         @payload
         /// The text.
         text: Text;
@@ -215,7 +210,7 @@ gedcom_struct! {
 gedcom_struct! {
     /// A translation of a header's title or description (7.1 `TRAN` of
     /// `HEAD.TITL` or `HEAD.DESC`).
-    pub struct TextTranslation {
+    pub struct TextTranslation => TextTranslationRow {
         @payload
         /// The translated text.
         text: Text;
@@ -226,5 +221,24 @@ gedcom_struct! {
         v551: [],
         v70: [],
         v71: ["TEXT-TRAN"],
+    }
+}
+
+impl super::table::sealed::Field for NoteContent {
+    type View<'a> = Self;
+}
+
+impl<'a> super::View<'a, Note> {
+    /// The note's own text; `None` for a pointer to a shared note.
+    #[must_use]
+    pub fn text(self) -> Option<super::TextRef<'a>> {
+        (self.row.content.as_pointer().is_none())
+            .then(|| super::TextRef::new(self.store(), self.row.content))
+    }
+
+    /// The shared note it points to; `None` for a note of its own.
+    #[must_use]
+    pub fn shared(self) -> Option<XrefId> {
+        self.row.content.as_pointer()
     }
 }

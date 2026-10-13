@@ -185,21 +185,20 @@ fn records_are_typed_one_at_a_time() {
     let RecordRef::Individual(person) = indi.record() else {
         panic!("not an individual")
     };
-    assert_eq!(person.full_name(indi).as_deref(), Some("Zoë Example"));
-    assert_eq!(indi.store().tag(person.extra[0].tag), "_X");
-    assert_eq!(indi.store().xref(person.xref.unwrap()), "@I1@");
+    assert_eq!(person.full_name().as_deref(), Some("Zoë Example"));
+    assert_eq!(person.extra().first().unwrap().tag(), "_X");
+    assert_eq!(indi.store().xref(person.xref().unwrap()), "@I1@");
 
     let RecordRef::Note(note) = records[3].record() else {
         panic!("not a note")
     };
-    assert_eq!(note.text.to_str(&records[3]), "Shared\ntext");
+    assert_eq!(note.text().to_str(), "Shared\ntext");
     assert!(matches!(records[4].record(), RecordRef::Other(_)));
 
+    assert_eq!(records[2].record().tag(GedcomVersion::V5_5_1), "FAM");
     let (record, store) = records[2].clone().into_parts();
-    assert_eq!(
-        record.record_ref().tag(&store, GedcomVersion::V5_5_1),
-        "FAM"
-    );
+    assert!(matches!(record, ged_io::model::Record::Family(_)));
+    assert!(store.find_xref("@F1@").is_some());
 }
 
 #[test]
@@ -228,7 +227,7 @@ fn any_encoding_and_line_terminator() {
         assert_eq!(parser.encoding(), encoding);
         let collected: Dataset = parser.map(Result::unwrap).collect();
         assert_eq!(collected.to_structures(), expected, "{encoding:?}");
-        let zoe = collected.find_individual("@I1@").unwrap();
+        let zoe = collected.find_individual("@I1@").unwrap().into_owned();
         assert_eq!(zoe.full_name(&collected).as_deref(), Some("Zoë Example"));
     }
 }
@@ -246,7 +245,7 @@ fn the_version_is_known_once_the_header_is_read() {
     let RecordRef::Individual(person) = indi.record() else {
         panic!("not an individual")
     };
-    let ged_io::model::NoteContent::Text(note) = &person.notes[0].content else {
+    let ged_io::model::NoteContent::Text(note) = &person.notes().first().unwrap().content() else {
         panic!("not a note text")
     };
     assert_eq!(note.to_str(&indi), "@a@@b");
@@ -277,15 +276,11 @@ fn extending_a_dataset_keeps_a_second_header_aside() {
         "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n1 LANG English\n0 @I2@ INDI\n1 NAME Ann /Sample/\n0 TRLR\n";
     data.extend(stream(other.as_bytes()));
     assert_eq!(data.individuals().len(), 2);
-    let ann = data.find_individual("@I2@").unwrap();
+    let ann = data.find_individual("@I2@").unwrap().into_owned();
     assert_eq!(ann.full_name(&data).as_deref(), Some("Ann Sample"));
     // The first header stays the header; the second is an untyped record.
     assert!(data.header().unwrap().language.is_none());
-    let tags: Vec<_> = data
-        .extra()
-        .iter()
-        .map(|n| data.store().tag(n.tag))
-        .collect();
+    let tags: Vec<_> = data.extra().iter().map(|n| n.tag()).collect();
     assert_eq!(tags, ["_LOC", "HEAD"]);
 }
 

@@ -115,6 +115,25 @@ keeps all data; writing is conformant to GEDCOM 5.5.1, 7.0 or 7.1.
 
 ### Changed
 
+- A dataset keeps every structure but the header as a row of the table of
+  its type, its texts as 8-byte spans of the store and its pointers as
+  interned ids: reading allocates no structure on its own, and a dataset
+  takes about twice the size of its input (2.8 times before). Its
+  accessors give views: `View<'_, T>` (a `Copy` handle with a method per
+  field, detail fields included: `person.names()`, `event.date()`,
+  `person.refns()`), `Items<'_, T>` (a list: `len`, `get`, `first`,
+  `last`, iteration) and `TextRef` (a text that reads, compares with a
+  `&str` and prints without the store). `individuals()` and the other
+  accessors return `Items`; `find*`, `families_as_*`, `parents`,
+  `children`, `spouse`, `search_individuals` and `get` return views;
+  `RecordRef`'s variants are views (`HeaderRef` for the header);
+  `View::into_owned` and `RecordRef::into_owned` copy a structure out as its
+  owned type, which `add` and `push` store. `get_mut` lends a copy, stored
+  back as new rows when the loan ends (the rows it replaces are reclaimed
+  once they outnumber the others); a guard forgotten with `mem::forget`
+  changes nothing. `StreamedRecord` is a dataset of one record
+  (`dataset()`, `record()`, `into_parts()`), and
+  `GedcomStreamWriter::write_record` takes the record's view alone.
 - A dataset's records are read through accessors (`individuals()`,
   `families()`, …, `extra()`, `header()`, `all::<T>()`) and changed
   through its editing methods, which keep its references whole; its record

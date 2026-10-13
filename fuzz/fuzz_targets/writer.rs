@@ -88,7 +88,7 @@ fn streamed(data: &Dataset, version: GedcomVersion) -> (String, bool) {
     let header = data.header().unwrap_or(&default);
     let mut w = GedcomStreamWriter::new(Vec::new(), config, header, data).expect("repairs");
     for r in data.records().skip(usize::from(data.header().is_some())) {
-        w.write_record(r, data).expect("repairs, never fails");
+        w.write_record(r).expect("repairs, never fails");
     }
     let (bytes, report) = w.finish().expect("writes");
     let moved = report
@@ -138,9 +138,9 @@ fuzz_target!(|data: &[u8]| {
                 .extra()
                 .iter()
                 .filter(|n| {
-                    model.store().tag(n.tag) == "TRLR"
-                        && n.children.is_empty()
-                        && matches!(n.payload, ged_io::model::Value::None)
+                    n.tag() == "TRLR"
+                        && n.children().is_empty()
+                        && matches!(n.payload(), ged_io::model::Value::None)
                 })
                 .count();
             let (written, read) = (back.record_count(), model.record_count() - bare_trailers);

@@ -624,7 +624,7 @@ impl<'s> Flat<'s> {
         claim: Option<Kind>,
     ) {
         let at = self.open_typed(tag, standard, None, payload, claim);
-        self.close(at);
+        self.close_inline(at);
     }
 
     /// Starts a structure; its substructures follow until [`Flat::close`].
@@ -711,6 +711,16 @@ impl<'s> Flat<'s> {
     /// Ends the structure [`Flat::open`] started at `at`.
     #[inline]
     pub(crate) fn close(&mut self, at: usize) {
+        self.close_inline(at);
+    }
+
+    /// [`Flat::close`], inlined where it is called.
+    #[expect(
+        clippy::inline_always,
+        reason = "a leaf that closes in its own code is written about 1% faster"
+    )]
+    #[inline(always)]
+    fn close_inline(&mut self, at: usize) {
         if self.stream.is_some() {
             self.stream_close();
             return;

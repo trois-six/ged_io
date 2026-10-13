@@ -851,8 +851,8 @@ mod tests {
         let bytes = write_gedzip(&data).expect("Failed to write");
         let parsed = read_gedzip(&bytes).expect("Failed to read");
 
-        assert_eq!(parsed.individuals.len(), 2);
-        assert_eq!(parsed.families.len(), 1);
+        assert_eq!(parsed.individuals().len(), 2);
+        assert_eq!(parsed.families().len(), 1);
     }
 
     #[test]
