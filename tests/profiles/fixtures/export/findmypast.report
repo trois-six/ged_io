@@ -1,0 +1,22 @@
+HEAD.SOUR EXAMPLE_APP written as ged_io (relabelled; EXF-082, EXC-018, EXC-057)
+@I1@: the name prefix as a title (moved, lossy; EXC-108)
+@I1@: the usual given name (as text, lossy; EXC-108)
+@I1@: an association as EVEN TYPE Associate (as text, lossy; EXC-109)
+@I1@: an association as EVEN TYPE Associate (as text, lossy; EXC-109)
+@I1@: an association as EVEN TYPE Associate (as text, lossy; EXC-109)
+@I1@: an association as EVEN TYPE Associate (as text, lossy; EXC-109)
+@I1@: an association as EVEN TYPE Associate (as text, lossy; EXC-109)
+@I1@: FACT as EVEN (relabelled, lossy; EXC-109)
+@I1@: 1 fields of BIRT in its note (as text, lossy; EXC-110)
+@F2@: 1 fields of MARR in its note (as text, lossy; EXC-110)
+@I1@: the cause of BURI in its note (as text, lossy; EXC-110)
+@I1@: record notes on an EVEN TYPE Family Story (moved, lossy; EXC-111)
+@F2@: record notes on an EVEN TYPE Family Story (moved, lossy; EXC-111)
+@I1@: record citations on an EVEN TYPE Story (moved, lossy; EXC-111)
+@F2@: record citations on an EVEN TYPE Story (moved, lossy; EXC-111)
+@I1@: 1 notes stripped of their markup (recoded, lossy; EXC-016)
+repair: HEAD.SCHMA: not permitted here, written as _SCHMA
+repair: INDI.BIRT.SDATE: not permitted here, written as _SDATE
+repair: INDI.OBJE.CROP: not permitted here, written as _CROP
+repair: INDI.UID: not permitted here, written as _UID
+repair: FAM.NO: not permitted here, written as _NO

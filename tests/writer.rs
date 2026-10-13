@@ -28,8 +28,11 @@ fn write(data: &Dataset, version: GedcomVersion) -> String {
         .unwrap()
 }
 
+/// Reads text back as written: the writer's tests read without producer
+/// interpretation (`tests/profiles.rs` has its own idempotence tests).
 fn read(text: &str) -> Dataset {
     GedcomBuilder::new()
+        .interpretation(ged_io::profile::Interpretation::None)
         .build_from_str(text)
         .unwrap_or_else(|e| panic!("{e}\n{text}"))
 }

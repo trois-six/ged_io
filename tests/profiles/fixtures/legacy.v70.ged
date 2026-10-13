@@ -1,0 +1,37 @@
+0 HEAD
+1 GEDC
+2 VERS 7.0
+1 SOUR Legacy
+2 VERS 8.0
+2 NAME Legacy (R)
+2 CORP Millennia Corp.
+1 SCHMA
+2 TAG _ITALIC https://github.com/trois-six/oxidged/blob/main/docs/extensions.md#legacy-_ITALIC
+0 @I1@ INDI
+1 NAME Ann /Example/
+1 SEX F
+1 BIRT
+2 DATE 1 JAN 1850
+2 SOUR @S1@
+3 DATA
+4 DATE 1 JAN 2000
+2 RESN PRIVACY
+1 FAMS @F2@
+1 FAMS @F1@
+1 UID A0DFC922CDC44040B6B22B58106216AB9916
+0 @I2@ INDI
+1 NAME Bob /Example/
+1 FAMS @F2@
+0 @F1@ FAM
+1 WIFE @I1@
+1 NCHI 0
+1 NO MARR
+1 _STAT Never Married
+0 @F2@ FAM
+1 HUSB @I2@
+1 WIFE @I1@
+2 _PREF Y
+0 @S1@ SOUR
+1 TITL Example
+1 _ITALIC Y
+0 TRLR

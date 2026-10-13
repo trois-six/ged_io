@@ -3,6 +3,7 @@
 
 use std::fmt;
 
+use crate::profile::{Detection, Interpretation};
 use crate::tree::{Flat, Node as _, PayloadRef, Structure, Tag};
 use crate::version::GedcomVersion;
 
@@ -59,6 +60,10 @@ pub struct Dataset {
     pub(crate) declared_version: Option<Box<str>>,
     /// Handles, identifiers and pointer counts (see [`super::edit`]).
     pub(crate) index: super::edit::Index,
+    /// The producer reading found and how far it interpreted its
+    /// conventions ([`crate::profile`]); what is left to interpret only in
+    /// 7.x is interpreted when the dataset is written in 7.x.
+    pub(crate) producer: Option<Box<(Detection, Interpretation)>>,
 }
 
 impl AsRef<Store> for Dataset {
@@ -511,6 +516,29 @@ impl Dataset {
             version,
             ..Self::default()
         }
+    }
+
+    /// The producer of the file the dataset was read from, when
+    /// [`GedcomBuilder`](crate::GedcomBuilder) detected (or was given) one
+    /// and interpreted its conventions ([`crate::profile`]).
+    #[must_use]
+    pub fn producer(&self) -> Option<&Detection> {
+        self.producer.as_deref().map(|(d, _)| d)
+    }
+
+    /// How far reading interpreted the producer's conventions
+    /// ([`Interpretation::None`] for a dataset read without a profile).
+    #[must_use]
+    pub fn interpretation(&self) -> Interpretation {
+        self.producer
+            .as_deref()
+            .map_or(Interpretation::None, |&(_, level)| level)
+    }
+
+    /// Records the producer and the interpretation level, so that what
+    /// only 7.x can say is interpreted when the dataset is converted.
+    pub(crate) fn set_producer(&mut self, detection: Detection, level: Interpretation) {
+        self.producer = (level != Interpretation::None).then(|| Box::new((detection, level)));
     }
 
     /// Reads a dataset from decoded text, leniently: never fails, keeps

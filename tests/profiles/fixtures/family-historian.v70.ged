@@ -1,0 +1,45 @@
+0 HEAD
+1 GEDC
+2 VERS 7.0
+1 SOUR FAMILY_HISTORIAN
+2 VERS 7.0.24
+2 NAME Family Historian
+2 CORP Calico Pie Limited
+1 SCHMA
+2 TAG _ROOT https://github.com/trois-six/oxidged/blob/main/docs/extensions.md#family-historian-_ROOT
+2 TAG _USED https://github.com/trois-six/oxidged/blob/main/docs/extensions.md#family-historian-_USED
+1 _ROOT @I1@
+0 @I1@ INDI
+1 NAME Tony /Example/
+2 _USED Tony
+1 SEX M
+1 FACT Singing
+2 TYPE Hobby
+1 BIRT
+2 DATE 1 JAN 1950
+2 ASSO @I2@
+3 ROLE WITN
+4 PHRASE Witness
+2 ASSO @VOID@
+3 PHRASE Fictive Witness
+3 ROLE OTHER
+4 PHRASE Observer
+1 FAMC @F1@
+2 PEDI ADOPTED
+3 PHRASE Adopted (father)
+2 _PEDI Adopted (father)
+1 OBJE @M1@
+2 CROP
+3 TOP 46
+3 LEFT 154
+3 HEIGHT 81
+3 WIDTH 89
+2 _AREA {154,46,243,127}
+0 @I2@ INDI
+1 NAME Sam /Example/
+0 @F1@ FAM
+1 CHIL @I1@
+0 @M1@ OBJE
+1 FILE photo.jpg
+2 FORM image/jpeg
+0 TRLR

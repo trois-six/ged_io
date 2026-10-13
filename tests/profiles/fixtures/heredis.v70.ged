@@ -1,0 +1,54 @@
+0 HEAD
+1 GEDC
+2 VERS 7.0
+1 SOUR HEREDIS 14 PC
+2 NAME HEREDIS PC
+2 CORP BSD Concept
+3 WWW www.example.invalid
+1 LANG fr
+1 PLAC
+2 FORM Town, Area code, County, Region, Country, Subdivision
+1 SCHMA
+2 TAG _QUAY https://gedcom.io/terms/v7/QUAY
+2 TAG _FNA https://github.com/trois-six/oxidged/blob/main/docs/extensions.md#heredis-_FNA
+2 TAG _GUID https://github.com/trois-six/oxidged/blob/main/docs/extensions.md#heredis-_GUID
+2 TAG _UST https://github.com/trois-six/oxidged/blob/main/docs/extensions.md#heredis-_UST
+1 _GUID 0A1B2C3D-0000-4000-8000-00000000AAAA
+0 @1I@ INDI
+1 NAME Aubin /FICTIF/
+1 SEX U
+1 BIRT
+2 DATE ABT 1825
+2 PLAC Villefictive,12345,Departement-A,Region-B,FRANCE,
+2 _FNA NO
+1 NATI FRANCAISE
+1 RESI
+2 DATE 1850
+1 EVEN Moulin-A
+2 TYPE Acquisition
+1 EVEN
+2 DATE 1860
+2 TYPE Acquisition
+1 DEAT
+2 DATE 12 SEP 1890
+2 AGE 11m
+1 FAMC @1F@
+2 PEDI BIRTH
+1 CREA
+2 DATE 1 JAN 2020
+1 _FIL LEGITIMATE_CHILD
+0 @2I@ INDI
+1 NAME Basile /FICTIF/
+1 SEX M
+1 FAMS @1F@
+0 @1F@ FAM
+1 HUSB @2I@
+1 CHIL @1I@
+1 _UST MARRIED
+0 @1S@ SOUR
+1 TITL Registre fictif
+1 REPO @R1@
+1 _QUAY 2
+0 @R1@ REPO
+1 NAME Archives départementales fictives
+0 TRLR

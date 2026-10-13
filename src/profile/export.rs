@@ -1,0 +1,4158 @@
+//! Export shaped for an importer.
+//!
+//! An export profile only ever writes conformant GEDCOM. It may do four
+//! things (REPORT §7.1):
+//!
+//! 1. choose among standard alternatives: version, character set, byte
+//!    order mark, line terminator and length, record order, place format;
+//! 2. fold data into standard structures the importer reads (several
+//!    occupations into one, a name's other surnames into its `SURN` list,
+//!    an event's age into its note, …);
+//! 3. add `_` extensions the importer understands, next to the standard
+//!    form they repeat (`_FREL`/`_MREL`, `_PRIM`, `_PHOTO`, `_SHAR`);
+//! 4. leave data out, only when asked ([`ExportOptions`]).
+//!
+//! Every fold that loses something (a type, a structure, a pointer made
+//! text) is listed in the [`ExportReport`] with the record it was in and
+//! the row of the research it follows; so are the importer's limits the
+//! output exceeds. Nothing is printed.
+
+use std::collections::HashMap;
+use std::fmt;
+use std::io;
+
+use crate::convert::{convert_structures, ConversionOptions};
+use crate::model::Dataset;
+use crate::tree::{Payload, Structure, Xref};
+use crate::writer::{Bom, GedcomWriter, LineEnding, OutputEncoding, Repair, WriteError};
+use crate::GedcomVersion;
+
+use super::util::{
+    child, child_mut, child_text, given_part, has, is, name_value, payload_str, pointer_node,
+    retag, set_text, suffix_part, surname_part, text_node,
+};
+use super::ExportProfile;
+
+/// How written files name their media files.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum MediaPaths {
+    /// As the data holds them.
+    #[default]
+    Keep,
+    /// Relative to [`ExportOptions::media_root`] when it is given, with
+    /// `/` as the separator (`C:\photos\a.jpg` → `photos/a.jpg`, without
+    /// the drive).
+    Relative,
+    /// The file name alone.
+    FileName,
+}
+
+/// What an export profile writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Target {
+    pub(crate) version: GedcomVersion,
+    pub(crate) encoding: OutputEncoding,
+    pub(crate) bom: bool,
+    pub(crate) line_ending: LineEnding,
+    pub(crate) max_line_length: usize,
+    pub(crate) media: MediaPaths,
+    /// Importer limits, reported when exceeded (never enforced).
+    pub(crate) max_bytes: Option<u64>,
+    pub(crate) max_individuals: Option<usize>,
+    pub(crate) max_depth: Option<usize>,
+    pub(crate) max_name: Option<usize>,
+    pub(crate) max_children: Option<usize>,
+    /// The rows of `export.tsv` the target follows.
+    pub(crate) rows: &'static [&'static str],
+}
+
+impl Target {
+    /// GEDCOM 5.5.1 in UTF-8 without a byte order mark, LF, 255-byte lines:
+    /// what most importers read best.
+    pub(crate) const V551: Target = Target {
+        version: GedcomVersion::V5_5_1,
+        encoding: OutputEncoding::Utf8,
+        bom: false,
+        line_ending: LineEnding::Lf,
+        max_line_length: 255,
+        media: MediaPaths::Keep,
+        max_bytes: None,
+        max_individuals: None,
+        max_depth: None,
+        max_name: None,
+        max_children: None,
+        rows: &[],
+    };
+
+    /// GEDCOM 7.0, UTF-8 with a byte order mark, LF.
+    pub(crate) const V70: Target = Target {
+        version: GedcomVersion::V7_0,
+        bom: true,
+        ..Target::V551
+    };
+
+    /// The version written.
+    #[must_use]
+    pub fn version(&self) -> GedcomVersion {
+        self.version
+    }
+
+    /// The encoding written (5.5.1; 7.x is UTF-8).
+    #[must_use]
+    pub fn encoding(&self) -> OutputEncoding {
+        self.encoding
+    }
+
+    /// Whether a byte order mark is written.
+    #[must_use]
+    pub fn bom(&self) -> bool {
+        self.bom
+    }
+
+    /// The line terminator.
+    #[must_use]
+    pub fn line_ending(&self) -> LineEnding {
+        self.line_ending
+    }
+
+    /// The longest line (5.5.1).
+    #[must_use]
+    pub fn max_line_length(&self) -> usize {
+        self.max_line_length
+    }
+
+    /// How media file paths are written.
+    #[must_use]
+    pub fn media(&self) -> MediaPaths {
+        self.media
+    }
+
+    /// The largest file the importer takes, when it says.
+    #[must_use]
+    pub fn max_bytes(&self) -> Option<u64> {
+        self.max_bytes
+    }
+
+    /// The most individuals the importer takes, when it says.
+    #[must_use]
+    pub fn max_individuals(&self) -> Option<usize> {
+        self.max_individuals
+    }
+}
+
+/// What the user asks of an export beyond its profile.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExportOptions {
+    /// Write this version instead of the profile's (for an importer that
+    /// reads both, such as Heredis's GEDZIP import of 7.0).
+    pub version: Option<GedcomVersion>,
+    /// Leave out multimedia links and records (for sites that drop media).
+    pub omit_media: bool,
+    /// Leave out the records whose `RESN` says `confidential` or `privacy`,
+    /// and the pointers to them (for importers that ignore `RESN`).
+    pub omit_private: bool,
+    /// Leave out `CHAN` (`RootsMagic`).
+    pub omit_change_dates: bool,
+    /// The individual to write first (the home person of Ancestry and
+    /// Legacy); default: the header's `_ROOT`, else as the data says.
+    pub home: Option<String>,
+    /// The folder media paths are made relative to.
+    pub media_root: Option<String>,
+}
+
+/// What kind of change a fold made.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum FoldKind {
+    /// Several structures made one.
+    Merged,
+    /// A structure moved elsewhere.
+    Moved,
+    /// A structure given another tag or type.
+    Relabelled,
+    /// A structure added (a redundant extension, an explicit value).
+    Added,
+    /// Data written as the text of a note or payload.
+    AsText,
+    /// Data left out.
+    Omitted,
+    /// Records or structures put in another order.
+    Reordered,
+    /// A value rewritten (escaped, a path, an identifier).
+    Recoded,
+}
+
+impl fmt::Display for FoldKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            FoldKind::Merged => "merged",
+            FoldKind::Moved => "moved",
+            FoldKind::Relabelled => "relabelled",
+            FoldKind::Added => "added",
+            FoldKind::AsText => "as text",
+            FoldKind::Omitted => "omitted",
+            FoldKind::Reordered => "reordered",
+            FoldKind::Recoded => "recoded",
+        })
+    }
+}
+
+/// One change an export made for its importer.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Fold {
+    /// The rows of `export.tsv` it follows.
+    pub rows: &'static [&'static str],
+    /// What kind of change.
+    pub kind: FoldKind,
+    /// Whether something was lost (a type, a structure, a link).
+    pub lossy: bool,
+    /// The record it was in.
+    pub record: Option<Xref>,
+    /// What was changed, in words.
+    pub detail: String,
+}
+
+impl fmt::Display for Fold {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(x) = &self.record {
+            write!(f, "{x}: ")?;
+        }
+        write!(f, "{} ({}", self.detail, self.kind)?;
+        if self.lossy {
+            f.write_str(", lossy")?;
+        }
+        write!(f, "; {})", self.rows.join(", "))
+    }
+}
+
+/// An importer limit the output exceeds.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Limit {
+    /// The rows of `export.tsv` it comes from.
+    pub rows: &'static [&'static str],
+    /// The record concerned, if one.
+    pub record: Option<Xref>,
+    /// The limit and what exceeds it, in words.
+    pub detail: String,
+}
+
+impl fmt::Display for Limit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(x) = &self.record {
+            write!(f, "{x}: ")?;
+        }
+        write!(f, "{} ({})", self.detail, self.rows.join(", "))
+    }
+}
+
+/// What an export did: its folds, the importer limits exceeded and the
+/// writer's repairs. A query, not a warnings channel.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExportReport {
+    /// Every fold, in the order made.
+    pub folds: Vec<Fold>,
+    /// The importer limits the output exceeds.
+    pub limits: Vec<Limit>,
+    /// The writer's conformance repairs (see [`WriteReport`](crate::WriteReport)).
+    pub repairs: Vec<Repair>,
+}
+
+impl ExportReport {
+    /// The folds that lost something.
+    pub fn lossy(&self) -> impl Iterator<Item = &Fold> {
+        self.folds.iter().filter(|f| f.lossy)
+    }
+
+    /// Whether no fold lost anything and no limit is exceeded.
+    #[must_use]
+    pub fn is_lossless(&self) -> bool {
+        self.lossy().next().is_none() && self.limits.is_empty()
+    }
+
+    /// The folds that follow row `row`.
+    pub fn for_row<'a>(&'a self, row: &'a str) -> impl Iterator<Item = &'a Fold> {
+        self.folds.iter().filter(move |f| f.rows.contains(&row))
+    }
+
+    /// The folds made in record `xref`.
+    pub fn for_record<'a>(&'a self, xref: &'a str) -> impl Iterator<Item = &'a Fold> {
+        self.folds
+            .iter()
+            .filter(move |f| f.record.as_ref().is_some_and(|x| x.as_str() == xref))
+    }
+}
+
+/// How the witnesses and other associations of events are written in
+/// 5.5.1, which has no place for them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AssocStyle {
+    /// `_SHAR @I@` + `ROLE` (`RootsMagic`, Legacy, Family Historian); a
+    /// witness named in words becomes a note.
+    Shar,
+    /// `_WITN @I@` (Gramps).
+    Witn,
+    /// `_ASSO @I@` + `RELA` (GEDCOM-L, webtrees).
+    GedcomL,
+    /// On the associated person: `ASSO @A@` + `RELA role@INDI:EVENT`
+    /// (Ancestris).
+    Reversed,
+    /// As the event's note (Geneanet, Ancestry, …).
+    Note,
+}
+
+/// One step of an export profile.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Step {
+    pub(crate) fold: Op,
+    pub(crate) rows: &'static [&'static str],
+}
+
+/// What a step does.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Op {
+    /// The undated occupations (no substructure) of a person as one,
+    /// comma-joined.
+    OccupationsMerged,
+    /// `FACT` + `TYPE Profession` (or occupation) as `OCCU`.
+    ProfessionFacts,
+    /// The surnames of the other names that differ from the primary name by
+    /// their surname only, in the primary name's `SURN` list.
+    SurnamesPacked,
+    /// The surname prefix (`SPFX`) inside the slashes of the name value.
+    ParticleInSurname,
+    /// Every nickname of a person as one `NICK` under the primary name.
+    NicknamesJoined,
+    /// The usual given name (`_RUFNAME`, `_USED`) in double quotes in the
+    /// name value.
+    UsualNameQuoted,
+    /// `:` left out of names.
+    NoColonInNames,
+    /// Events that say nothing more said `Y`.
+    EventsSaidY,
+    /// A death `Y` for a person buried or cremated without one.
+    DeathSaidY,
+    /// Report a person with both a baptism and a christening (one is read).
+    OneBaptism,
+    /// These events and attributes as `EVEN` + `TYPE <label>`.
+    AsEven(&'static [(&'static str, &'static str)]),
+    /// These attributes as `FACT` + `TYPE <label>` under a person, `EVEN`
+    /// under a family.
+    AsFact(&'static [(&'static str, &'static str)]),
+    /// `FACT` as `EVEN` + `TYPE`.
+    FactsAsEven,
+    /// The union type said: `NO MARR` as `EVEN TYPE unmarried`, no union
+    /// event as `EVEN TYPE nomen`.
+    UnionType,
+    /// Report an empty PACS, which the importer drops.
+    EmptyPacs,
+    /// Godparents of a baptism as person-level `ASSO` + `RELA Godfather`
+    /// then `Godmother`.
+    Godparents,
+    /// How the remaining event associations are written.
+    EventAssociations(AssocStyle),
+    /// An adoption link (`FAMC` + `PEDI adopted`) also as `ADOP` + `FAMC`
+    /// + `ADOP BOTH`, and the birth family first.
+    Adoptions,
+    /// Every citation of a source record written inline, as one text.
+    InlineSources,
+    /// Every text citation made a pointer to a new source record.
+    SourceRecords,
+    /// Notes as plain text with `<` and `&` escaped (importers that read
+    /// notes as HTML).
+    EscapedNotes,
+    /// Notes with their HTML markup removed.
+    PlainNotes,
+    /// One header note.
+    OneHeadNote,
+    /// Citations of a child link as a note of the person.
+    ChildLinkSources,
+    /// Places in this format (by the jurisdictions the header names), with
+    /// `HEAD.PLAC.FORM` set to it; a subdivision as `[sub] - ` before.
+    Places(PlaceStyle),
+    /// Event addresses as notes.
+    AddressesAsNotes,
+    /// Event addresses appended to the place, after ` at `.
+    AddressesInPlace,
+    /// Report impossible dates (31 FEB).
+    BadDates,
+    /// Extension structures left after conformance as notes of their
+    /// parent (or left out where no note fits).
+    ExtensionsAsNotes,
+    /// Extension structures directly under a person or family as `EVEN` +
+    /// `TYPE <tag>`.
+    ExtensionsAsEvents,
+    /// Links to multimedia records written inline (5.5.1 `OBJE` + `FILE`).
+    InlineMedia,
+    /// Each person's and family's associations as `EVEN` + `TYPE
+    /// Associate` + a note; with `true`, the associate's name as the
+    /// payload.
+    AssociationsAsEvents(bool),
+    /// Event substructures the importer ignores as labelled notes.
+    FieldsAsNotes(&'static [(&'static str, &'static str)]),
+    /// A cause of an event other than death as a note.
+    CausesAsNotes,
+    /// Record-level notes of persons and families as `EVEN` + `TYPE` +
+    /// `NOTE`.
+    RecordNotesAsEvent(&'static str),
+    /// Record-level citations of persons and families on a synthetic `EVEN`.
+    RecordCitationsOnEvent(&'static str),
+    /// A source's `ABBR` as its title when it has none; `PUBL`, `TEXT`,
+    /// `ABBR` in its note.
+    SourceFieldsAsNote,
+    /// A repository's contact details in its note.
+    RepositoryContactsAsNote,
+    /// `_FREL` and `_MREL` under `FAM.CHIL`, from the child's `PEDI`.
+    ParentRelations,
+    /// `_PHOTO @O@` for the preferred image.
+    Photo,
+    /// These flags on the preferred multimedia link (the first), and with
+    /// `true` a `_TYPE PHOTO|OTHER` on each link.
+    Preferred(&'static [&'static str], bool),
+    /// `NPFX` as a title of the person; a suffix in the name value.
+    PrefixAsTitle,
+    /// Name values made complete from their pieces; pieces that disagree
+    /// with the value in a note.
+    NameValueComplete,
+    /// The usual given name (`_RUFNAME`, `_USED`) as a nickname.
+    UsualNameAsNick,
+    /// The usual given name as a note.
+    UsualNameAsNote,
+    /// These identifiers as a labelled note.
+    IdentifiersAsNote(&'static [&'static str]),
+    /// An interpreted date's phrase in the event's note.
+    InterpretedDatesAsNote,
+    /// No line break in the header.
+    FlatHead,
+    /// `_UID` in the PAF form: 32 hexadecimal digits and a checksum.
+    PafUids,
+    /// These tags written as these others (`SDATE` as `_SDATE`).
+    Retag(&'static [(&'static str, &'static str)]),
+    /// `NO MARR` as `_STAT Never Married` (Legacy).
+    MarriageStatus,
+    /// Citations under notes moved to the note's structure.
+    NoteSourcesLifted,
+    /// One `EMAIL` (and `WWW` with it) and one `PHON` (and `FAX` with it).
+    ContactsJoined,
+    /// `FAX` as `PHON`.
+    FaxAsPhone,
+    /// The home person first.
+    HomeFirst,
+    /// A note on facts that have no date, place or note (Ancestry drops
+    /// them).
+    BareFactsNoted,
+    /// The other names in one `_AKA` under the primary name (PAF).
+    NamesInAka,
+    /// Every name with surname slashes.
+    NamesWithSlashes,
+    /// Record identifiers of at most this many characters.
+    ShortXrefs(usize),
+    /// Report records without an identifier (dropped by the importer).
+    XreflessRecords,
+    /// One place per event: the others as notes.
+    OnePlace,
+    /// A citation's `REFN` moved to its source record.
+    CitationRefnToSource,
+    /// PACS as `MARR` + `TYPE Civil Union`, `NO MARR` as `MARR` + `TYPE
+    /// Unmarried` (Gramps).
+    UnionsAsMarriage,
+    /// A free `_GODP` beside each baptism's godparents (Ahnenblatt).
+    GodparentText,
+    /// `SEX U` for a person whose sex is not said in the target (none, or
+    /// one 5.5.1 lacks such as `X`): `GeneWeb` reads no `SEX` as unknown.
+    SexSaid,
+}
+
+/// A place format.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PlaceStyle {
+    /// Geneanet: `[sub] - Town, Area code, County, Region, Country`.
+    Geneanet,
+    /// Heredis: `Town, Area code, County, Region, Country, Subdivision`.
+    Heredis,
+}
+
+impl PlaceStyle {
+    /// The format, as `HEAD.PLAC.FORM` says it.
+    fn form(self) -> &'static str {
+        match self {
+            PlaceStyle::Geneanet => "Town, Area code, County, Region, Country",
+            PlaceStyle::Heredis => "Town, Area code, County, Region, Country, Subdivision",
+        }
+    }
+
+    /// Whether a place follows the format: its jurisdictions, with
+    /// Geneanet's `[subdivision] - ` before them.
+    fn fits(self, place: &str) -> bool {
+        let place = match self {
+            PlaceStyle::Geneanet if place.trim_start().starts_with('[') => {
+                place.split_once("] - ").map_or(place, |(_, rest)| rest)
+            }
+            _ => place,
+        };
+        place.split(',').count() == self.form().split(',').count()
+    }
+}
+
+/// Writes datasets for an importer: see the [`profile` documentation](crate::profile).
+///
+/// ```rust
+/// use ged_io::profile::{Exporter, ExportOptions};
+/// use ged_io::Dataset;
+///
+/// let data = Dataset::parse(
+///     "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 NAME Ann /Example/\n\
+///      1 OBJE @M1@\n0 @M1@ OBJE\n1 FILE photo.jpg\n2 FORM image/jpeg\n0 TRLR\n",
+/// );
+/// let exporter = Exporter::named("ancestry").unwrap().options(ExportOptions {
+///     omit_media: true,
+///     ..ExportOptions::default()
+/// });
+/// let (text, report) = exporter.write_to_string(&data).unwrap();
+/// assert!(!text.contains("OBJE"));
+/// assert!(report.lossy().any(|f| f.rows.contains(&"EXC-002")));
+/// ```
+#[derive(Clone, Debug)]
+pub struct Exporter {
+    profile: &'static ExportProfile,
+    options: ExportOptions,
+}
+
+impl Exporter {
+    /// An exporter for `profile`.
+    #[must_use]
+    pub fn new(profile: &'static ExportProfile) -> Self {
+        Self {
+            profile,
+            options: ExportOptions::default(),
+        }
+    }
+
+    /// An exporter for the profile named `id` ([`super::export_profile`]).
+    #[must_use]
+    pub fn named(id: &str) -> Option<Self> {
+        super::export_profile(id).map(Self::new)
+    }
+
+    /// Sets the options.
+    #[must_use]
+    pub fn options(mut self, options: ExportOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    /// The profile.
+    #[must_use]
+    pub fn profile(&self) -> &'static ExportProfile {
+        self.profile
+    }
+
+    fn version(&self) -> GedcomVersion {
+        self.options.version.unwrap_or(self.profile.target.version)
+    }
+
+    fn writer(&self) -> GedcomWriter {
+        let t = &self.profile.target;
+        GedcomWriter::new()
+            .gedcom_version(self.version())
+            .line_ending(t.line_ending)
+            .max_line_length(t.max_line_length)
+            .bom(if t.bom { Bom::Always } else { Bom::Never })
+            .output_encoding(t.encoding)
+    }
+
+    /// The records the profile writes for `data`, before the writer's
+    /// conformance repair, and what was folded.
+    #[must_use]
+    pub fn structures(&self, data: &Dataset) -> (Vec<Structure>, ExportReport) {
+        let (records, report) = self.folded(data);
+        (Self::typed(records).to_structures(), report)
+    }
+
+    /// The records the profile writes for `data`, in the order the folds
+    /// leave them, and what was folded.
+    fn folded(&self, data: &Dataset) -> (Vec<Structure>, ExportReport) {
+        let to = self.version();
+        let mut records = data.to_structures();
+        let options = ConversionOptions::default();
+        convert_structures(&mut records, data.version(), to, &options);
+        if to.is_v7() && !data.version().is_v7() {
+            if let Some(producer) = data.producer() {
+                let rules = super::RuleSet::of(producer, data.interpretation());
+                super::interpret::interpret_with(&mut records, to, &rules);
+            }
+        }
+        let mut cx = Cx {
+            v7: to.is_v7(),
+            report: ExportReport::default(),
+            options: &self.options,
+            target: &self.profile.target,
+            next_xref: 0,
+            place_style: None,
+        };
+        own_source(&mut records, &mut cx);
+        if self.options.omit_private {
+            omit_private(&mut records, &mut cx);
+        }
+        if self.options.omit_media {
+            omit_media(&mut records, &mut cx);
+        }
+        if self.options.omit_change_dates {
+            omit_change_dates(&mut records, &mut cx);
+        }
+        // Steps in three rounds: the folds; then, once conformance has made
+        // extensions of what the target has no place for, the extension
+        // folds; last the notes, which the folds before write to.
+        let round = |s: &Step| match s.fold {
+            Op::ExtensionsAsNotes | Op::ExtensionsAsEvents | Op::SexSaid => 1,
+            Op::EscapedNotes | Op::PlainNotes => 2,
+            _ => 0,
+        };
+        for step in self.profile.steps.iter().filter(|s| round(s) == 0) {
+            run(step, &mut records, &mut cx);
+        }
+        let later: Vec<&Step> = self
+            .profile
+            .steps
+            .iter()
+            .filter(|s| round(s) == 1)
+            .collect();
+        if !later.is_empty() {
+            let repairs = crate::spec::conform(&mut records, to);
+            cx.report.repairs.extend(repairs);
+            for step in later {
+                run(step, &mut records, &mut cx);
+            }
+        }
+        for step in self.profile.steps.iter().filter(|s| round(s) == 2) {
+            run(step, &mut records, &mut cx);
+        }
+        media_paths(&mut records, &mut cx);
+        if let Some(style) = cx.place_style {
+            // As the writer repairs them: the places of what conformance
+            // makes extensions are not the format's.
+            let repairs = crate::spec::conform(&mut records, to);
+            cx.report.repairs.extend(repairs);
+            place_form(&mut records, style);
+        }
+        (records, cx.report)
+    }
+
+    /// Records typed again, so that the writer writes them in the model's
+    /// order (what reading the output back gives): exporting is
+    /// idempotent.
+    fn typed(records: Vec<Structure>) -> Dataset {
+        // `@` escaped as the header says: the version the text is read in
+        // (the writer converts to the target's).
+        let version = records
+            .iter()
+            .find(|r| is(r, "HEAD"))
+            .and_then(|h| child(h, "GEDC"))
+            .and_then(|g| child_text(g, "VERS"))
+            .map_or(GedcomVersion::V5_5_1, GedcomVersion::from_version_str);
+        let mut text = String::new();
+        for r in records {
+            r.write_gedcom(&mut text, 0, version);
+        }
+        Dataset::parse(text)
+    }
+
+    /// The dataset to write for `data`, and the report so far (what was
+    /// folded, the limits but the size).
+    fn prepared(&self, data: &Dataset) -> (Dataset, ExportReport) {
+        let (records, mut report) = self.folded(data);
+        self.limits(&records, &mut report);
+        (Self::typed(records), report)
+    }
+
+    /// Writes `data` for the importer to `writer`.
+    ///
+    /// # Errors
+    ///
+    /// As [`GedcomWriter::write`].
+    pub fn write<W: io::Write>(
+        &self,
+        writer: W,
+        data: &Dataset,
+    ) -> Result<ExportReport, WriteError> {
+        let (typed, mut report) = self.prepared(data);
+        let mut counter = Counter {
+            inner: writer,
+            bytes: 0,
+        };
+        let written = self.writer().write(&mut counter, &typed)?;
+        report.repairs.extend(written.repairs);
+        self.size_limit(counter.bytes, &mut report);
+        Ok(report)
+    }
+
+    /// Writes `data` for the importer as text (UTF-8, whatever the
+    /// profile's encoding; a byte order mark only when the profile writes
+    /// one).
+    ///
+    /// # Errors
+    ///
+    /// As [`GedcomWriter::write_to_string`].
+    pub fn write_to_string(&self, data: &Dataset) -> Result<(String, ExportReport), WriteError> {
+        let (typed, mut report) = self.prepared(data);
+        let mut bytes = Vec::new();
+        let written = self
+            .writer()
+            .output_encoding(OutputEncoding::Utf8)
+            .write(&mut bytes, &typed)?;
+        drop(typed);
+        report.repairs.extend(written.repairs);
+        self.size_limit(bytes.len() as u64, &mut report);
+        let text = String::from_utf8(bytes)
+            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+        Ok((text, report))
+    }
+
+    /// The importer's limit on the file's size, first among the limits.
+    fn size_limit(&self, bytes: u64, report: &mut ExportReport) {
+        let t = &self.profile.target;
+        if let Some(max) = t.max_bytes {
+            if bytes > max {
+                report.limits.insert(
+                    0,
+                    Limit {
+                        rows: t.rows,
+                        record: None,
+                        detail: format!("{bytes} bytes, over the importer's {max}"),
+                    },
+                );
+            }
+        }
+    }
+
+    /// The importer's limits on the records.
+    fn limits(&self, records: &[Structure], report: &mut ExportReport) {
+        let t = &self.profile.target;
+        if let Some(max) = t.max_individuals {
+            let n = records.iter().filter(|r| is(r, "INDI")).count();
+            if n > max {
+                report.limits.push(Limit {
+                    rows: t.rows,
+                    record: None,
+                    detail: format!("{n} individuals, over the importer's {max}"),
+                });
+            }
+        }
+        if let Some(max) = t.max_depth {
+            for r in records {
+                let depth = depth(r);
+                if depth > max {
+                    report.limits.push(Limit {
+                        rows: t.rows,
+                        record: r.xref.clone(),
+                        detail: format!(
+                            "structures {depth} levels deep, over the importer's {max}"
+                        ),
+                    });
+                }
+            }
+        }
+        if let Some(max) = t.max_name {
+            for r in records.iter().filter(|r| is(r, "INDI")) {
+                for n in r.substructures.iter().filter(|n| is(n, "NAME")) {
+                    let len = payload_str(n).chars().count();
+                    if len > max {
+                        report.limits.push(Limit {
+                            rows: t.rows,
+                            record: r.xref.clone(),
+                            detail: format!(
+                                "a name of {len} characters, over the importer's {max}"
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+        if let Some(max) = t.max_children {
+            for r in records.iter().filter(|r| is(r, "FAM")) {
+                let n = r.substructures.iter().filter(|c| is(c, "CHIL")).count();
+                if n > max {
+                    report.limits.push(Limit {
+                        rows: t.rows,
+                        record: r.xref.clone(),
+                        detail: format!("{n} children, over the importer's {max}"),
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// Counts the bytes written.
+struct Counter<W> {
+    inner: W,
+    bytes: u64,
+}
+
+impl<W: io::Write> io::Write for Counter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.bytes += n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+fn depth(s: &Structure) -> usize {
+    s.substructures
+        .iter()
+        .map(|c| 1 + depth(c))
+        .max()
+        .unwrap_or(0)
+}
+
+/// The state of an export.
+struct Cx<'a> {
+    v7: bool,
+    report: ExportReport,
+    options: &'a ExportOptions,
+    target: &'a Target,
+    next_xref: u32,
+    /// The places' format to name in the header ([`place_form`]).
+    place_style: Option<PlaceStyle>,
+}
+
+impl Cx<'_> {
+    fn fold(
+        &mut self,
+        rows: &'static [&'static str],
+        kind: FoldKind,
+        lossy: bool,
+        record: Option<&Xref>,
+        detail: impl Into<String>,
+    ) {
+        self.report.folds.push(Fold {
+            rows,
+            kind,
+            lossy,
+            record: record.cloned(),
+            detail: detail.into(),
+        });
+    }
+
+    fn limit(
+        &mut self,
+        rows: &'static [&'static str],
+        record: Option<&Xref>,
+        detail: impl Into<String>,
+    ) {
+        self.report.limits.push(Limit {
+            rows,
+            record: record.cloned(),
+            detail: detail.into(),
+        });
+    }
+}
+
+/// The 5.5.1 and 7.x events that say `Y` when nothing more is known.
+const Y_EVENTS: &[&str] = &[
+    "ADOP", "ANUL", "BAPM", "BARM", "BASM", "BIRT", "BLES", "BURI", "CENS", "CHR", "CHRA", "CONF",
+    "CREM", "DEAT", "DIV", "DIVF", "EMIG", "ENGA", "FCOM", "GRAD", "IMMI", "MARB", "MARC", "MARL",
+    "MARR", "MARS", "NATU", "ORDN", "PROB", "RETI", "WILL",
+];
+
+/// Whether `tag` is an event or attribute of a person or family.
+fn is_event(tag: &str) -> bool {
+    Y_EVENTS.contains(&tag)
+        || matches!(
+            tag,
+            "EVEN"
+                | "FACT"
+                | "OCCU"
+                | "RESI"
+                | "EDUC"
+                | "RELI"
+                | "NATI"
+                | "TITL"
+                | "DSCR"
+                | "PROP"
+                | "CAST"
+                | "IDNO"
+                | "NCHI"
+                | "NMR"
+                | "SSN"
+        )
+}
+
+/// The tags of family events that say a union.
+const UNION_EVENTS: &[&str] = &[
+    "MARR", "ENGA", "MARB", "MARC", "MARL", "MARS", "DIV", "DIVF", "ANUL",
+];
+
+/// The records, indexed by identifier.
+/// What the folds read of other records, and where each is: the records,
+/// a person or a family only with what the folds read of them (names
+/// without their parts, sex, family links), which keeps the copy small.
+fn lookup(records: &[Structure]) -> (Vec<Structure>, HashMap<String, usize>) {
+    let shallow = |s: &Structure| Structure {
+        tag: s.tag.clone(),
+        xref: s.xref.clone(),
+        payload: s.payload.clone(),
+        substructures: Vec::new(),
+        line: s.line,
+    };
+    let slim: Vec<Structure> = records
+        .iter()
+        .map(|r| {
+            if !(is(r, "INDI") || is(r, "FAM")) {
+                return r.clone();
+            }
+            let mut out = shallow(r);
+            out.substructures = r
+                .substructures
+                .iter()
+                .filter_map(|c| match c.tag.as_str() {
+                    "NAME" => Some(shallow(c)),
+                    "SEX" | "FAMC" | "FAMS" | "HUSB" | "WIFE" | "CHIL" => Some(c.clone()),
+                    _ => None,
+                })
+                .collect();
+            out
+        })
+        .collect();
+    let idx = index(&slim);
+    (slim, idx)
+}
+
+fn index(records: &[Structure]) -> HashMap<String, usize> {
+    records
+        .iter()
+        .enumerate()
+        .filter_map(|(i, r)| r.xref.as_ref().map(|x| (x.as_str().to_string(), i)))
+        .collect()
+}
+
+/// A person's name for text: the first name, slashes out.
+fn person_name(records: &[Structure], idx: &HashMap<String, usize>, x: &str) -> Option<String> {
+    let r = records.get(*idx.get(x)?)?;
+    let name = child_text(r, "NAME")?;
+    Some(
+        name.replace('/', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+fn person_sex(records: &[Structure], idx: &HashMap<String, usize>, x: &str) -> Option<String> {
+    let r = records.get(*idx.get(x)?)?;
+    child_text(r, "SEX").map(|s| s.trim().to_ascii_uppercase())
+}
+
+/// Whether `s` has nothing but a payload.
+fn bare(s: &Structure) -> bool {
+    s.substructures.is_empty()
+}
+
+#[allow(clippy::too_many_lines)]
+fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
+    let rows = step.rows;
+    match step.fold {
+        Op::OccupationsMerged => {
+            for r in records.iter_mut().filter(|r| is(r, "INDI")) {
+                let plain: Vec<usize> = r
+                    .substructures
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, c)| is(c, "OCCU") && bare(c) && !payload_str(c).trim().is_empty())
+                    .map(|(i, _)| i)
+                    .collect();
+                if plain.len() < 2 {
+                    continue;
+                }
+                let joined: Vec<String> = plain
+                    .iter()
+                    .filter_map(|&i| {
+                        r.substructures
+                            .get(i)
+                            .map(|c| payload_str(c).trim().to_string())
+                    })
+                    .collect();
+                let first = plain.first().copied().unwrap_or(0);
+                if let Some(c) = r.substructures.get_mut(first) {
+                    set_text(c, &joined.join(", "));
+                }
+                for &i in plain.iter().skip(1).rev() {
+                    r.substructures.remove(i);
+                }
+                let x = r.xref.clone();
+                cx.fold(
+                    rows,
+                    FoldKind::Merged,
+                    true,
+                    x.as_ref(),
+                    format!("{} occupations made one", plain.len()),
+                );
+            }
+        }
+        Op::ProfessionFacts => {
+            for r in records.iter_mut().filter(|r| is(r, "INDI")) {
+                let x = r.xref.clone();
+                for c in r.substructures.iter_mut().filter(|c| is(c, "FACT")) {
+                    let ty = child_text(c, "TYPE").map(|t| t.trim().to_ascii_lowercase());
+                    if ty.as_deref().is_some_and(|t| {
+                        matches!(t, "profession" | "occupation" | "métier" | "metier" | "job")
+                    }) {
+                        retag(c, "OCCU");
+                        c.substructures.retain(|s| !is(s, "TYPE"));
+                        cx.fold(
+                            rows,
+                            FoldKind::Relabelled,
+                            false,
+                            x.as_ref(),
+                            "a profession fact as an occupation",
+                        );
+                    }
+                }
+            }
+        }
+        Op::SurnamesPacked => {
+            for r in records.iter_mut().filter(|r| is(r, "INDI")) {
+                let names: Vec<usize> = r
+                    .substructures
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, c)| is(c, "NAME"))
+                    .map(|(i, _)| i)
+                    .collect();
+                let Some((&first, others)) = names.split_first() else {
+                    continue;
+                };
+                let Some(primary) = r.substructures.get(first).cloned() else {
+                    continue;
+                };
+                let value = payload_str(&primary).to_string();
+                let Some(main) = surname_part(&value).map(str::to_string) else {
+                    continue;
+                };
+                let given = given_part(&value).to_string();
+                let mut list: Vec<String> = child_text(&primary, "SURN").map_or_else(
+                    || vec![main.clone()],
+                    |s| s.split(',').map(|p| p.trim().to_string()).collect(),
+                );
+                let mut packed = Vec::new();
+                for &i in others {
+                    let Some(n) = r.substructures.get(i) else {
+                        continue;
+                    };
+                    let v = payload_str(n);
+                    let (Some(s), g) = (surname_part(v), given_part(v)) else {
+                        continue;
+                    };
+                    if (g.is_empty() || g == given)
+                        && !s.is_empty()
+                        && !s.eq_ignore_ascii_case(&main)
+                    {
+                        if !list.iter().any(|l| l.eq_ignore_ascii_case(s)) {
+                            list.push(s.to_string());
+                        }
+                        packed.push(i);
+                    }
+                }
+                if packed.is_empty() {
+                    continue;
+                }
+                let x = r.xref.clone();
+                for &i in packed.iter().rev() {
+                    r.substructures.remove(i);
+                }
+                if let Some(p) = r.substructures.get_mut(first) {
+                    let surn = list.join(",");
+                    match child_mut(p, "SURN") {
+                        Some(s) => set_text(s, &surn),
+                        None => p.substructures.push(text_node("SURN", &surn)),
+                    }
+                }
+                cx.fold(
+                    rows,
+                    FoldKind::Merged,
+                    true,
+                    x.as_ref(),
+                    format!(
+                        "{} surname-only names in the primary SURN list",
+                        packed.len()
+                    ),
+                );
+            }
+        }
+        Op::ParticleInSurname => {
+            for r in records.iter_mut().filter(|r| is(r, "INDI")) {
+                let x = r.xref.clone();
+                for n in r.substructures.iter_mut().filter(|c| is(c, "NAME")) {
+                    let (Some(spfx), Some(surn)) = (
+                        child_text(n, "SPFX").map(str::to_string),
+                        child_text(n, "SURN").map(str::to_string),
+                    ) else {
+                        continue;
+                    };
+                    let value = payload_str(n).to_string();
+                    let Some(current) = surname_part(&value) else {
+                        continue;
+                    };
+                    let wanted = format!("{} {}", spfx.trim(), surn.trim());
+                    if current.trim() == surn.trim() && current.trim() != wanted {
+                        let new = name_value(given_part(&value), &wanted, suffix_part(&value));
+                        set_text(n, &new);
+                        cx.fold(
+                            rows,
+                            FoldKind::Recoded,
+                            false,
+                            x.as_ref(),
+                            "the surname prefix inside the slashes",
+                        );
+                    }
+                }
+            }
+        }
+        Op::NicknamesJoined => {
+            for r in records.iter_mut().filter(|r| is(r, "INDI")) {
+                let mut nicks = Vec::new();
+                for n in r.substructures.iter_mut().filter(|c| is(c, "NAME")) {
+                    for k in n.substructures.iter().filter(|s| is(s, "NICK")) {
+                        let v = payload_str(k).trim().to_string();
+                        if !v.is_empty() && !nicks.contains(&v) {
+                            nicks.push(v);
+                        }
+                    }
+                }
+                let count = r
+                    .substructures
+                    .iter()
+                    .filter(|c| is(c, "NAME"))
+                    .map(|n| n.substructures.iter().filter(|s| is(s, "NICK")).count())
+                    .sum::<usize>();
+                let first_has_one = r
+                    .substructures
+                    .iter()
+                    .find(|c| is(c, "NAME"))
+                    .is_some_and(|n| n.substructures.iter().filter(|s| is(s, "NICK")).count() == 1);
+                if count <= 1 && (count == 0 || first_has_one) {
+                    continue;
+                }
+                let mut first = true;
+                for n in r.substructures.iter_mut().filter(|c| is(c, "NAME")) {
+                    n.substructures.retain(|s| !is(s, "NICK"));
+                    if first {
+                        n.substructures.push(text_node("NICK", &nicks.join(", ")));
+                        first = false;
+                    }
+                }
+                let x = r.xref.clone();
+                cx.fold(
+                    rows,
+                    FoldKind::Merged,
+                    count > 1,
+                    x.as_ref(),
+                    format!("{count} nicknames in one NICK of the primary name"),
+                );
+            }
+        }
+        Op::UsualNameQuoted => {
+            for r in records.iter_mut().filter(|r| is(r, "INDI")) {
+                let x = r.xref.clone();
+                for n in r.substructures.iter_mut().filter(|c| is(c, "NAME")) {
+                    let Some(at) = n
+                        .substructures
+                        .iter()
+                        .position(|s| is(s, "_RUFNAME") || is(s, "_USED"))
+                    else {
+                        continue;
+                    };
+                    let used = n
+                        .substructures
+                        .get(at)
+                        .map(|s| payload_str(s).trim().to_string())
+                        .unwrap_or_default();
+                    let value = payload_str(n).to_string();
+                    let given = given_part(&value);
+                    if used.is_empty()
+                        || given.contains('"')
+                        || !given.split_whitespace().any(|w| w == used)
+                    {
+                        continue;
+                    }
+                    let quoted: Vec<String> = given
+                        .split_whitespace()
+                        .map(|w| {
+                            if w == used {
+                                format!("\"{w}\"")
+                            } else {
+                                w.to_string()
+                            }
+                        })
+                        .collect();
+                    let new = match surname_part(&value) {
+                        Some(s) => name_value(&quoted.join(" "), s, suffix_part(&value)),
+                        None => quoted.join(" "),
+                    };
+                    set_text(n, &new);
+                    n.substructures.remove(at);
+                    cx.fold(
+                        rows,
+                        FoldKind::Recoded,
+                        false,
+                        x.as_ref(),
+                        "the usual given name in double quotes",
+                    );
+                }
+            }
+        }
+        Op::NoColonInNames => {
+            for r in records.iter_mut().filter(|r| is(r, "INDI")) {
+                let x = r.xref.clone();
+                for n in r.substructures.iter_mut().filter(|c| is(c, "NAME")) {
+                    let mut changed = false;
+                    fix_colons(n, &mut changed);
+                    if changed {
+                        cx.fold(
+                            rows,
+                            FoldKind::Recoded,
+                            true,
+                            x.as_ref(),
+                            "':' left out of a name",
+                        );
+                    }
+                }
+            }
+        }
+        Op::EventsSaidY => {
+            // 5.5.1 says `Y` for these four only (7.x for every event).
+            let v7 = cx.v7;
+            for r in records.iter_mut().filter(|r| is(r, "INDI") || is(r, "FAM")) {
+                let x = r.xref.clone();
+                for e in &mut r.substructures {
+                    let said = if v7 {
+                        Y_EVENTS.contains(&e.tag.as_str())
+                    } else {
+                        matches!(e.tag.as_str(), "BIRT" | "CHR" | "DEAT" | "MARR")
+                    };
+                    if said && bare(e) && matches!(e.payload, Payload::None) {
+                        set_text(e, "Y");
+                        cx.fold(
+                            rows,
+                            FoldKind::Recoded,
+                            false,
+                            x.as_ref(),
+                            format!("{} said Y", e.tag),
+                        );
+                    }
+                }
+            }
+        }
+        Op::DeathSaidY => {
+            for r in records.iter_mut().filter(|r| is(r, "INDI")) {
+                if has(r, "DEAT") || !(has(r, "BURI") || has(r, "CREM")) {
+                    continue;
+                }
+                let at = r
+                    .substructures
+                    .iter()
+                    .position(|c| is(c, "BURI") || is(c, "CREM"))
+                    .unwrap_or(r.substructures.len());
+                r.substructures.insert(at, text_node("DEAT", "Y"));
+                let x = r.xref.clone();
+                cx.fold(
+                    rows,
+                    FoldKind::Added,
+                    false,
+                    x.as_ref(),
+                    "a death said Y for a person buried or cremated",
+                );
+            }
+        }
+        Op::OneBaptism => {
+            for r in records
+                .iter()
+                .filter(|r| is(r, "INDI") && has(r, "BAPM") && has(r, "CHR"))
+            {
+                let x = r.xref.clone();
+                cx.limit(
+                    rows,
+                    x.as_ref(),
+                    "a baptism and a christening: the importer reads one",
+                );
+            }
+        }
+        Op::AsEven(map) => {
+            // The names of the persons pointers name, when one does.
+            let pointed = records
+                .iter()
+                .filter(|r| is(r, "INDI") || is(r, "FAM"))
+                .flat_map(|r| &r.substructures)
+                .any(|c| {
+                    matches!(c.payload, Payload::Pointer(_))
+                        && map.iter().any(|(t, _)| *t == c.tag.as_str())
+                });
+            let names: HashMap<String, String> = if pointed {
+                let idx = index(records);
+                idx.keys()
+                    .filter_map(|x| person_name(records, &idx, x).map(|n| (x.clone(), n)))
+                    .collect()
+            } else {
+                HashMap::new()
+            };
+            for r in records.iter_mut().filter(|r| is(r, "INDI") || is(r, "FAM")) {
+                let x = r.xref.clone();
+                for c in &mut r.substructures {
+                    let Some(&(_, label)) = map.iter().find(|(t, _)| *t == c.tag.as_str()) else {
+                        continue;
+                    };
+                    let tag = c.tag.as_str().to_string();
+                    let value = match &c.payload {
+                        Payload::Pointer(p) => names
+                            .get(p.as_str())
+                            .cloned()
+                            .unwrap_or_else(|| p.as_str().to_string()),
+                        Payload::Text(t)
+                            if Y_EVENTS.contains(&tag.as_str())
+                                && t.trim().eq_ignore_ascii_case("y") =>
+                        {
+                            String::new()
+                        }
+                        p => p.as_str().unwrap_or_default().to_string(),
+                    };
+                    retag(c, "EVEN");
+                    set_text(c, value.trim());
+                    // The label, and the kind the attribute had, if any.
+                    match child_mut(c, "TYPE") {
+                        Some(t) => {
+                            let kind = format!("{label} ({})", payload_str(t).trim());
+                            set_text(t, &kind);
+                        }
+                        None => c.substructures.insert(0, text_node("TYPE", label)),
+                    }
+                    cx.fold(
+                        rows,
+                        FoldKind::Relabelled,
+                        true,
+                        x.as_ref(),
+                        format!("{tag} as EVEN + TYPE {label}"),
+                    );
+                }
+            }
+        }
+        Op::AsFact(map) => {
+            for r in records.iter_mut().filter(|r| is(r, "INDI") || is(r, "FAM")) {
+                let x = r.xref.clone();
+                let family = is(r, "FAM");
+                for c in &mut r.substructures {
+                    let Some(&(_, label)) = map.iter().find(|(t, _)| *t == c.tag.as_str()) else {
+                        continue;
+                    };
+                    let tag = c.tag.as_str().to_string();
+                    let to = if family || c.text().is_none() {
+                        "EVEN"
+                    } else {
+                        "FACT"
+                    };
+                    retag(c, to);
+                    if !has(c, "TYPE") {
+                        c.substructures.insert(0, text_node("TYPE", label));
+                    }
+                    cx.fold(
+                        rows,
+                        FoldKind::Relabelled,
+                        true,
+                        x.as_ref(),
+                        format!("{tag} as {to} + TYPE {label}"),
+                    );
+                }
+            }
+        }
+        Op::FactsAsEven => {
+            for r in records.iter_mut().filter(|r| is(r, "INDI") || is(r, "FAM")) {
+                let x = r.xref.clone();
+                for c in r.substructures.iter_mut().filter(|c| is(c, "FACT")) {
+                    retag(c, "EVEN");
+                    cx.fold(rows, FoldKind::Relabelled, true, x.as_ref(), "FACT as EVEN");
+                }
+            }
+        }
+        Op::UnionType => {
+            for r in records.iter_mut().filter(|r| is(r, "FAM")) {
+                let x = r.xref.clone();
+                let unmarried = |c: &Structure| {
+                    (is(c, "NO") && payload_str(c).trim() == "MARR")
+                        || (is(c, "_NO") && payload_str(c).trim() == "MARR")
+                        || is(c, "_NMR")
+                };
+                if let Some(at) = r.substructures.iter().position(unmarried) {
+                    let mut even = Structure::new("EVEN");
+                    even.substructures.push(text_node("TYPE", "unmarried"));
+                    if let Some(old) = r.substructures.get(at) {
+                        even.substructures.extend(
+                            old.substructures
+                                .iter()
+                                .filter(|s| !is(s, "PHRASE"))
+                                .cloned(),
+                        );
+                    }
+                    r.substructures.remove(at);
+                    r.substructures.insert(at, even);
+                    cx.fold(
+                        rows,
+                        FoldKind::Relabelled,
+                        false,
+                        x.as_ref(),
+                        "never married said as EVEN TYPE unmarried",
+                    );
+                    continue;
+                }
+                let said = r.substructures.iter().any(|c| {
+                    UNION_EVENTS.contains(&c.tag.as_str())
+                        || (is(c, "EVEN")
+                            && child_text(c, "TYPE").is_some_and(|t| {
+                                matches!(
+                                    t.trim().to_ascii_lowercase().as_str(),
+                                    "unmarried" | "nomen" | "pacs" | "relation"
+                                )
+                            }))
+                });
+                let couple = has(r, "HUSB") || has(r, "WIFE");
+                if !said && couple {
+                    let mut even = Structure::new("EVEN");
+                    even.substructures.push(text_node("TYPE", "nomen"));
+                    let at = r
+                        .substructures
+                        .iter()
+                        .position(|c| !matches!(c.tag.as_str(), "HUSB" | "WIFE" | "RESN"))
+                        .unwrap_or(r.substructures.len());
+                    r.substructures.insert(at, even);
+                    cx.fold(
+                        rows,
+                        FoldKind::Added,
+                        false,
+                        x.as_ref(),
+                        "an unknown union said as EVEN TYPE nomen",
+                    );
+                }
+            }
+        }
+        Op::EmptyPacs => {
+            for r in records.iter().filter(|r| is(r, "FAM")) {
+                for c in &r.substructures {
+                    if is(c, "EVEN")
+                        && child_text(c, "TYPE")
+                            .is_some_and(|t| t.trim().eq_ignore_ascii_case("pacs"))
+                        && c.substructures.iter().all(|s| is(s, "TYPE"))
+                    {
+                        let x = r.xref.clone();
+                        cx.limit(
+                            rows,
+                            x.as_ref(),
+                            "a PACS with no date, place or note, which the importer drops",
+                        );
+                    }
+                }
+            }
+        }
+        Op::Godparents => godparents(records, rows, cx),
+        Op::EventAssociations(style) => event_associations(records, rows, style, cx),
+        Op::Adoptions => {
+            let adopted = if cx.v7 { "ADOPTED" } else { "adopted" };
+            for r in records.iter_mut().filter(|r| is(r, "INDI")) {
+                let x = r.xref.clone();
+                let links: Vec<Xref> = r
+                    .substructures
+                    .iter()
+                    .filter(|c| {
+                        is(c, "FAMC")
+                            && child_text(c, "PEDI")
+                                .is_some_and(|p| p.trim().eq_ignore_ascii_case(adopted))
+                    })
+                    .filter_map(|c| c.pointer().cloned())
+                    .collect();
+                for family in links {
+                    let already = r.substructures.iter().any(|c| {
+                        is(c, "ADOP")
+                            && child(c, "FAMC").and_then(Structure::pointer) == Some(&family)
+                    });
+                    if already {
+                        continue;
+                    }
+                    let mut adop = Structure::new("ADOP");
+                    let mut famc = pointer_node("FAMC", &family);
+                    famc.substructures.push(text_node("ADOP", "BOTH"));
+                    adop.substructures.push(famc);
+                    r.substructures.push(adop);
+                    cx.fold(
+                        rows,
+                        FoldKind::Added,
+                        false,
+                        x.as_ref(),
+                        "an adoption as ADOP + FAMC + ADOP BOTH",
+                    );
+                }
+                // The birth family first.
+                let famcs: Vec<usize> = r
+                    .substructures
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, c)| is(c, "FAMC"))
+                    .map(|(i, _)| i)
+                    .collect();
+                let birth = famcs.iter().copied().find(|&i| {
+                    r.substructures.get(i).is_some_and(|c| {
+                        child_text(c, "PEDI").is_none_or(|p| p.trim().eq_ignore_ascii_case("birth"))
+                    })
+                });
+                if let (Some(&first), Some(birth)) = (famcs.first(), birth) {
+                    if birth != first {
+                        let moved = r.substructures.remove(birth);
+                        r.substructures.insert(first, moved);
+                        cx.fold(
+                            rows,
+                            FoldKind::Reordered,
+                            false,
+                            x.as_ref(),
+                            "the birth family first",
+                        );
+                    }
+                }
+            }
+        }
+        Op::InlineSources => inline_sources(records, rows, cx),
+        Op::SourceRecords => source_records(records, rows, cx),
+        Op::EscapedNotes => {
+            for r in records.iter_mut() {
+                let x = r.xref.clone();
+                let mut n = 0;
+                each_note(r, &mut |note| {
+                    // HTML already, which the importer reads as such.
+                    let before = note.substructures.len();
+                    note.substructures.retain(|m| {
+                        !(is(m, "MIME") && payload_str(m).trim().eq_ignore_ascii_case("text/html"))
+                    });
+                    if note.substructures.len() != before {
+                        n += 1;
+                    }
+                    if has(note, "MIME") {
+                        return;
+                    }
+                    if let Some(t) = note.text() {
+                        let escaped = escape_markup(t);
+                        if escaped != t {
+                            set_text(note, &escaped);
+                            n += 1;
+                        }
+                    }
+                });
+                if n > 0 {
+                    cx.fold(
+                        rows,
+                        FoldKind::Recoded,
+                        false,
+                        x.as_ref(),
+                        format!("{n} notes with < and & escaped"),
+                    );
+                }
+            }
+        }
+        Op::PlainNotes => {
+            for r in records.iter_mut() {
+                let x = r.xref.clone();
+                let mut n = 0;
+                each_note(r, &mut |note| {
+                    let html = has(note, "MIME") || note.text().is_some_and(looks_html);
+                    if !html {
+                        return;
+                    }
+                    if let Some(t) = note.text() {
+                        let plain = strip_html(t);
+                        set_text(note, &plain);
+                    }
+                    note.substructures.retain(|s| !is(s, "MIME"));
+                    n += 1;
+                });
+                if n > 0 {
+                    cx.fold(
+                        rows,
+                        FoldKind::Recoded,
+                        true,
+                        x.as_ref(),
+                        format!("{n} notes stripped of their markup"),
+                    );
+                }
+            }
+        }
+        Op::OneHeadNote => {
+            if let Some(head) = records.iter_mut().find(|r| is(r, "HEAD")) {
+                let notes: Vec<usize> = head
+                    .substructures
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, c)| is(c, "NOTE"))
+                    .map(|(i, _)| i)
+                    .collect();
+                if notes.len() > 1 {
+                    let text: Vec<String> = notes
+                        .iter()
+                        .filter_map(|&i| {
+                            head.substructures
+                                .get(i)
+                                .map(|n| payload_str(n).to_string())
+                        })
+                        .collect();
+                    if let Some(first) = notes.first().and_then(|&i| head.substructures.get_mut(i))
+                    {
+                        set_text(first, &text.join("\n"));
+                        first.substructures.clear();
+                    }
+                    for &i in notes.iter().skip(1).rev() {
+                        head.substructures.remove(i);
+                    }
+                    cx.fold(
+                        rows,
+                        FoldKind::Merged,
+                        true,
+                        None,
+                        format!("{} header notes made one", notes.len()),
+                    );
+                }
+            }
+        }
+        Op::ChildLinkSources => {
+            let (snapshot, idx) = lookup(records);
+            for r in records.iter_mut().filter(|r| is(r, "INDI")) {
+                let x = r.xref.clone();
+                let mut texts = Vec::new();
+                for famc in r.substructures.iter_mut().filter(|c| is(c, "FAMC")) {
+                    let sources: Vec<Structure> = famc
+                        .substructures
+                        .iter()
+                        .filter(|s| is(s, "SOUR"))
+                        .cloned()
+                        .collect();
+                    famc.substructures.retain(|s| !is(s, "SOUR"));
+                    for s in sources {
+                        texts.push(citation_text(&s, &snapshot, &idx));
+                    }
+                }
+                if !texts.is_empty() {
+                    let n = texts.len();
+                    r.substructures.push(text_node(
+                        "NOTE",
+                        &format!("Filiation source: {}", texts.join("; ")),
+                    ));
+                    cx.fold(
+                        rows,
+                        FoldKind::AsText,
+                        true,
+                        x.as_ref(),
+                        format!("{n} citations of a child link as a note"),
+                    );
+                }
+            }
+        }
+        Op::Places(style) => places(records, rows, style, cx),
+        Op::AddressesAsNotes | Op::AddressesInPlace => {
+            let in_place = matches!(step.fold, Op::AddressesInPlace);
+            for r in records.iter_mut().filter(|r| is(r, "INDI") || is(r, "FAM")) {
+                let x = r.xref.clone();
+                for e in &mut r.substructures {
+                    let Some(at) = e.substructures.iter().position(|s| is(s, "ADDR")) else {
+                        continue;
+                    };
+                    if !(Y_EVENTS.contains(&e.tag.as_str())
+                        || matches!(
+                            e.tag.as_str(),
+                            "EVEN" | "RESI" | "OCCU" | "FACT" | "EDUC" | "PROP"
+                        ))
+                    {
+                        continue;
+                    }
+                    let addr = e.substructures.remove(at);
+                    let text = address_text(&addr);
+                    if text.is_empty() {
+                        continue;
+                    }
+                    if in_place {
+                        match child_mut(e, "PLAC") {
+                            Some(p) => {
+                                let v = format!("{} at {text}", payload_str(p));
+                                set_text(p, v.trim());
+                            }
+                            None => e.substructures.push(text_node("PLAC", &text)),
+                        }
+                    } else {
+                        e.substructures
+                            .push(text_node("NOTE", &format!("Address: {text}")));
+                    }
+                    cx.fold(
+                        rows,
+                        FoldKind::AsText,
+                        true,
+                        x.as_ref(),
+                        format!("an address of {} as text", e.tag),
+                    );
+                }
+            }
+        }
+        Op::BadDates => {
+            for r in records.iter() {
+                let x = r.xref.clone();
+                let mut bad = Vec::new();
+                each_date(r, &mut |d| {
+                    if impossible_date(d) {
+                        bad.push(d.to_string());
+                    }
+                });
+                for d in bad {
+                    cx.limit(
+                        rows,
+                        x.as_ref(),
+                        format!("impossible date {d}: the importer keeps part of it"),
+                    );
+                }
+            }
+        }
+        Op::ExtensionsAsNotes => {
+            for r in records.iter_mut() {
+                let x = r.xref.clone();
+                let mut lost = Vec::new();
+                let _ = extensions_as_notes(r, &mut Vec::new(), &mut lost);
+                for (tag, kept) in lost {
+                    cx.fold(
+                        rows,
+                        if kept {
+                            FoldKind::AsText
+                        } else {
+                            FoldKind::Omitted
+                        },
+                        true,
+                        x.as_ref(),
+                        format!(
+                            "extension {tag} {}",
+                            if kept { "as a note" } else { "left out" }
+                        ),
+                    );
+                }
+            }
+        }
+        Op::ExtensionsAsEvents => {
+            for r in records.iter_mut().filter(|r| is(r, "INDI") || is(r, "FAM")) {
+                let x = r.xref.clone();
+                for c in &mut r.substructures {
+                    if !c.tag.is_extension() || c.pointer().is_some() {
+                        continue;
+                    }
+                    let tag = c.tag.as_str().to_string();
+                    retag(c, "EVEN");
+                    if !has(c, "TYPE") {
+                        c.substructures
+                            .insert(0, text_node("TYPE", tag.trim_start_matches('_')));
+                    }
+                    cx.fold(
+                        rows,
+                        FoldKind::Relabelled,
+                        true,
+                        x.as_ref(),
+                        format!("extension {tag} as EVEN"),
+                    );
+                }
+            }
+        }
+        Op::InlineMedia => inline_media(records, rows, cx),
+        Op::AssociationsAsEvents(name_in_payload) => {
+            associations_as_events(records, rows, name_in_payload, cx);
+        }
+        Op::FieldsAsNotes(fields) => {
+            for r in records.iter_mut().filter(|r| is(r, "INDI") || is(r, "FAM")) {
+                let x = r.xref.clone();
+                for e in r
+                    .substructures
+                    .iter_mut()
+                    .filter(|e| is_event(e.tag.as_str()))
+                {
+                    let mut notes = Vec::new();
+                    let mut k = 0;
+                    while k < e.substructures.len() {
+                        let label = e.substructures.get(k).and_then(|s| {
+                            fields
+                                .iter()
+                                .find(|(t, _)| *t == s.tag.as_str())
+                                .map(|&(_, l)| l)
+                        });
+                        if let Some(label) = label {
+                            let s = e.substructures.remove(k);
+                            notes.push(format!("{label}: {}", flatten(&s)));
+                            continue;
+                        }
+                        // HUSB/WIFE ages.
+                        if let Some(s) = e.substructures.get(k) {
+                            if matches!(s.tag.as_str(), "HUSB" | "WIFE")
+                                && fields.iter().any(|(t, _)| *t == "AGE")
+                            {
+                                if let Some(age) = child_text(s, "AGE") {
+                                    notes.push(format!(
+                                        "{} age: {age}",
+                                        if is(s, "HUSB") { "Husband" } else { "Wife" }
+                                    ));
+                                    e.substructures.remove(k);
+                                    continue;
+                                }
+                            }
+                        }
+                        k += 1;
+                    }
+                    if !notes.is_empty() {
+                        let n = notes.len();
+                        e.substructures.push(text_node("NOTE", &notes.join("\n")));
+                        cx.fold(
+                            rows,
+                            FoldKind::AsText,
+                            true,
+                            x.as_ref(),
+                            format!("{n} fields of {} in its note", e.tag),
+                        );
+                    }
+                }
+            }
+        }
+        Op::CausesAsNotes => {
+            for r in records.iter_mut().filter(|r| is(r, "INDI") || is(r, "FAM")) {
+                let x = r.xref.clone();
+                for e in r
+                    .substructures
+                    .iter_mut()
+                    .filter(|e| !is(e, "DEAT") && is_event(e.tag.as_str()))
+                {
+                    if let Some(at) = e.substructures.iter().position(|s| is(s, "CAUS")) {
+                        let c = e.substructures.remove(at);
+                        e.substructures
+                            .push(text_node("NOTE", &format!("Cause: {}", payload_str(&c))));
+                        cx.fold(
+                            rows,
+                            FoldKind::AsText,
+                            true,
+                            x.as_ref(),
+                            format!("the cause of {} in its note", e.tag),
+                        );
+                    }
+                }
+            }
+        }
+        Op::RecordNotesAsEvent(label) => {
+            for r in records.iter_mut().filter(|r| is(r, "INDI") || is(r, "FAM")) {
+                let x = r.xref.clone();
+                let notes: Vec<Structure> = r
+                    .substructures
+                    .iter()
+                    .filter(|c| is(c, "NOTE"))
+                    .cloned()
+                    .collect();
+                if notes.is_empty() {
+                    continue;
+                }
+                r.substructures.retain(|c| !is(c, "NOTE"));
+                let mut even = Structure::new("EVEN");
+                even.substructures.push(text_node("TYPE", label));
+                even.substructures.extend(notes);
+                r.substructures.push(even);
+                cx.fold(
+                    rows,
+                    FoldKind::Moved,
+                    true,
+                    x.as_ref(),
+                    format!("record notes on an EVEN TYPE {label}"),
+                );
+            }
+        }
+        Op::RecordCitationsOnEvent(label) => {
+            for r in records.iter_mut().filter(|r| is(r, "INDI") || is(r, "FAM")) {
+                let x = r.xref.clone();
+                let sources: Vec<Structure> = r
+                    .substructures
+                    .iter()
+                    .filter(|c| is(c, "SOUR"))
+                    .cloned()
+                    .collect();
+                if sources.is_empty() {
+                    continue;
+                }
+                r.substructures.retain(|c| !is(c, "SOUR"));
+                let mut even = Structure::new("EVEN");
+                even.substructures.push(text_node("TYPE", label));
+                even.substructures.extend(sources);
+                r.substructures.push(even);
+                cx.fold(
+                    rows,
+                    FoldKind::Moved,
+                    true,
+                    x.as_ref(),
+                    format!("record citations on an EVEN TYPE {label}"),
+                );
+            }
+        }
+        Op::SourceFieldsAsNote => {
+            for r in records.iter_mut().filter(|r| is(r, "SOUR")) {
+                let x = r.xref.clone();
+                if !has(r, "TITL") {
+                    if let Some(abbr) = child_text(r, "ABBR").map(str::to_string) {
+                        r.substructures.insert(0, text_node("TITL", &abbr));
+                    }
+                }
+                let mut lines = Vec::new();
+                for (tag, label) in [
+                    ("ABBR", "Abbreviation"),
+                    ("PUBL", "Publication"),
+                    ("TEXT", "Text"),
+                ] {
+                    while let Some(at) = r.substructures.iter().position(|c| is(c, tag)) {
+                        let c = r.substructures.remove(at);
+                        lines.push(format!("{label}: {}", payload_str(&c)));
+                    }
+                }
+                if !lines.is_empty() {
+                    r.substructures.push(text_node("NOTE", &lines.join("\n")));
+                    cx.fold(
+                        rows,
+                        FoldKind::AsText,
+                        true,
+                        x.as_ref(),
+                        "source fields in its note",
+                    );
+                }
+            }
+        }
+        Op::RepositoryContactsAsNote => {
+            for r in records.iter_mut().filter(|r| is(r, "REPO")) {
+                let x = r.xref.clone();
+                let mut lines = Vec::new();
+                for (tag, label) in [
+                    ("ADDR", "Address"),
+                    ("PHON", "Phone"),
+                    ("EMAIL", "Email"),
+                    ("FAX", "Fax"),
+                    ("WWW", "Web"),
+                    ("REFN", "Reference"),
+                ] {
+                    while let Some(at) = r.substructures.iter().position(|c| is(c, tag)) {
+                        let c = r.substructures.remove(at);
+                        let v = if tag == "ADDR" {
+                            address_text(&c)
+                        } else {
+                            payload_str(&c).to_string()
+                        };
+                        lines.push(format!("{label}: {v}"));
+                    }
+                }
+                if !lines.is_empty() {
+                    r.substructures.push(text_node("NOTE", &lines.join("\n")));
+                    cx.fold(
+                        rows,
+                        FoldKind::AsText,
+                        true,
+                        x.as_ref(),
+                        "repository contacts in its note",
+                    );
+                }
+            }
+        }
+        Op::ParentRelations => {
+            let (snapshot, idx) = lookup(records);
+            for f in records.iter_mut().filter(|r| is(r, "FAM")) {
+                let Some(fx) = f.xref.clone() else { continue };
+                for c in f.substructures.iter_mut().filter(|c| is(c, "CHIL")) {
+                    if has(c, "_FREL") || has(c, "_MREL") {
+                        continue;
+                    }
+                    let Some(child_x) = c.pointer().cloned() else {
+                        continue;
+                    };
+                    let pedi = idx
+                        .get(child_x.as_str())
+                        .and_then(|&i| snapshot.get(i))
+                        .and_then(|p| {
+                            p.substructures
+                                .iter()
+                                .find(|s| is(s, "FAMC") && s.pointer() == Some(&fx))
+                        })
+                        .and_then(|famc| child_text(famc, "PEDI"))
+                        .map(|p| p.trim().to_ascii_lowercase());
+                    let Some(word) = pedi.as_deref().map(|p| match p {
+                        "birth" => "Natural",
+                        "adopted" => "Adopted",
+                        "foster" => "Foster",
+                        "sealing" => "Sealing",
+                        _ => "Unknown",
+                    }) else {
+                        continue;
+                    };
+                    c.substructures.push(text_node("_FREL", word));
+                    c.substructures.push(text_node("_MREL", word));
+                    cx.fold(
+                        rows,
+                        FoldKind::Added,
+                        false,
+                        Some(&fx),
+                        "_FREL and _MREL beside the child's PEDI",
+                    );
+                }
+            }
+        }
+        Op::Photo => {
+            for r in records.iter_mut().filter(|r| is(r, "INDI")) {
+                if has(r, "_PHOTO") {
+                    continue;
+                }
+                let Some(first) = r
+                    .substructures
+                    .iter()
+                    .find(|c| is(c, "OBJE"))
+                    .and_then(|c| c.pointer().cloned())
+                else {
+                    continue;
+                };
+                r.substructures.push(pointer_node("_PHOTO", &first));
+                let x = r.xref.clone();
+                cx.fold(
+                    rows,
+                    FoldKind::Added,
+                    false,
+                    x.as_ref(),
+                    "_PHOTO for the preferred image",
+                );
+            }
+        }
+        Op::Preferred(flags, media_type) => {
+            let (snapshot, idx) = lookup(records);
+            for r in records.iter_mut().filter(|r| is(r, "INDI")) {
+                let x = r.xref.clone();
+                let mut first = true;
+                for o in r.substructures.iter_mut().filter(|c| is(c, "OBJE")) {
+                    if first {
+                        for flag in flags {
+                            if !has(o, flag) {
+                                o.substructures.push(text_node(flag, "Y"));
+                            }
+                        }
+                        first = false;
+                        if !flags.is_empty() {
+                            cx.fold(
+                                rows,
+                                FoldKind::Added,
+                                false,
+                                x.as_ref(),
+                                format!("{} on the preferred image", flags.join(", ")),
+                            );
+                        }
+                    }
+                    if media_type && !has(o, "_TYPE") {
+                        let form = media_form(o, &snapshot, &idx);
+                        let photo = form.is_some_and(|f| {
+                            let f = f.to_ascii_lowercase();
+                            f.starts_with("image/")
+                                || matches!(
+                                    f.as_str(),
+                                    "jpg" | "jpeg" | "png" | "gif" | "bmp" | "tif" | "tiff"
+                                )
+                        });
+                        o.substructures
+                            .push(text_node("_TYPE", if photo { "PHOTO" } else { "OTHER" }));
+                    }
+                }
+            }
+        }
+        Op::PrefixAsTitle => {
+            for r in records.iter_mut().filter(|r| is(r, "INDI")) {
+                let x = r.xref.clone();
+                let mut titles = Vec::new();
+                for n in r.substructures.iter_mut().filter(|c| is(c, "NAME")).take(1) {
+                    if let Some(at) = n.substructures.iter().position(|s| is(s, "NPFX")) {
+                        let p = n.substructures.remove(at);
+                        titles.push(payload_str(&p).trim().to_string());
+                    }
+                    if let Some(sfx) = child_text(n, "NSFX").map(str::to_string) {
+                        let value = payload_str(n).to_string();
+                        if suffix_part(&value).is_empty() {
+                            if let Some(s) = surname_part(&value) {
+                                let v = name_value(given_part(&value), s, sfx.trim());
+                                set_text(n, &v);
+                            }
+                        }
+                    }
+                }
+                for t in titles {
+                    if !r
+                        .substructures
+                        .iter()
+                        .any(|c| is(c, "TITL") && payload_str(c).trim() == t)
+                    {
+                        r.substructures.push(text_node("TITL", &t));
+                    }
+                    cx.fold(
+                        rows,
+                        FoldKind::Moved,
+                        true,
+                        x.as_ref(),
+                        "the name prefix as a title",
+                    );
+                }
+            }
+        }
+        Op::NameValueComplete => {
+            for r in records.iter_mut().filter(|r| is(r, "INDI")) {
+                let x = r.xref.clone();
+                let mut notes = Vec::new();
+                for n in r.substructures.iter_mut().filter(|c| is(c, "NAME")) {
+                    let value = payload_str(n).to_string();
+                    let givn = child_text(n, "GIVN").map(str::to_string);
+                    let surn = child_text(n, "SURN").map(str::to_string);
+                    if value.trim().is_empty() {
+                        let v = name_value(
+                            givn.as_deref().unwrap_or(""),
+                            surn.as_deref().unwrap_or(""),
+                            child_text(n, "NSFX").unwrap_or(""),
+                        );
+                        set_text(n, &v);
+                        cx.fold(
+                            rows,
+                            FoldKind::Recoded,
+                            false,
+                            x.as_ref(),
+                            "a name value made from its pieces",
+                        );
+                        continue;
+                    }
+                    let disagree = givn
+                        .as_deref()
+                        .is_some_and(|g| !given_part(&value).contains(g.trim()))
+                        || surn.as_deref().is_some_and(|s| {
+                            surname_part(&value).is_none_or(|v| {
+                                !v.contains(s.split(',').next().unwrap_or(s).trim())
+                            })
+                        });
+                    if disagree {
+                        let pieces: Vec<String> = n
+                            .substructures
+                            .iter()
+                            .filter(|s| matches!(s.tag.as_str(), "GIVN" | "SURN"))
+                            .map(|s| format!("{} {}", s.tag, payload_str(s)))
+                            .collect();
+                        n.substructures
+                            .retain(|s| !matches!(s.tag.as_str(), "GIVN" | "SURN"));
+                        notes.push(format!(
+                            "Name pieces of {}: {}",
+                            value.trim(),
+                            pieces.join(", ")
+                        ));
+                    }
+                }
+                for note in notes {
+                    r.substructures.push(text_node("NOTE", &note));
+                    cx.fold(
+                        rows,
+                        FoldKind::AsText,
+                        true,
+                        x.as_ref(),
+                        "name pieces that disagree with the name in a note",
+                    );
+                }
+            }
+        }
+        Op::UsualNameAsNick | Op::UsualNameAsNote => {
+            let as_nick = matches!(step.fold, Op::UsualNameAsNick);
+            for r in records.iter_mut().filter(|r| is(r, "INDI")) {
+                let x = r.xref.clone();
+                let mut notes = Vec::new();
+                for n in r.substructures.iter_mut().filter(|c| is(c, "NAME")) {
+                    while let Some(at) = n
+                        .substructures
+                        .iter()
+                        .position(|s| is(s, "_RUFNAME") || is(s, "_USED"))
+                    {
+                        let u = n.substructures.remove(at);
+                        let v = payload_str(&u).trim().to_string();
+                        if as_nick {
+                            match child_mut(n, "NICK") {
+                                Some(k) => {
+                                    let joined = format!("{}, {v}", payload_str(k));
+                                    set_text(k, &joined);
+                                }
+                                None => n.substructures.push(text_node("NICK", &v)),
+                            }
+                        } else {
+                            notes.push(format!("Given name used: {v}"));
+                        }
+                        cx.fold(
+                            rows,
+                            if as_nick {
+                                FoldKind::Merged
+                            } else {
+                                FoldKind::AsText
+                            },
+                            true,
+                            x.as_ref(),
+                            "the usual given name",
+                        );
+                    }
+                }
+                for note in notes {
+                    r.substructures.push(text_node("NOTE", &note));
+                }
+            }
+        }
+        Op::IdentifiersAsNote(tags) => {
+            for r in records.iter_mut() {
+                let x = r.xref.clone();
+                let mut lines = Vec::new();
+                for tag in tags {
+                    while let Some(at) = r.substructures.iter().position(|c| is(c, tag)) {
+                        let c = r.substructures.remove(at);
+                        let ty = child_text(&c, "TYPE")
+                            .map(|t| format!(" ({t})"))
+                            .unwrap_or_default();
+                        lines.push(format!("Custom Id: {}{ty}", payload_str(&c)));
+                    }
+                }
+                if !lines.is_empty() && !is(r, "HEAD") {
+                    r.substructures.push(text_node("NOTE", &lines.join("\n")));
+                    cx.fold(
+                        rows,
+                        FoldKind::AsText,
+                        true,
+                        x.as_ref(),
+                        "identifiers in a note",
+                    );
+                }
+            }
+        }
+        Op::InterpretedDatesAsNote => {
+            for r in records.iter_mut().filter(|r| is(r, "INDI") || is(r, "FAM")) {
+                let x = r.xref.clone();
+                for e in &mut r.substructures {
+                    let Some(d) = child_mut(e, "DATE") else {
+                        continue;
+                    };
+                    let v = payload_str(d).trim().to_string();
+                    let Some(rest) = v.strip_prefix("INT ") else {
+                        continue;
+                    };
+                    let Some((date, phrase)) = rest.split_once('(') else {
+                        continue;
+                    };
+                    let phrase = phrase.trim_end_matches(')').trim().to_string();
+                    set_text(d, date.trim());
+                    e.substructures.push(text_node("NOTE", &phrase));
+                    cx.fold(
+                        rows,
+                        FoldKind::AsText,
+                        true,
+                        x.as_ref(),
+                        "an interpreted date's phrase in the note",
+                    );
+                }
+            }
+        }
+        Op::FlatHead => {
+            if let Some(head) = records.iter_mut().find(|r| is(r, "HEAD")) {
+                let mut changed = false;
+                flatten_lines(head, &mut changed);
+                if changed {
+                    cx.fold(
+                        rows,
+                        FoldKind::Recoded,
+                        true,
+                        None,
+                        "line breaks in the header as spaces",
+                    );
+                }
+            }
+        }
+        Op::PafUids => {
+            for r in records.iter_mut() {
+                let x = r.xref.clone();
+                let mut n = 0;
+                let v7 = cx.v7;
+                for tag in ["UID", "_UID"] {
+                    each_tag(r, tag, &mut |u| {
+                        // 5.5.1 says it `_UID`.
+                        if !v7 {
+                            retag(u, "_UID");
+                        }
+                        if let Some(paf) = paf_uid(payload_str(u)) {
+                            set_text(u, &paf);
+                            n += 1;
+                        }
+                    });
+                }
+                if n > 0 {
+                    cx.fold(
+                        rows,
+                        FoldKind::Recoded,
+                        false,
+                        x.as_ref(),
+                        "_UID in the PAF form",
+                    );
+                }
+            }
+        }
+        Op::Retag(map) => {
+            for r in records.iter_mut() {
+                let x = r.xref.clone();
+                for &(from, to) in map {
+                    let mut n = 0;
+                    each_tag(r, from, &mut |s| {
+                        retag(s, to);
+                        n += 1;
+                    });
+                    if n > 0 {
+                        cx.fold(
+                            rows,
+                            FoldKind::Relabelled,
+                            false,
+                            x.as_ref(),
+                            format!("{from} as {to}"),
+                        );
+                    }
+                }
+            }
+        }
+        Op::MarriageStatus => {
+            for r in records.iter_mut().filter(|r| is(r, "FAM")) {
+                let x = r.xref.clone();
+                let never = |c: &Structure| {
+                    (is(c, "NO") || is(c, "_NO")) && payload_str(c).trim() == "MARR"
+                };
+                let mut k = 0;
+                let mut n = 0;
+                while k < r.substructures.len() {
+                    if !r.substructures.get(k).is_some_and(never) {
+                        k += 1;
+                        continue;
+                    }
+                    let stated = has(r, "_STAT");
+                    let empty = r.substructures.get(k).is_some_and(bare);
+                    if stated && empty {
+                        r.substructures.remove(k);
+                    } else if let Some(c) = r.substructures.get_mut(k) {
+                        // Its date, notes and citations stay with it.
+                        retag(c, "_STAT");
+                        set_text(c, "Never Married");
+                        k += 1;
+                    }
+                    n += 1;
+                }
+                if n > 0 {
+                    cx.fold(
+                        rows,
+                        FoldKind::Relabelled,
+                        false,
+                        x.as_ref(),
+                        "never married as _STAT Never Married",
+                    );
+                }
+            }
+        }
+        Op::NoteSourcesLifted => {
+            for r in records.iter_mut() {
+                let x = r.xref.clone();
+                let mut n = 0;
+                lift_note_sources(r, &mut n);
+                if n > 0 {
+                    cx.fold(
+                        rows,
+                        FoldKind::Moved,
+                        true,
+                        x.as_ref(),
+                        format!("{n} citations of notes lifted to their structure"),
+                    );
+                }
+            }
+        }
+        Op::ContactsJoined | Op::FaxAsPhone => {
+            let join = matches!(step.fold, Op::ContactsJoined);
+            for r in records.iter_mut() {
+                let x = r.xref.clone();
+                let mut n = 0;
+                join_contacts(r, join, &mut n);
+                if n > 0 {
+                    cx.fold(
+                        rows,
+                        FoldKind::Merged,
+                        true,
+                        x.as_ref(),
+                        "contact details joined",
+                    );
+                }
+            }
+        }
+        Op::HomeFirst => {
+            let home = cx.options.home.clone().or_else(|| {
+                records
+                    .iter()
+                    .find(|r| is(r, "HEAD"))
+                    .and_then(|h| child(h, "_ROOT"))
+                    .and_then(|r| r.pointer().map(|p| p.as_str().to_string()))
+            });
+            if let Some(home) = home {
+                let first_indi = records.iter().position(|r| is(r, "INDI"));
+                let at = records.iter().position(|r| {
+                    is(r, "INDI") && r.xref.as_ref().is_some_and(|x| x.as_str() == home)
+                });
+                if let (Some(first), Some(at)) = (first_indi, at) {
+                    if at != first {
+                        let moved = records.remove(at);
+                        let x = moved.xref.clone();
+                        records.insert(first, moved);
+                        cx.fold(
+                            rows,
+                            FoldKind::Reordered,
+                            false,
+                            x.as_ref(),
+                            "the home person first",
+                        );
+                    }
+                }
+            }
+        }
+        Op::BareFactsNoted => {
+            for r in records.iter_mut().filter(|r| is(r, "INDI") || is(r, "FAM")) {
+                let x = r.xref.clone();
+                for e in &mut r.substructures {
+                    let fact = Y_EVENTS.contains(&e.tag.as_str())
+                        || matches!(
+                            e.tag.as_str(),
+                            "EVEN"
+                                | "FACT"
+                                | "OCCU"
+                                | "RESI"
+                                | "EDUC"
+                                | "RELI"
+                                | "NATI"
+                                | "TITL"
+                                | "DSCR"
+                                | "PROP"
+                                | "CAST"
+                        );
+                    if fact && !has(e, "DATE") && !has(e, "PLAC") && !has(e, "NOTE") {
+                        e.substructures
+                            .push(text_node("NOTE", "No recorded date or place"));
+                        cx.fold(
+                            rows,
+                            FoldKind::Added,
+                            false,
+                            x.as_ref(),
+                            format!("a note on {} so that it is kept", e.tag),
+                        );
+                    }
+                }
+            }
+        }
+        Op::NamesInAka => {
+            for r in records.iter_mut().filter(|r| is(r, "INDI")) {
+                let x = r.xref.clone();
+                let names: Vec<usize> = r
+                    .substructures
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, c)| is(c, "NAME"))
+                    .map(|(i, _)| i)
+                    .collect();
+                if names.len() < 2 {
+                    continue;
+                }
+                let others: Vec<String> = names
+                    .iter()
+                    .skip(1)
+                    .filter_map(|&i| r.substructures.get(i).map(|n| payload_str(n).to_string()))
+                    .collect();
+                for &i in names.iter().skip(1).rev() {
+                    r.substructures.remove(i);
+                }
+                if let Some(first) = names.first().and_then(|&i| r.substructures.get_mut(i)) {
+                    // One `_AKA`: the names it held already, then the others,
+                    // each once.
+                    let mut all: Vec<String> = Vec::new();
+                    for aka in first.substructures.iter().filter(|s| is(s, "_AKA")) {
+                        let v = payload_str(aka).trim();
+                        let parts: Vec<&str> = v.split([',', ';']).map(str::trim).collect();
+                        if parts.len() > 1 && parts.iter().all(|p| p.contains('/')) {
+                            all.extend(parts.into_iter().map(str::to_string));
+                        } else if !v.is_empty() {
+                            all.push(v.to_string());
+                        }
+                    }
+                    for o in &others {
+                        if !all.contains(o) {
+                            all.push(o.clone());
+                        }
+                    }
+                    let mut seen = Vec::new();
+                    all.retain(|v| {
+                        let fresh = !seen.contains(v);
+                        seen.push(v.clone());
+                        fresh
+                    });
+                    first.substructures.retain(|s| !is(s, "_AKA"));
+                    first.substructures.push(text_node("_AKA", &all.join(", ")));
+                }
+                cx.fold(
+                    rows,
+                    FoldKind::Merged,
+                    true,
+                    x.as_ref(),
+                    format!("{} other names in one _AKA", others.len()),
+                );
+            }
+        }
+        Op::NamesWithSlashes => {
+            for r in records.iter_mut().filter(|r| is(r, "INDI")) {
+                let x = r.xref.clone();
+                for n in r.substructures.iter_mut().filter(|c| is(c, "NAME")) {
+                    let v = payload_str(n).trim().to_string();
+                    if !v.is_empty() && !v.contains('/') {
+                        set_text(n, &format!("{v} //"));
+                        cx.fold(
+                            rows,
+                            FoldKind::Recoded,
+                            false,
+                            x.as_ref(),
+                            "a name given empty surname slashes",
+                        );
+                    }
+                }
+            }
+        }
+        Op::ShortXrefs(max) => short_xrefs(records, rows, max, cx),
+        Op::XreflessRecords => {
+            for r in records.iter() {
+                if r.xref.is_none() && !matches!(r.tag.as_str(), "HEAD" | "TRLR") {
+                    let detail = format!(
+                        "a {} record without identifier, which the importer drops",
+                        r.tag
+                    );
+                    cx.limit(rows, None, detail);
+                }
+            }
+        }
+        Op::OnePlace => {
+            for r in records.iter_mut().filter(|r| is(r, "INDI") || is(r, "FAM")) {
+                let x = r.xref.clone();
+                for e in &mut r.substructures {
+                    let places: Vec<usize> = e
+                        .substructures
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, s)| is(s, "PLAC"))
+                        .map(|(i, _)| i)
+                        .collect();
+                    for &i in places.iter().skip(1).rev() {
+                        let p = e.substructures.remove(i);
+                        e.substructures
+                            .push(text_node("NOTE", &format!("Place: {}", payload_str(&p))));
+                        cx.fold(
+                            rows,
+                            FoldKind::AsText,
+                            true,
+                            x.as_ref(),
+                            "a second place as a note",
+                        );
+                    }
+                }
+            }
+        }
+        Op::CitationRefnToSource => {
+            let mut moves: Vec<(String, Structure)> = Vec::new();
+            for r in records.iter_mut() {
+                collect_citation_refns(r, &mut moves);
+            }
+            let idx = index(records);
+            for (source, refn) in moves {
+                if let Some(s) = idx.get(&source).and_then(|&i| records.get_mut(i)) {
+                    let x = s.xref.clone();
+                    if !s.substructures.contains(&refn) {
+                        s.substructures.push(refn);
+                    }
+                    cx.fold(
+                        rows,
+                        FoldKind::Moved,
+                        true,
+                        x.as_ref(),
+                        "a citation's REFN on its source",
+                    );
+                }
+            }
+        }
+        Op::UnionsAsMarriage => {
+            for r in records.iter_mut().filter(|r| is(r, "FAM")) {
+                let x = r.xref.clone();
+                for c in &mut r.substructures {
+                    let ty = child_text(c, "TYPE").map(|t| t.trim().to_ascii_lowercase());
+                    let label = if (is(c, "NO") || is(c, "_NO")) && payload_str(c).trim() == "MARR"
+                    {
+                        Some("Unmarried")
+                    } else if is(c, "EVEN")
+                        && ty.as_deref().is_some_and(|t| {
+                            matches!(t, "pacs" | "civil union" | "registered partnership")
+                        })
+                    {
+                        Some("Civil Union")
+                    } else if is(c, "EVEN") && ty.as_deref() == Some("unmarried") {
+                        Some("Unmarried")
+                    } else {
+                        None
+                    };
+                    if let Some(label) = label {
+                        retag(c, "MARR");
+                        c.payload = Payload::None;
+                        c.substructures
+                            .retain(|s| !matches!(s.tag.as_str(), "TYPE" | "PHRASE"));
+                        c.substructures.insert(0, text_node("TYPE", label));
+                        cx.fold(
+                            rows,
+                            FoldKind::Relabelled,
+                            false,
+                            x.as_ref(),
+                            format!("a union as MARR TYPE {label}"),
+                        );
+                    }
+                }
+            }
+        }
+        Op::SexSaid => {
+            for r in records.iter_mut().filter(|r| is(r, "INDI")) {
+                if has(r, "SEX") {
+                    continue;
+                }
+                let at = r
+                    .substructures
+                    .iter()
+                    .rposition(|c| is(c, "NAME"))
+                    .map_or(0, |k| k + 1);
+                r.substructures.insert(at, text_node("SEX", "U"));
+                let x = r.xref.clone();
+                cx.fold(
+                    rows,
+                    FoldKind::Added,
+                    false,
+                    x.as_ref(),
+                    "SEX U for an unknown sex",
+                );
+            }
+        }
+        Op::GodparentText => {
+            let (snapshot, idx) = lookup(records);
+            for r in records.iter_mut().filter(|r| is(r, "INDI")) {
+                let x = r.xref.clone();
+                let godparents: Vec<String> = r
+                    .substructures
+                    .iter()
+                    .filter(|c| {
+                        is(c, "ASSO")
+                            && child_text(c, "RELA")
+                                .is_some_and(|t| t.to_ascii_lowercase().starts_with("god"))
+                    })
+                    .filter_map(|c| {
+                        c.pointer()
+                            .and_then(|p| person_name(&snapshot, &idx, p.as_str()))
+                    })
+                    .collect();
+                if godparents.is_empty() {
+                    continue;
+                }
+                if let Some(bapm) = r
+                    .substructures
+                    .iter_mut()
+                    .find(|c| is(c, "BAPM") || is(c, "CHR"))
+                {
+                    if !has(bapm, "_GODP") {
+                        bapm.substructures
+                            .push(text_node("_GODP", &godparents.join(", ")));
+                        cx.fold(
+                            rows,
+                            FoldKind::Added,
+                            false,
+                            x.as_ref(),
+                            "_GODP beside the godparents",
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn fix_colons(s: &mut Structure, changed: &mut bool) {
+    if let Some(t) = s.text() {
+        if t.contains(':') {
+            let fixed = t.replace(':', " ");
+            set_text(
+                s,
+                fixed
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .as_str(),
+            );
+            *changed = true;
+        }
+    }
+    for c in s.substructures.iter_mut().filter(|c| {
+        matches!(
+            c.tag.as_str(),
+            "GIVN" | "SURN" | "NICK" | "SPFX" | "NPFX" | "NSFX"
+        )
+    }) {
+        fix_colons(c, changed);
+    }
+}
+
+/// Calls `f` on every note text (`NOTE` with text) under `s`.
+fn each_note(s: &mut Structure, f: &mut dyn FnMut(&mut Structure)) {
+    for c in &mut s.substructures {
+        if is(c, "NOTE") && c.text().is_some() {
+            f(c);
+        }
+        each_note(c, f);
+    }
+    if is(s, "NOTE") && s.xref.is_some() {
+        f(s);
+    }
+}
+
+fn each_tag(s: &mut Structure, tag: &str, f: &mut dyn FnMut(&mut Structure)) {
+    for c in &mut s.substructures {
+        if is(c, tag) {
+            f(c);
+        }
+        each_tag(c, tag, f);
+    }
+}
+
+fn each_date<'s>(s: &'s Structure, f: &mut dyn FnMut(&'s str)) {
+    for c in &s.substructures {
+        if is(c, "DATE") {
+            if let Some(t) = c.text() {
+                f(t);
+            }
+        }
+        each_date(c, f);
+    }
+}
+
+/// Whether a date names a day its month does not have.
+fn impossible_date(d: &str) -> bool {
+    const MONTHS: [(&str, u32); 12] = [
+        ("JAN", 31),
+        ("FEB", 29),
+        ("MAR", 31),
+        ("APR", 30),
+        ("MAY", 31),
+        ("JUN", 30),
+        ("JUL", 31),
+        ("AUG", 31),
+        ("SEP", 30),
+        ("OCT", 31),
+        ("NOV", 30),
+        ("DEC", 31),
+    ];
+    let words: Vec<&str> = d.split_whitespace().collect();
+    words.windows(3).any(|w| match w {
+        [day, month, year] => {
+            let (Ok(day), Ok(year)) = (day.parse::<u32>(), year.parse::<i64>()) else {
+                return false;
+            };
+            MONTHS
+                .iter()
+                .find(|(m, _)| m.eq_ignore_ascii_case(month))
+                .is_some_and(|&(m, max)| {
+                    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+                    day == 0 || day > if m == "FEB" && !leap { 28 } else { max }
+                })
+        }
+        _ => false,
+    })
+}
+
+/// `<` and a bare `&` escaped as HTML entities.
+fn escape_markup(t: &str) -> String {
+    let mut out = String::with_capacity(t.len());
+    let bytes = t.as_bytes();
+    for (i, c) in t.char_indices() {
+        match c {
+            // Markup (a tag, a closing tag, a comment) stays: the importer
+            // reads notes as HTML.
+            '<' if t
+                .get(i + 1..)
+                .and_then(|r| r.chars().next())
+                .is_some_and(|n| n.is_ascii_alphabetic() || n == '/' || n == '!') =>
+            {
+                out.push('<');
+            }
+            '<' => out.push_str("&lt;"),
+            '&' => {
+                // An entity already: kept.
+                let rest = bytes.get(i + 1..).unwrap_or_default();
+                let end = rest.iter().position(|&b| b == b';');
+                let entity = end.is_some_and(|e| {
+                    e > 0
+                        && e < 10
+                        && rest.get(..e).is_some_and(|n| {
+                            n.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'#')
+                        })
+                });
+                if entity {
+                    out.push('&');
+                } else {
+                    out.push_str("&amp;");
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn looks_html(t: &str) -> bool {
+    let l = t.to_ascii_lowercase();
+    [
+        "<p>", "<br", "<b>", "<i>", "<u>", "<a ", "<div", "</", "&lt;", "&amp;", "&nbsp;",
+    ]
+    .iter()
+    .any(|m| l.contains(m))
+}
+
+/// Text without HTML markup: line breaks for `<br>` and paragraphs,
+/// entities decoded.
+fn strip_html(t: &str) -> String {
+    // Escaped markup (`&lt;i&gt;`) is markup too.
+    let decoded = decode_entities(t);
+    let t = decoded.as_str();
+    let mut out = String::with_capacity(t.len());
+    let mut rest = t;
+    while let Some(start) = rest.find('<') {
+        out.push_str(rest.get(..start).unwrap_or_default());
+        let after = rest.get(start..).unwrap_or_default();
+        let Some(end) = after.find('>') else {
+            out.push_str(after);
+            rest = "";
+            break;
+        };
+        let tag = after
+            .get(1..end)
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        if tag.starts_with("br") || tag == "/p" || tag == "/div" {
+            out.push('\n');
+        }
+        rest = after.get(end + 1..).unwrap_or_default();
+    }
+    out.push_str(rest);
+    out.trim_end_matches('\n').to_string()
+}
+
+/// HTML entities decoded once.
+fn decode_entities(t: &str) -> String {
+    t.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+}
+
+/// A structure and its substructures as one line of text.
+fn flatten(s: &Structure) -> String {
+    let mut parts = Vec::new();
+    if let Some(v) = s.payload.as_str() {
+        parts.push(v.to_string());
+    }
+    for c in &s.substructures {
+        parts.push(format!("{} {}", c.tag, flatten(c)));
+    }
+    parts.join("; ")
+}
+
+/// An address as one line.
+fn address_text(addr: &Structure) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(t) = addr.text() {
+        parts.extend(
+            t.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_string),
+        );
+    }
+    if parts.is_empty() {
+        for c in &addr.substructures {
+            if let Some(t) = c.text() {
+                parts.push(t.trim().to_string());
+            }
+        }
+    }
+    parts.join(", ")
+}
+
+/// Whether the 5.5.1 structure at `path` (tags from the record down)
+/// takes a note: a record but a note record, an event, attribute or link
+/// of a person or family, the place of such an event, a citation.
+fn takes_note(path: &[&str]) -> bool {
+    let event_like = |t: &str| {
+        Y_EVENTS.contains(&t)
+            || matches!(
+                t,
+                "EVEN"
+                    | "FACT"
+                    | "OCCU"
+                    | "RESI"
+                    | "EDUC"
+                    | "RELI"
+                    | "NATI"
+                    | "TITL"
+                    | "DSCR"
+                    | "PROP"
+                    | "CAST"
+                    | "IDNO"
+                    | "NCHI"
+                    | "NMR"
+                    | "SSN"
+                    | "BAPL"
+                    | "CONL"
+                    | "ENDL"
+                    | "SLGC"
+                    | "SLGS"
+            )
+    };
+    match path {
+        [record] => matches!(*record, "INDI" | "FAM" | "SOUR" | "REPO" | "OBJE" | "SUBM"),
+        ["INDI" | "FAM", t] => event_like(t) || matches!(*t, "NAME" | "FAMC" | "FAMS" | "ASSO"),
+        ["INDI" | "FAM", e, "PLAC"] => event_like(e),
+        [first, .., "SOUR"] => *first != "SOUR",
+        _ => false,
+    }
+}
+
+/// Every extension structure under `s` (at `path`) as a note of the
+/// nearest structure that takes one: the texts that found none, for the
+/// caller; `lost` the tags folded (and whether as a note).
+fn extensions_as_notes(
+    s: &mut Structure,
+    path: &mut Vec<String>,
+    lost: &mut Vec<(String, bool)>,
+) -> Vec<String> {
+    path.push(s.tag.as_str().to_string());
+    let mut k = 0;
+    let mut texts = Vec::new();
+    while k < s.substructures.len() {
+        let ext = s.substructures.get(k).is_some_and(|c| c.tag.is_extension());
+        if ext {
+            let c = s.substructures.remove(k);
+            texts.push(format!("{}: {}", c.tag, flatten(&c)));
+            continue;
+        }
+        if let Some(c) = s.substructures.get_mut(k) {
+            texts.extend(extensions_as_notes(c, path, lost));
+        }
+        k += 1;
+    }
+    let tags: Vec<&str> = path.iter().map(String::as_str).collect();
+    let tag_of = |t: &str| t.split(':').next().unwrap_or_default().to_string();
+    let rest = if takes_note(&tags) {
+        for t in texts {
+            lost.push((tag_of(&t), true));
+            s.substructures.push(text_node("NOTE", &t));
+        }
+        Vec::new()
+    } else if tags.len() == 1 {
+        lost.extend(texts.iter().map(|t| (tag_of(t), false)));
+        Vec::new()
+    } else {
+        texts
+    };
+    path.pop();
+    rest
+}
+
+fn flatten_lines(s: &mut Structure, changed: &mut bool) {
+    if let Some(t) = s.text() {
+        if t.contains('\n') {
+            let flat = t.split('\n').map(str::trim).collect::<Vec<_>>().join(" ");
+            set_text(s, &flat);
+            *changed = true;
+        }
+    }
+    for c in &mut s.substructures {
+        flatten_lines(c, changed);
+    }
+}
+
+/// A `_UID` in the PAF form (32 hexadecimal digits and the 4-digit
+/// checksum), when `value` is a UUID without the checksum.
+fn paf_uid(value: &str) -> Option<String> {
+    let hex: String = value
+        .trim()
+        .trim_start_matches('{')
+        .trim_end_matches('}')
+        .chars()
+        .filter(|&c| c != '-')
+        .collect();
+    if hex.len() != 32 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let (mut a, mut b) = (0_u32, 0_u32);
+    for i in (0..32).step_by(2) {
+        let byte = u32::from_str_radix(hex.get(i..i + 2)?, 16).ok()?;
+        a += byte;
+        b += a & 0xFF;
+    }
+    Some(format!(
+        "{}{:02X}{:02X}",
+        hex.to_ascii_uppercase(),
+        a & 0xFF,
+        b & 0xFF
+    ))
+}
+
+fn lift_note_sources(s: &mut Structure, n: &mut usize) {
+    let mut lifted = Vec::new();
+    for c in &mut s.substructures {
+        if is(c, "NOTE") {
+            let sources: Vec<Structure> = c
+                .substructures
+                .iter()
+                .filter(|x| is(x, "SOUR"))
+                .cloned()
+                .collect();
+            if !sources.is_empty() {
+                c.substructures.retain(|x| !is(x, "SOUR"));
+                *n += sources.len();
+                lifted.extend(sources);
+            }
+        } else {
+            lift_note_sources(c, n);
+        }
+    }
+    s.substructures.extend(lifted);
+}
+
+fn join_contacts(s: &mut Structure, join: bool, n: &mut usize) {
+    for c in &mut s.substructures {
+        join_contacts(c, join, n);
+    }
+    // FAX as PHON.
+    let faxes: Vec<String> = s
+        .substructures
+        .iter()
+        .filter(|c| is(c, "FAX"))
+        .map(|c| payload_str(c).to_string())
+        .collect();
+    if !faxes.is_empty() {
+        s.substructures.retain(|c| !is(c, "FAX"));
+        for f in faxes {
+            s.substructures
+                .push(text_node("PHON", &format!("{f} (fax)")));
+            *n += 1;
+        }
+    }
+    if !join {
+        return;
+    }
+    for (tag, also) in [("EMAIL", Some("WWW")), ("PHON", None)] {
+        let values: Vec<String> = s
+            .substructures
+            .iter()
+            .filter(|c| is(c, tag) || also.is_some_and(|a| is(c, a)))
+            .map(|c| payload_str(c).to_string())
+            .collect();
+        if values.len() < 2 {
+            continue;
+        }
+        let at = s
+            .substructures
+            .iter()
+            .position(|c| is(c, tag) || also.is_some_and(|a| is(c, a)))
+            .unwrap_or(0);
+        s.substructures
+            .retain(|c| !(is(c, tag) || also.is_some_and(|a| is(c, a))));
+        s.substructures.insert(
+            at.min(s.substructures.len()),
+            text_node(tag, &values.join("; ")),
+        );
+        *n += 1;
+    }
+}
+
+fn collect_citation_refns(s: &mut Structure, out: &mut Vec<(String, Structure)>) {
+    for c in &mut s.substructures {
+        if is(c, "SOUR") {
+            if let Some(p) = c.pointer().map(|p| p.as_str().to_string()) {
+                let refns: Vec<Structure> = c
+                    .substructures
+                    .iter()
+                    .filter(|x| is(x, "REFN"))
+                    .cloned()
+                    .collect();
+                if !refns.is_empty() {
+                    c.substructures.retain(|x| !is(x, "REFN"));
+                    out.extend(refns.into_iter().map(|r| (p.clone(), r)));
+                }
+            }
+        }
+        collect_citation_refns(c, out);
+    }
+}
+
+/// The media type or format of a multimedia link (its own `FILE.FORM`, or
+/// its record's).
+fn media_form(
+    link: &Structure,
+    records: &[Structure],
+    idx: &HashMap<String, usize>,
+) -> Option<String> {
+    let of = |s: &Structure| {
+        child(s, "FILE")
+            .and_then(|f| child_text(f, "FORM"))
+            .or_else(|| child_text(s, "FORM"))
+            .map(str::to_string)
+    };
+    match link.pointer() {
+        Some(p) => idx
+            .get(p.as_str())
+            .and_then(|&i| records.get(i))
+            .and_then(of),
+        None => of(link),
+    }
+}
+
+/// A citation as one text: the source's title, the page, the repository.
+fn citation_text(c: &Structure, records: &[Structure], idx: &HashMap<String, usize>) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    match c.pointer() {
+        Some(p) => {
+            if let Some(s) = idx.get(p.as_str()).and_then(|&i| records.get(i)) {
+                let title = child_text(s, "TITL")
+                    .or_else(|| child_text(s, "ABBR"))
+                    .map(|t| t.replace('\n', " "));
+                parts.extend(title);
+                if let Some(auth) = child_text(s, "AUTH") {
+                    parts.push(auth.replace('\n', " "));
+                }
+                for repo in s.substructures.iter().filter(|r| is(r, "REPO")) {
+                    if let Some(name) = repo
+                        .pointer()
+                        .and_then(|r| idx.get(r.as_str()))
+                        .and_then(|&i| records.get(i))
+                        .and_then(|r| child_text(r, "NAME"))
+                    {
+                        parts.push(name.to_string());
+                    }
+                    if let Some(caln) = child_text(repo, "CALN") {
+                        parts.push(caln.to_string());
+                    }
+                }
+            }
+        }
+        None => parts.extend(c.text().map(|t| t.replace('\n', " "))),
+    }
+    if let Some(page) = child_text(c, "PAGE") {
+        parts.push(page.replace('\n', " "));
+    }
+    parts.retain(|p| !p.trim().is_empty());
+    parts.join(", ")
+}
+
+/// Every citation of a source record written inline.
+fn inline_sources(records: &mut [Structure], rows: &'static [&'static str], cx: &mut Cx<'_>) {
+    let (snapshot, idx) = lookup(records);
+    for r in records
+        .iter_mut()
+        .filter(|r| !matches!(r.tag.as_str(), "HEAD" | "SOUR" | "REPO" | "TRLR"))
+    {
+        let x = r.xref.clone();
+        let mut n = 0;
+        let mut lossy = false;
+        inline_citations(r, &snapshot, &idx, &mut n, &mut lossy);
+        if n > 0 {
+            cx.fold(
+                rows,
+                FoldKind::AsText,
+                lossy,
+                x.as_ref(),
+                format!("{n} citations of source records written inline"),
+            );
+        }
+    }
+}
+
+fn inline_citations(
+    s: &mut Structure,
+    records: &[Structure],
+    idx: &HashMap<String, usize>,
+    n: &mut usize,
+    lossy: &mut bool,
+) {
+    for c in &mut s.substructures {
+        if is(c, "SOUR") && c.pointer().is_some() {
+            let text = citation_text(c, records, idx);
+            let mut inline = text_node("SOUR", if text.is_empty() { "Source" } else { &text });
+            for sub in &c.substructures {
+                match sub.tag.as_str() {
+                    "PAGE" => {}
+                    "DATA" => {
+                        for d in &sub.substructures {
+                            match d.tag.as_str() {
+                                "TEXT" => inline.substructures.push(d.clone()),
+                                _ => *lossy = true,
+                            }
+                        }
+                    }
+                    "NOTE" | "QUAY" | "OBJE" => inline.substructures.push(sub.clone()),
+                    _ => *lossy = true,
+                }
+            }
+            // Citations in its notes too, now that it is written inline.
+            inline_citations(&mut inline, records, idx, n, lossy);
+            *c = inline;
+            *n += 1;
+        } else {
+            inline_citations(c, records, idx, n, lossy);
+        }
+    }
+}
+
+/// Every text citation made a pointer to a new source record.
+fn source_records(records: &mut Vec<Structure>, rows: &'static [&'static str], cx: &mut Cx<'_>) {
+    let mut new: Vec<Structure> = Vec::new();
+    let mut taken: Vec<String> = records
+        .iter()
+        .filter_map(|r| r.xref.as_ref().map(|x| x.as_str().to_string()))
+        .collect();
+    let mut made: HashMap<String, Xref> = HashMap::new();
+    for r in records
+        .iter_mut()
+        .filter(|r| !matches!(r.tag.as_str(), "HEAD" | "TRLR"))
+    {
+        let x = r.xref.clone();
+        let mut n = 0;
+        source_pointers(
+            r,
+            &mut |title| {
+                if let Some(x) = made.get(title) {
+                    return x.clone();
+                }
+                let xref = loop {
+                    cx.next_xref += 1;
+                    let candidate = format!("@S{}@", cx.next_xref);
+                    if !taken.contains(&candidate) {
+                        break Xref::new(candidate);
+                    }
+                };
+                taken.push(xref.as_str().to_string());
+                let mut s = Structure::new("SOUR");
+                s.xref = Some(xref.clone());
+                s.substructures.push(text_node("TITL", title));
+                new.push(s);
+                made.insert(title.to_string(), xref.clone());
+                xref
+            },
+            &mut n,
+        );
+        if n > 0 {
+            cx.fold(
+                rows,
+                FoldKind::Moved,
+                false,
+                x.as_ref(),
+                format!("{n} text citations made source records"),
+            );
+        }
+    }
+    let at = records
+        .iter()
+        .rposition(|r| !is(r, "TRLR"))
+        .map_or(records.len(), |k| k + 1);
+    for (k, s) in new.into_iter().enumerate() {
+        records.insert(at + k, s);
+    }
+}
+
+fn source_pointers(s: &mut Structure, make: &mut dyn FnMut(&str) -> Xref, n: &mut usize) {
+    for c in &mut s.substructures {
+        if is(c, "SOUR") {
+            if let Payload::Text(t) = &c.payload {
+                let title = t.to_string();
+                let x = make(&title);
+                c.payload = Payload::Pointer(x);
+                // The text's own lines are the title now; TEXT goes under DATA.
+                let texts: Vec<Structure> = c
+                    .substructures
+                    .iter()
+                    .filter(|s| is(s, "TEXT"))
+                    .cloned()
+                    .collect();
+                if !texts.is_empty() {
+                    c.substructures.retain(|s| !is(s, "TEXT"));
+                    let mut data = Structure::new("DATA");
+                    data.substructures.extend(texts);
+                    c.substructures.push(data);
+                }
+                *n += 1;
+                continue;
+            }
+        }
+        source_pointers(c, make, n);
+    }
+}
+
+/// Godparents of a baptism as person-level associations.
+fn godparents(records: &mut [Structure], rows: &'static [&'static str], cx: &mut Cx<'_>) {
+    let (snapshot, idx) = lookup(records);
+    for r in records.iter_mut().filter(|r| is(r, "INDI")) {
+        let x = r.xref.clone();
+        let mut found: Vec<(Xref, String)> = Vec::new();
+        for e in r
+            .substructures
+            .iter_mut()
+            .filter(|e| matches!(e.tag.as_str(), "BAPM" | "CHR" | "CHRA"))
+        {
+            let mut k = 0;
+            while k < e.substructures.len() {
+                let godparent = e.substructures.get(k).is_some_and(|a| {
+                    (is(a, "ASSO") || is(a, "_ASSO"))
+                        && a.pointer().is_some_and(|p| !p.is_void())
+                        && is_godparent(a)
+                });
+                if godparent {
+                    let a = e.substructures.remove(k);
+                    if let Some(p) = a.pointer() {
+                        let sex = person_sex(&snapshot, &idx, p.as_str());
+                        let word = match sex.as_deref() {
+                            Some("M") => "Godfather",
+                            Some("F") => "Godmother",
+                            _ => "Godparent",
+                        };
+                        found.push((p.clone(), word.to_string()));
+                    }
+                    continue;
+                }
+                k += 1;
+            }
+        }
+        if found.is_empty() {
+            continue;
+        }
+        // Godfathers first, each followed by a godmother.
+        let (fathers, others): (Vec<_>, Vec<_>) =
+            found.into_iter().partition(|(_, w)| w == "Godfather");
+        let (mothers, rest): (Vec<_>, Vec<_>) =
+            others.into_iter().partition(|(_, w)| w == "Godmother");
+        let mut ordered = Vec::new();
+        let mut m = mothers.into_iter();
+        for f in fathers {
+            ordered.push(f);
+            if let Some(mo) = m.next() {
+                ordered.push(mo);
+            }
+        }
+        ordered.extend(m);
+        ordered.extend(rest);
+        let n = ordered.len();
+        for (p, word) in ordered {
+            let already = r.substructures.iter().any(|a| {
+                is(a, "ASSO")
+                    && a.pointer() == Some(&p)
+                    && child_text(a, "RELA").is_some_and(|t| t.eq_ignore_ascii_case(&word))
+            });
+            if !already {
+                let mut a = pointer_node("ASSO", &p);
+                if cx.v7 {
+                    let mut role = text_node("ROLE", "GODP");
+                    role.substructures.push(text_node("PHRASE", &word));
+                    a.substructures.push(role);
+                } else {
+                    a.substructures.push(text_node("RELA", &word));
+                }
+                r.substructures.push(a);
+            }
+        }
+        cx.fold(
+            rows,
+            FoldKind::Moved,
+            false,
+            x.as_ref(),
+            format!("{n} godparents of a baptism as associations of the person"),
+        );
+    }
+}
+
+fn is_godparent(a: &Structure) -> bool {
+    let word = child_text(a, "RELA")
+        .or_else(|| child_text(a, "ROLE"))
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let phrase = child(a, "ROLE")
+        .and_then(|r| child_text(r, "PHRASE"))
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    word.starts_with("god") || word == "godp" || phrase.starts_with("god")
+}
+
+/// The event associations 5.5.1 has no place for, written in `style`.
+fn event_associations(
+    records: &mut [Structure],
+    rows: &'static [&'static str],
+    style: AssocStyle,
+    cx: &mut Cx<'_>,
+) {
+    if cx.v7 {
+        return;
+    }
+    let (snapshot, idx) = lookup(records);
+    let mut reversed: Vec<(String, Structure)> = Vec::new();
+    for r in records.iter_mut().filter(|r| is(r, "INDI") || is(r, "FAM")) {
+        let holder = r.xref.clone();
+        let owner = holder.clone();
+        let record_tag = r.tag.as_str().to_string();
+        for occasion in &mut r.substructures {
+            let event = occasion.tag.as_str().to_string();
+            let mut at = 0;
+            let mut notes = Vec::new();
+            while at < occasion.substructures.len() {
+                let assoc = occasion
+                    .substructures
+                    .get(at)
+                    .is_some_and(|c| is(c, "ASSO") || is(c, "_ASSO"));
+                if !assoc {
+                    at += 1;
+                    continue;
+                }
+                let found = occasion.substructures.remove(at);
+                let (role, target, name, rest) = association_parts(&found, &snapshot, &idx);
+                let kept_as = match style {
+                    AssocStyle::Shar => Some(("_SHAR", "ROLE")),
+                    AssocStyle::Witn => Some(("_WITN", "TYPE")),
+                    AssocStyle::GedcomL => Some(("_ASSO", "RELA")),
+                    AssocStyle::Reversed | AssocStyle::Note => None,
+                };
+                match (style, target) {
+                    (_, Some(person)) if kept_as.is_some() => {
+                        let (tag, word) = kept_as.unwrap_or(("_ASSO", "RELA"));
+                        let mut kept = pointer_node(tag, &person);
+                        kept.substructures.push(text_node(word, &role));
+                        kept.substructures.extend(rest);
+                        occasion.substructures.insert(at, kept);
+                        at += 1;
+                        cx.fold(
+                            rows,
+                            FoldKind::Relabelled,
+                            false,
+                            holder.as_ref(),
+                            format!("a witness of {event} as {tag}"),
+                        );
+                    }
+                    (AssocStyle::Reversed, Some(p)) => {
+                        if let Some(owner) = &owner {
+                            let mut s = pointer_node("ASSO", owner);
+                            s.substructures
+                                .push(text_node("RELA", &format!("{role}@{record_tag}:{event}")));
+                            s.substructures.extend(rest);
+                            reversed.push((p.as_str().to_string(), s));
+                            cx.fold(rows, FoldKind::Moved, false, holder.as_ref(), format!("a witness of {event} on the witness, RELA {role}@{record_tag}:{event}"));
+                        }
+                    }
+                    (_, _) => {
+                        let text = if name.is_empty() {
+                            role.clone()
+                        } else {
+                            format!("{name} ({role})")
+                        };
+                        notes.push(format!("Witness: {text}"));
+                        cx.fold(
+                            rows,
+                            FoldKind::AsText,
+                            true,
+                            holder.as_ref(),
+                            format!("a witness of {event} as a note"),
+                        );
+                    }
+                }
+            }
+            for n in notes {
+                occasion.substructures.push(text_node("NOTE", &n));
+            }
+        }
+    }
+    if reversed.is_empty() {
+        return;
+    }
+    let idx = index(records);
+    for (person, assoc) in reversed {
+        if let Some(r) = idx.get(&person).and_then(|&i| records.get_mut(i)) {
+            r.substructures.push(assoc);
+        }
+    }
+}
+
+/// What an association says: its role, the person it points to, that
+/// person's name (or the phrase naming them) and its other substructures.
+fn association_parts(
+    found: &Structure,
+    records: &[Structure],
+    idx: &HashMap<String, usize>,
+) -> (String, Option<Xref>, String, Vec<Structure>) {
+    let role = child_text(found, "RELA")
+        .or_else(|| child(found, "ROLE").and_then(|r| child_text(r, "PHRASE")))
+        .or_else(|| child_text(found, "ROLE"))
+        .unwrap_or("Witness")
+        .trim()
+        .to_string();
+    let target = found.pointer().filter(|p| !p.is_void()).cloned();
+    let name = target
+        .as_ref()
+        .and_then(|p| person_name(records, idx, p.as_str()))
+        .or_else(|| child_text(found, "PHRASE").map(str::to_string))
+        .unwrap_or_default();
+    let rest = found
+        .substructures
+        .iter()
+        .filter(|s| !matches!(s.tag.as_str(), "RELA" | "ROLE" | "PHRASE" | "TYPE"))
+        .cloned()
+        .collect();
+    (role, target, name, rest)
+}
+
+/// Each association as an `EVEN` + `TYPE Associate`.
+fn associations_as_events(
+    records: &mut [Structure],
+    rows: &'static [&'static str],
+    name_in_payload: bool,
+    cx: &mut Cx<'_>,
+) {
+    let (snapshot, idx) = lookup(records);
+    for r in records.iter_mut().filter(|r| is(r, "INDI") || is(r, "FAM")) {
+        let x = r.xref.clone();
+        let mut assocs = Vec::new();
+        let mut k = 0;
+        while k < r.substructures.len() {
+            if r.substructures.get(k).is_some_and(|a| is(a, "ASSO")) {
+                assocs.push(r.substructures.remove(k));
+            } else {
+                k += 1;
+            }
+        }
+        for e in &mut r.substructures {
+            let mut k = 0;
+            while k < e.substructures.len() {
+                if e.substructures.get(k).is_some_and(|a| is(a, "ASSO")) {
+                    assocs.push(e.substructures.remove(k));
+                } else {
+                    k += 1;
+                }
+            }
+        }
+        for a in assocs {
+            let name = a
+                .pointer()
+                .filter(|p| !p.is_void())
+                .and_then(|p| person_name(&snapshot, &idx, p.as_str()))
+                .or_else(|| child_text(&a, "PHRASE").map(str::to_string))
+                .unwrap_or_default();
+            let rela = child_text(&a, "RELA")
+                .or_else(|| child(&a, "ROLE").and_then(|r| child_text(r, "PHRASE")))
+                .or_else(|| child_text(&a, "ROLE"))
+                .unwrap_or_default()
+                .to_string();
+            let mut even = text_node("EVEN", if name_in_payload { &name } else { "" });
+            even.substructures.push(text_node("TYPE", "Associate"));
+            even.substructures.push(text_node(
+                "NOTE",
+                &format!("Associate: {name}; Relationship: {rela}"),
+            ));
+            r.substructures.push(even);
+            cx.fold(
+                rows,
+                FoldKind::AsText,
+                true,
+                x.as_ref(),
+                "an association as EVEN TYPE Associate",
+            );
+        }
+    }
+}
+
+/// Links to multimedia records written inline.
+fn inline_media(records: &mut [Structure], rows: &'static [&'static str], cx: &mut Cx<'_>) {
+    if cx.v7 {
+        return;
+    }
+    let (snapshot, idx) = lookup(records);
+    for r in records.iter_mut().filter(|r| is(r, "INDI") || is(r, "FAM")) {
+        let x = r.xref.clone();
+        let mut n = 0;
+        let mut lossy = false;
+        for link in r.substructures.iter_mut().filter(|c| is(c, "OBJE")) {
+            let Some(p) = link.pointer().cloned() else {
+                continue;
+            };
+            let Some(record) = idx.get(p.as_str()).and_then(|&i| snapshot.get(i)) else {
+                continue;
+            };
+            let Some(file) = child(record, "FILE") else {
+                continue;
+            };
+            // 5.5.1: `OBJE` + `FILE` (+ `FORM` + `TYPE`) + `TITL`.
+            let mut inline = Structure::new("OBJE");
+            let mut first = file.clone();
+            first
+                .substructures
+                .retain(|s| is(s, "FORM") || is(s, "TITL"));
+            let title = child(&first, "TITL")
+                .cloned()
+                .or_else(|| child(record, "TITL").cloned());
+            first.substructures.retain(|s| !is(s, "TITL"));
+            inline.substructures.push(first);
+            inline.substructures.extend(title);
+            lossy |= record
+                .substructures
+                .iter()
+                .any(|s| !matches!(s.tag.as_str(), "FILE" | "TITL" | "CHAN"));
+            inline.substructures.extend(
+                link.substructures
+                    .iter()
+                    .filter(|s| is(s, "_PRIM"))
+                    .cloned(),
+            );
+            *link = inline;
+            n += 1;
+        }
+        if n > 0 {
+            cx.fold(
+                rows,
+                FoldKind::Moved,
+                lossy,
+                x.as_ref(),
+                format!("{n} links to multimedia records written inline"),
+            );
+        }
+    }
+}
+
+/// The names of the jurisdictions a place format may name, by field of
+/// the formats of [`PlaceStyle`].
+const TOWN: &[&str] = &[
+    "town", "city", "commune", "ville", "village", "parish", "paroisse",
+];
+const CODE: &[&str] = &[
+    "area code",
+    "postal code",
+    "code postal",
+    "zip",
+    "zip code",
+    "insee",
+    "code insee",
+    "postcode",
+];
+const COUNTY: &[&str] = &[
+    "county",
+    "département",
+    "departement",
+    "department",
+    "district",
+];
+const REGION: &[&str] = &["region", "région", "state", "province"];
+const COUNTRY: &[&str] = &["country", "pays", "nation"];
+const SUB: &[&str] = &[
+    "subdivision",
+    "hamlet",
+    "lieu-dit",
+    "lieudit",
+    "hameau",
+    "place",
+    "locality",
+];
+
+/// What became of a place.
+enum Placed {
+    /// Its jurisdictions as the header's format names them.
+    Mapped(String),
+    /// Its jurisdictions by position (the format named none).
+    Guessed(String),
+    /// More jurisdictions than the target's format has: left as it is.
+    TooMany,
+}
+
+/// A place (`text`) in a target's `style`, its jurisdictions mapped by the
+/// header's format (`mapping`, when `known`) or by position.
+fn place_in(text: &str, mapping: &[Option<usize>], known: bool, style: PlaceStyle) -> Placed {
+    let parts: Vec<&str> = text.split(',').map(str::trim).collect();
+    let mut fields: [String; 6] = Default::default();
+    let mapped = known && parts.len() == mapping.len();
+    if mapped {
+        for (part, slot) in parts.iter().zip(mapping) {
+            if let Some(field) = slot.and_then(|at| fields.get_mut(at)) {
+                *field = (*part).to_string();
+            }
+        }
+    } else {
+        // Smallest first: the first is the town, the last the country,
+        // the ones between the county and the region.
+        match parts.as_slice() {
+            [] => return Placed::TooMany,
+            [one] => fields[0] = (*one).to_string(),
+            [first, middle @ .., last] => {
+                fields[0] = (*first).to_string();
+                fields[4] = (*last).to_string();
+                match middle {
+                    [] => {}
+                    [county] => fields[2] = (*county).to_string(),
+                    [county, region] => {
+                        fields[2] = (*county).to_string();
+                        fields[3] = (*region).to_string();
+                    }
+                    _ => return Placed::TooMany,
+                }
+            }
+        }
+    }
+    let [town, code, county, region, land, subdivision] = &fields;
+    let new = match style {
+        PlaceStyle::Geneanet => {
+            let main = format!("{town}, {code}, {county}, {region}, {land}");
+            if subdivision.is_empty() {
+                main
+            } else {
+                format!("[{subdivision}] - {main}")
+            }
+        }
+        PlaceStyle::Heredis => {
+            format!("{town}, {code}, {county}, {region}, {land}, {subdivision}")
+        }
+    };
+    if mapped {
+        Placed::Mapped(new)
+    } else {
+        Placed::Guessed(new)
+    }
+}
+
+/// Names the places' format in the header ([`places`]) when every place
+/// left, but those of extensions, follows it.
+fn place_form(records: &mut [Structure], style: PlaceStyle) {
+    fn all_fit(s: &Structure, style: PlaceStyle) -> bool {
+        s.substructures.iter().all(|c| {
+            if c.tag.is_extension() {
+                return true;
+            }
+            let fits = !is(c, "PLAC") || c.text().is_none_or(|t| style.fits(t));
+            fits && all_fit(c, style)
+        })
+    }
+    if !records
+        .iter()
+        .filter(|r| !is(r, "HEAD") && !r.tag.is_extension())
+        .all(|r| all_fit(r, style))
+    {
+        return;
+    }
+    let Some(head) = records.iter_mut().find(|r| is(r, "HEAD")) else {
+        return;
+    };
+    let form = style.form();
+    if let Some(p) = child_mut(head, "PLAC") {
+        match child_mut(p, "FORM") {
+            Some(f) => set_text(f, form),
+            None => p.substructures.push(text_node("FORM", form)),
+        }
+    } else {
+        let mut p = Structure::new("PLAC");
+        p.substructures.push(text_node("FORM", form));
+        head.substructures.push(p);
+    }
+}
+
+/// Places in a target's format.
+fn places(
+    records: &mut [Structure],
+    rows: &'static [&'static str],
+    style: PlaceStyle,
+    cx: &mut Cx<'_>,
+) {
+    // The jurisdictions the header names, in order.
+    let form: Vec<String> = records
+        .iter()
+        .find(|r| is(r, "HEAD"))
+        .and_then(|h| child(h, "PLAC"))
+        .and_then(|p| child_text(p, "FORM"))
+        .map(|f| {
+            f.split(',')
+                .map(|j| j.trim().to_ascii_lowercase())
+                .collect()
+        })
+        .unwrap_or_default();
+    let slot = |name: &str| -> Option<usize> {
+        [TOWN, CODE, COUNTY, REGION, COUNTRY, SUB]
+            .iter()
+            .position(|names| names.contains(&name))
+    };
+    let mapping: Vec<Option<usize>> = form.iter().map(|j| slot(j)).collect();
+    let known = !form.is_empty() && mapping.iter().all(Option::is_some);
+    let mut n = 0;
+    let mut guessed = 0;
+    let mut skipped = 0;
+    for r in records.iter_mut().filter(|r| !is(r, "HEAD")) {
+        each_tag(r, "PLAC", &mut |p| {
+            let Some(text) = p.text() else { return };
+            if text.trim_start().starts_with('[') {
+                return;
+            }
+            // Without a format the header names, a place with as many
+            // jurisdictions as the target's is taken to be in its format.
+            let identity: Vec<Option<usize>>;
+            let (mapping, known) = if !known && style.fits(text) {
+                identity = (0..style.form().split(',').count()).map(Some).collect();
+                (identity.as_slice(), true)
+            } else {
+                (mapping.as_slice(), known)
+            };
+            let new = match place_in(text, mapping, known, style) {
+                Placed::Mapped(new) => new,
+                Placed::Guessed(new) => {
+                    guessed += 1;
+                    new
+                }
+                Placed::TooMany => {
+                    skipped += 1;
+                    return;
+                }
+            };
+            if new != text {
+                set_text(p, &new);
+                n += 1;
+            }
+        });
+    }
+    let form_text = style.form();
+    // The header names the format once the folds are done, when every
+    // place written follows it ([`place_form`]).
+    cx.place_style = Some(style);
+    if skipped > 0 {
+        cx.limit(
+            rows,
+            None,
+            format!("{skipped} places with more jurisdictions than {form_text}, left as they are"),
+        );
+    }
+    if n > 0 {
+        cx.fold(
+            rows,
+            FoldKind::Recoded,
+            guessed > 0,
+            None,
+            format!(
+                "{n} places in the format {form_text}{}",
+                if guessed > 0 {
+                    " (jurisdictions guessed by position)"
+                } else {
+                    ""
+                }
+            ),
+        );
+    }
+}
+
+/// The writer's own system identifier in `HEAD.SOUR`: an export never
+/// passes for another program (importers switch dialects on it, EXF-082,
+/// EXC-018, EXC-057).
+fn own_source(records: &mut [Structure], cx: &mut Cx<'_>) {
+    const ROWS: &[&str] = &["EXF-082", "EXC-018", "EXC-057"];
+    let Some(head) = records.iter_mut().find(|r| is(r, "HEAD")) else {
+        return;
+    };
+    let product = crate::writer::head::PRODUCT;
+    if child_text(head, "SOUR").is_some_and(|s| s == product) {
+        return;
+    }
+    let mut sour = text_node("SOUR", product);
+    sour.substructures
+        .push(text_node("VERS", env!("CARGO_PKG_VERSION")));
+    let previous = if let Some(at) = head.substructures.iter().position(|c| is(c, "SOUR")) {
+        let old = std::mem::replace(
+            head.substructures
+                .get_mut(at)
+                .unwrap_or(&mut Structure::default()),
+            sour,
+        );
+        payload_str(&old).to_string()
+    } else {
+        head.substructures.push(sour);
+        String::new()
+    };
+    if !previous.is_empty() {
+        cx.fold(
+            ROWS,
+            FoldKind::Relabelled,
+            false,
+            None,
+            format!("HEAD.SOUR {previous} written as {product}"),
+        );
+    }
+}
+
+/// Leaves out the records `RESN` restricts, and the pointers to them.
+fn omit_private(records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
+    const ROWS: &[&str] = &["EXF-022", "EXC-056", "EXC-074"];
+    let private: Vec<Xref> = records
+        .iter()
+        .filter(|r| {
+            child_text(r, "RESN").is_some_and(|t| {
+                let t = t.to_ascii_lowercase();
+                t.contains("privacy") || t.contains("confidential")
+            })
+        })
+        .filter_map(|r| r.xref.clone())
+        .collect();
+    if private.is_empty() {
+        return;
+    }
+    records.retain(|r| r.xref.as_ref().is_none_or(|x| !private.contains(x)));
+    for r in records.iter_mut() {
+        drop_pointers(r, &|p| private.contains(p));
+    }
+    cx.fold(
+        ROWS,
+        FoldKind::Omitted,
+        true,
+        None,
+        format!("{} restricted records left out", private.len()),
+    );
+}
+
+fn drop_pointers(s: &mut Structure, gone: &dyn Fn(&Xref) -> bool) {
+    s.substructures
+        .retain(|c| c.pointer().is_none_or(|p| !gone(p)));
+    for c in &mut s.substructures {
+        drop_pointers(c, gone);
+    }
+}
+
+/// Leaves out the multimedia links and records.
+fn omit_media(records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
+    const ROWS: &[&str] = &["EXC-002", "EXC-047", "EXC-055", "EXC-107"];
+    let before = records.len();
+    records.retain(|r| !is(r, "OBJE"));
+    let mut links = 0;
+    for r in records.iter_mut() {
+        drop_tag(r, "OBJE", &mut links);
+    }
+    let removed = before - records.len();
+    if removed + links > 0 {
+        cx.fold(
+            ROWS,
+            FoldKind::Omitted,
+            true,
+            None,
+            format!("{removed} multimedia records and {links} links left out"),
+        );
+    }
+}
+
+fn drop_tag(s: &mut Structure, tag: &str, n: &mut usize) {
+    let before = s.substructures.len();
+    s.substructures.retain(|c| !is(c, tag));
+    *n += before - s.substructures.len();
+    for c in &mut s.substructures {
+        drop_tag(c, tag, n);
+    }
+}
+
+fn omit_change_dates(records: &mut [Structure], cx: &mut Cx<'_>) {
+    const ROWS: &[&str] = &["EXC-068"];
+    let mut n = 0;
+    for r in records.iter_mut() {
+        drop_tag(r, "CHAN", &mut n);
+    }
+    if n > 0 {
+        cx.fold(
+            ROWS,
+            FoldKind::Omitted,
+            true,
+            None,
+            format!("{n} change dates left out"),
+        );
+    }
+}
+
+/// Media paths in the target's form.
+fn media_paths(records: &mut [Structure], cx: &mut Cx<'_>) {
+    let style = cx.target.media;
+    if style == MediaPaths::Keep {
+        return;
+    }
+    let root = cx.options.media_root.clone().map(|r| r.replace('\\', "/"));
+    let mut n = 0;
+    for r in records.iter_mut() {
+        each_media_file(r, &mut |f| {
+            let Some(path) = f.text().map(str::to_string) else {
+                return;
+            };
+            if path.contains("://") && !path.starts_with("file://") {
+                return;
+            }
+            let mut p = path
+                .trim_start_matches("file:///")
+                .trim_start_matches("file://")
+                .replace('\\', "/");
+            let new = match style {
+                MediaPaths::FileName => p.rsplit('/').next().unwrap_or(&p).to_string(),
+                MediaPaths::Relative => {
+                    if let Some(root) = &root {
+                        if let Some(rest) = p.strip_prefix(root.trim_end_matches('/')) {
+                            p = rest.trim_start_matches('/').to_string();
+                        }
+                    }
+                    // A drive letter and a leading slash out.
+                    let bytes = p.as_bytes();
+                    if bytes.get(1) == Some(&b':') {
+                        p = p.get(2..).unwrap_or_default().to_string();
+                    }
+                    p.trim_start_matches('/').to_string()
+                }
+                MediaPaths::Keep => p,
+            };
+            if new != path {
+                set_text(f, &new);
+                n += 1;
+            }
+        });
+    }
+    if n > 0 {
+        let rows = cx.target.rows;
+        cx.fold(
+            rows,
+            FoldKind::Recoded,
+            false,
+            None,
+            format!("{n} media paths rewritten"),
+        );
+    }
+}
+
+fn each_media_file(s: &mut Structure, f: &mut dyn FnMut(&mut Structure)) {
+    let obje = is(s, "OBJE");
+    for c in &mut s.substructures {
+        if obje && is(c, "FILE") {
+            f(c);
+        }
+        each_media_file(c, f);
+    }
+}
+
+/// Record identifiers of at most `max` characters, delimiters excluded.
+fn short_xrefs(
+    records: &mut [Structure],
+    rows: &'static [&'static str],
+    max: usize,
+    cx: &mut Cx<'_>,
+) {
+    let taken: Vec<String> = records
+        .iter()
+        .filter_map(|r| r.xref.as_ref().map(|x| x.as_str().to_string()))
+        .collect();
+    let mut map: HashMap<String, Xref> = HashMap::new();
+    let mut next = 0_u32;
+    for r in records.iter() {
+        let Some(x) = &r.xref else { continue };
+        if x.id().chars().count() <= max {
+            continue;
+        }
+        let prefix = match r.tag.as_str() {
+            "INDI" => "I",
+            "FAM" => "F",
+            "SOUR" => "S",
+            "REPO" => "R",
+            "OBJE" => "M",
+            "NOTE" | "SNOTE" => "N",
+            "SUBM" => "U",
+            _ => "X",
+        };
+        let new = loop {
+            next += 1;
+            let candidate = format!("@{prefix}{next}@");
+            if !taken.contains(&candidate) && !map.values().any(|v| v.as_str() == candidate) {
+                break Xref::new(candidate);
+            }
+        };
+        map.insert(x.as_str().to_string(), new);
+    }
+    if map.is_empty() {
+        return;
+    }
+    for r in records.iter_mut() {
+        remap(r, &map);
+    }
+    let n = map.len();
+    cx.fold(
+        rows,
+        FoldKind::Recoded,
+        false,
+        None,
+        format!("{n} identifiers over {max} characters renamed"),
+    );
+}
+
+fn remap(s: &mut Structure, map: &HashMap<String, Xref>) {
+    if let Some(x) = &s.xref {
+        if let Some(new) = map.get(x.as_str()) {
+            s.xref = Some(new.clone());
+        }
+    }
+    if let Payload::Pointer(p) = &s.payload {
+        if let Some(new) = map.get(p.as_str()) {
+            s.payload = Payload::Pointer(new.clone());
+        }
+    }
+    for c in &mut s.substructures {
+        remap(c, map);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paf_checksums() {
+        let uid = paf_uid("0123456789abcdef0123456789abcdef").unwrap();
+        assert_eq!(uid.len(), 36);
+        assert!(uid.starts_with("0123456789ABCDEF0123456789ABCDEF"));
+        assert_eq!(
+            paf_uid("{01234567-89AB-CDEF-0123-456789ABCDEF}").as_deref(),
+            Some(uid.as_str())
+        );
+        assert_eq!(paf_uid(&uid), None);
+    }
+
+    #[test]
+    fn markup() {
+        assert_eq!(
+            escape_markup("a < b & c &amp; d <i>e</i>"),
+            "a &lt; b &amp; c &amp; d <i>e</i>"
+        );
+        assert_eq!(
+            strip_html("<p>One<br>two &amp; <b>three</b></p>"),
+            "One\ntwo & three"
+        );
+        assert_eq!(
+            strip_html("&lt;i&gt;Example&lt;/i&gt; text"),
+            "Example text"
+        );
+        assert!(impossible_date("31 FEB 1850"));
+        assert!(impossible_date("ABT 29 FEB 1900"));
+        assert!(!impossible_date("29 FEB 2000"));
+        assert!(!impossible_date("BET 1850 AND 1851"));
+    }
+}

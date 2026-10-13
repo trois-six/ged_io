@@ -1,0 +1,17 @@
+0 HEAD
+1 GEDC
+2 VERS 7.0
+1 SOUR FamilySearch
+1 SCHMA
+2 TAG _LANG https://github.com/trois-six/oxidged/blob/main/docs/extensions.md#familysearch-_LANG
+2 TAG _RUFNAM https://github.com/trois-six/oxidged/blob/main/docs/extensions.md#familysearch-_RUFNAM
+0 @I1@ INDI
+1 NAME Anna /Example/
+2 _RUFNAM Anna
+1 SEX F
+1 BIRT
+2 PLAC Example
+3 _LANG de
+1 EXID ABCD-12X
+2 TYPE https://gedcom.io/exid-type/FamilySearch-PersonId
+0 TRLR

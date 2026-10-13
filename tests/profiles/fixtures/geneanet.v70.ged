@@ -1,0 +1,32 @@
+0 HEAD
+1 GEDC
+2 VERS 7.0
+1 SOUR Geneanet
+2 VERS 7.0.0
+2 NAME GeneWeb
+2 CORP Geneanet
+3 ADDR https://www.geneanet.org/
+2 DATA examplebase.gwb
+1 DATE 1 JAN 2025
+1 NOTE Notes of the example base
+0 @I1@ INDI
+1 NAME Jean /FICTIF/
+1 NAME Jean Fictif
+2 TYPE AKA
+1 SEX M
+1 BIRT
+2 DATE ABT 50 BCE
+2 ASSO @I2@
+3 ROLE OFFICIATOR
+4 PHRASE Civil officer
+3 NOTE Officer of the example town
+1 ASSO @I3@
+2 ROLE GODP
+3 PHRASE godmother
+0 @I2@ INDI
+1 NAME Paul /EXEMPLE/
+1 SEX M
+0 @I3@ INDI
+1 NAME Marie /EXEMPLE/
+1 SEX F
+0 TRLR

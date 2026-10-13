@@ -1,0 +1,13 @@
+0 HEAD
+1 GEDC
+2 VERS 7.0
+1 SOUR Geni.com
+2 VERS 1.0
+0 @I6000000000000000001@ INDI
+1 NAME Ann /Example/
+1 SEX F
+1 RESI
+2 EMAIL ann@example.invalid
+1 EXID 6000000000000000001
+2 TYPE https://gedcom.io/terms/v7/RFN#geni
+0 TRLR

@@ -1,0 +1,26 @@
+0 HEAD
+1 GEDC
+2 VERS 7.0
+1 SOUR Gramps
+2 VERS 5.1.2
+2 NAME Gramps
+1 SCHMA
+2 TAG _MREL https://github.com/trois-six/oxidged/blob/main/docs/extensions.md#gramps-_MREL
+2 TAG _RUFNAME http://genealogy.net/GEDCOM#_RUFNAME
+0 @I1@ INDI
+1 NAME Anna /Example/
+2 _RUFNAME Anna
+1 SEX F
+1 EVEN
+2 DATE 1910
+2 TYPE Funeral
+1 FAMC @F2@
+1 FAMC @F1@
+2 PEDI ADOPTED
+2 _FREL Adopted
+2 _MREL Adopted
+0 @F1@ FAM
+1 CHIL @I1@
+0 @F2@ FAM
+1 CHIL @I1@
+0 TRLR

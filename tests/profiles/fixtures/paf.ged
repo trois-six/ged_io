@@ -1,0 +1,33 @@
+0 HEAD
+1 SOUR PAF
+2 NAME Personal Ancestral File
+2 VERS 5.2.18.0
+2 CORP The Church of Jesus Christ of Latter-day Saints
+1 GEDC
+2 VERS 5.5
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @I1@ INDI
+1 NAME Anna /Example/
+2 _AKA Annie /Example/, Ann /Sample/
+1 SEX F
+1 _UID 92FF8B766F327F48A256C3AE6DAE50D3A114
+1 BIRT
+2 DATE ABT. 1850
+1 DEAT
+2 DATE Stillborn
+1 OBJE
+2 FILE first.jpg
+2 FORM jpg
+1 OBJE
+2 FILE preferred.jpg
+2 FORM jpg
+2 _PRIM Y
+1 FAMC @F1@
+1 FAMC @F2@
+2 _PRIMARY Y
+0 @F1@ FAM
+1 CHIL @I1@
+0 @F2@ FAM
+1 CHIL @I1@
+0 TRLR

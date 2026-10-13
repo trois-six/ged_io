@@ -1,0 +1,33 @@
+HEAD.SOUR EXAMPLE_APP written as ged_io (relabelled; EXF-082, EXC-018, EXC-057)
+@I1@: 2 occupations made one (merged, lossy; EXF-013)
+@I1@: 1 surname-only names in the primary SURN list (merged, lossy; EXF-003, EXF-002)
+@I1@: 2 nicknames in one NICK of the primary name (merged, lossy; EXF-005)
+@I1@: the usual given name in double quotes (recoded; EXF-006)
+@I1@: IDNO as EVEN + TYPE identification number (relabelled, lossy; EXF-014, EXF-015, EXF-032)
+@I1@: a death said Y for a person buried or cremated (added; EXF-017)
+@F3@: never married said as EVEN TYPE unmarried (relabelled; EXF-031, EXF-048)
+@I1@: 2 godparents of a baptism as associations of the person (moved; EXF-027, EXF-207)
+@I1@: a witness of BAPM as a note (as text, lossy; EXF-026, EXF-206)
+@I1@: a witness of BAPM as a note (as text, lossy; EXF-026, EXF-206)
+@I1@: an adoption as ADOP + FAMC + ADOP BOTH (added; EXF-030)
+@I1@: 1 citations of source records written inline (as text; EXF-019, EXF-011)
+@F2@: 1 citations of source records written inline (as text; EXF-019, EXF-011)
+@I1@: 2 links to multimedia records written inline (moved; EXF-012)
+@I1@: 1 fields of BIRT in its note (as text, lossy; EXF-036)
+@F2@: 1 fields of MARR in its note (as text, lossy; EXF-036)
+@I1@: an address of BURI as text (as text, lossy; EXF-036)
+@F2@: an address of MARR as text (as text, lossy; EXF-036)
+extension _SCHMA left out (omitted, lossy; EXF-021)
+extension _ROOT left out (omitted, lossy; EXF-021)
+@I1@: extension _SDATE as a note (as text, lossy; EXF-021)
+@I1@: extension _UID as a note (as text, lossy; EXF-021)
+@I1@: 1 notes with < and & escaped (recoded; EXF-020, EXF-209)
+limit: @I1@: impossible date 31 FEB 1920: the importer keeps part of it (EXF-023)
+repair: HEAD.SCHMA: not permitted here, written as _SCHMA
+repair: INDI.NAME.TYPE "AKA" written as aka
+repair: INDI.BIRT.SDATE: not permitted here, written as _SDATE
+repair: INDI.FAMC.PEDI "BIRTH" written as birth
+repair: INDI.FAMC.PEDI "ADOPTED" written as adopted
+repair: INDI.UID: not permitted here, written as _UID
+repair: INDI.RESN "PRIVACY" written as privacy
+repair: INDI.FAMC.PEDI "BIRTH" written as birth

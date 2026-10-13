@@ -1,0 +1,255 @@
+id	vendor	export_transformation	lossless
+EXF-001	GeneWeb ged2gwb (2026 master)	5.5.1: put the whole surname incl. particle between the slashes (1 NAME Jean /de Fictif/) and keep SPFX/SURN pieces for other readers; suffix has no carrier	partial (suffix dropped)
+EXF-002	GeneWeb ged2gwb	Write one NAME per alternative name (standard); do not rely on NAME.TYPE or name pieces of non-primary NAMEs	partial (types lost)
+EXF-003	GeneWeb ged2gwb	Surname aliases may be packed as primary 2 SURN Main,Alt1,Alt2 (5.5.1 NAME_PIECE_SURNAME allows comma-separated pieces)	yes (aliases kept)
+EXF-004	GeneWeb ged2gwb	Write GIVN identical to the NAME given part (or omit it) unless a first-name alias is intended	yes
+EXF-005	GeneWeb ged2gwb	One NICK under the primary NAME; several nicknames joined with ', '	partial (one field)
+EXF-006	GeneWeb ged2gwb	Mark the usual given name with double quotes inside the NAME given part (Marie "Louise" Anne /Fictif/); importer option must be set	partial (option-dependent)
+EXF-007	GeneWeb ged2gwb	Keep regnal numbers/epithets out of the NAME given part (put them in TITL or NICK)	partial (relocated)
+EXF-008	GeneWeb ged2gwb	Avoid ':' in names; write '?' for an unknown name part (GeneWeb convention)	partial (char lost)
+EXF-009	GeneWeb ged2gwb	UTF-8 + 1 CHAR UTF-8 (BOM accepted by current ged2gwb); never UTF-16; never label CP1252 data 'ANSI'	yes
+EXF-010	GeneWeb ged2gwb	LF or CRLF; keep nesting <= 9 levels; no wrapping needed beyond the 255-char 5.5.1 limit	yes
+EXF-011	GeneWeb ged2gwb	Do not depend on OBJE/REPO/SNOTE records: inline media, fold repository name/call number into the source text, keep 5.5.1 NOTE records	partial (REPO lost)
+EXF-012	GeneWeb ged2gwb	5.5.1 inline 1 OBJE / 2 FILE <path> as the first OBJE of the INDI (7.0 forbids inline OBJE, a reason to target 5.5.1)	partial (portrait only)
+EXF-013	GeneWeb ged2gwb	Undated professions as plain OCCU lines (or one comma-joined OCCU); dated ones as OCCU + DATE	yes
+EXF-014	GeneWeb ged2gwb	Write unsupported attributes/events as 1 EVEN <value> / 2 TYPE <label> (EVEN payload lands in the event note)	partial (typed->custom)
+EXF-015	GeneWeb ged2gwb	Use these English labels as EVEN.TYPE when the concept matches	yes
+EXF-016	GeneWeb ged2gwb	Write 1 BIRT Y (etc.) for an event known to have happened without details	yes
+EXF-017	GeneWeb ged2gwb	Always write 1 DEAT Y for known-deceased persons without details	yes
+EXF-018	GeneWeb ged2gwb	Emit a single BAPM or CHR; if both burial and cremation exist, the cremation is lost (or add it as EVEN TYPE)	partial (one kept)
+EXF-019	GeneWeb ged2gwb (master; Geneanet's gnt branch differs, EXF-221)	Fold PAGE (and repository) into a single source text per level: 5.5.1 inline 2 SOUR <title, page> or SOUR record TITL/TEXT; merge several record-level citations into one	partial (structure flattened)
+EXF-020	GeneWeb ged2gwb	Plain-text notes, CONT for line breaks; avoid markup-looking characters (inferred)	yes
+EXF-021	GeneWeb ged2gwb	Map everything to standard tags or EVEN/TYPE; never rely on _MARNM/_FREL/_UID etc.	partial (extensions lost)
+EXF-022	GeneWeb ged2gwb	Apply privacy before export (exclude or anonymise living/restricted persons)	no (no privacy)
+EXF-023	GeneWeb ged2gwb	5.5.1 dates with @#DJULIAN@ / @#DFRENCH R@ / @#DHEBREW@ escapes; write a dual year as its later year; CAL->EST and INT->ABT only if loss of the phrase is acceptable	partial (qualifiers)
+EXF-024	GeneWeb ged2gwb	Never write numeric months	yes
+EXF-025	GeneWeb ged2gwb	5.5.1: 1200 B.C.; 7.0: 1200 BCE	yes
+EXF-026	GeneWeb ged2gwb	Event-level ASSO is only conformant in 7.0 (2 ASSO @I@ / 3 ROLE WITN, read as plain witness); in 5.5.1 there is no conformant carrier ged2gwb reads	partial (kind lost)
+EXF-027	GeneWeb ged2gwb	5.5.1 1 ASSO @I@ / 2 RELA godfather|godmother in the godchild's INDI	yes
+EXF-028	GeneWeb ged2gwb	7.0: 2 ASSO @I@ / 3 ROLE WITN under MARR; 5.5.1 has no conformant form (ASSO->FAM and ASSO.TYPE are 5.5)	partial (version trade-off)
+EXF-029	GeneWeb ged2gwb	1 TITL <title>, <place>, <n> / 2 DATE FROM x TO y (TITL is free text in 5.5.1/7.0)	yes
+EXF-030	GeneWeb ged2gwb	List the birth FAMC first; express adoption with the 5.5.1 ADOP.FAMC.ADOP structure	partial (PEDI lost)
+EXF-031	GeneWeb ged2gwb	1 EVEN / 2 TYPE unmarried (or pacs, nomen) instead of the non-semantic PLAC unmarried	yes
+EXF-032	GeneWeb ged2gwb	Separation as 1 EVEN / 2 TYPE separation; DIVF/MARS as EVEN + TYPE	partial (typed->custom)
+EXF-033	GeneWeb ged2gwb	Write conformant HUSB+WIFE with real SEX values; accept that the couple is not flagged same-sex	partial (flag lost)
+EXF-034	GeneWeb ged2gwb	Emit INDI records in a stable order across exports so occ numbers stay stable (inferred)	yes
+EXF-035	GeneWeb ged2gwb	Put tree-level notes in HEAD.NOTE (5.5.1 GEDCOM_CONTENT_DESCRIPTION)	yes
+EXF-036	GeneWeb ged2gwb	Optionally prefix the subdivision as '[Hamlet] - Town, ...' (conformant string, breaks FORM jurisdiction semantics); fold CAUS/AGE into the event NOTE if needed	partial (FORM semantics)
+EXF-037	Geneanet (online import, GeneWeb-based)	Primary NAME with /particle surname/; surname-only aliases packed into the primary SURN list (structured surname aliases); other names (married, AKA, given-name variants) as extra NAMEs, which Geneanet keeps as aliases, rather than discarding them	partial (alias types lost)
+EXF-038	Geneanet	One OCCU per person, professions comma-joined (ged2gwb joins plain OCCUs the same way)	partial (dates lost)
+EXF-039	Geneanet	Usual name in double quotes inside the NAME given part; tell the user to tick the option	partial (option-dependent)
+EXF-040	Geneanet	Use NICK, not ALIA/_AKA	yes
+EXF-041	Geneanet	Never double '@' inside calendar escapes; for literal '@' in text the 7.0 rule (double only a leading '@') suits Geneanet, in 5.5.1 accept '@@' visible	partial (5.5.1 conflict)
+EXF-042	Geneanet	5.5.1 OBJE with absolute local FILE path; no GEDZIP; event-level media degrade to person media	partial (links lost)
+EXF-043	Geneanet	UTF-8 WITHOUT BOM + 1 CHAR UTF-8 (BOM-less is the safe choice even though current ged2gwb accepts a BOM)	yes
+EXF-044	Geneanet	Warn above the limit; exclude notes/sources to shrink (OxidGene include_notes_and_sources=false)	no (size cap)
+EXF-045	Geneanet	Do not write event ADDR for Geneanet; put the address text in the PLAC subdivision or NOTE	partial (structure lost)
+EXF-046	Geneanet	PLAC '[Hamlet] - Fictiville, 99999, County, Region, Country' (no HEAD.PLAC.FORM needed)	partial (FORM semantics)
+EXF-047	Geneanet	5.5.1 (Geneanet target): no conformant carrier for event witnesses (EXF-026), so write godparents as INDI-level ASSO + RELA Godfather/Godmother (EXF-207) and report other witnesses as lossy; 7.0: event ASSO + ROLE, which Geneanet reads as plain witnesses (EXF-202)	partial (version trade-off)
+EXF-048	Geneanet	1 EVEN / 2 TYPE unmarried|pacs|nomen (conformant, read by ged2gwb)	yes
+EXF-049	Geneanet	Optionally duplicate TITL as 1 EVEN / 2 TYPE Titre; add quality as citation DATA/NOTE text; move FAMC.SOUR into an INDI NOTE	partial (relocated)
+EXF-050	Heredis (2023+)	7.0 GEDZIP (.gdz) with relative FILE paths when media matter; else 5.5.1 .ged	yes
+EXF-051	Heredis	UTF-8 (5.5.1: 1 CHAR UTF-8)	yes
+EXF-052	Heredis	HEAD.PLAC.FORM Town, Area code, County, Region, Country, Subdivision and every PLAC with exactly 6 comma fields (empty ones kept)	yes
+EXF-053	Heredis 2026	Standard MAP/LATI/LONG with N/S/E/W prefix and '.' decimals	yes
+EXF-054	Heredis	Minimise '_' tags; carry custom data as standard EVEN/FACT + TYPE so no manual mapping is needed	partial (user-dependent)
+EXF-055	Heredis	Quote the usual given name only when the target user wants it; otherwise put it first, unquoted	partial (option-dependent)
+EXF-056	Heredis	Relative FILE paths (file name or sub-path) and ship the media folder next to the .ged (mirrors Heredis's own 'Create media folder' export)	partial (manual relink)
+EXF-057	Heredis 2026	One NAME per alternate name with 2 TYPE (aka/married/...); do NOT use the SURN packing used for Geneanet	yes
+EXF-058	Heredis	5.5.1 calendar escapes; dates outside the range as date phrase (inferred)	yes
+EXF-059	Heredis	If an extension is needed for Heredis, prefer its own (_PRIM Y on the primary media link, _FSFTID); values beyond observed ones unknown	partial (inferred)
+EXF-060	Heredis	Standard OBJE (+FORM, FILE) only	yes
+EXF-061	Généatique 2024	5.5.1 UTF-8 + 1 CHAR UTF-8 and tell the user to pick UTF-8	yes
+EXF-062	Généatique 2024	Target 5.5.1	yes
+EXF-063	Généatique 2019	Do not CONC-wrap citation TEXT: keep TEXT on one line (<=255) or move the text into a SOUR record	yes
+EXF-064	Généatique (geneatique.net online)	Plain-text NOTE (no HTML/RTF; in 7.0 no MIME text/html)	partial (format lost)
+EXF-065	Généatique	5.5.1 OBJE with absolute ('chemin complet') or consistent relative FILE paths; no GEDZIP (inferred for import)	partial (manual relink)
+EXF-066	Généatique	If not UTF-8, write Windows-1252 bytes and declare 1 CHAR ANSI	partial (charset range)
+EXF-067	Gramps 5.x/6.0 (libgedcom)	UTF-8 + 1 CHAR UTF-8 (BOM optional)	yes
+EXF-068	Gramps	5.5.1, FORM LINEAGE-LINKED	yes
+EXF-069	Gramps	Wrap only above 255; never CONC right after a 4-char value	yes
+EXF-070	Gramps	One PLAC per event	yes
+EXF-071	Gramps	OBJE records with one FILE each; media date as _DATE on the record (5.5.1 has no OBJE date)	partial (date via _)
+EXF-072	Gramps	Relative FILE paths with '/' from the .ged directory	yes
+EXF-073	Gramps	REFN on the SOUR record; sources cited from the owning record, not from the NOTE	yes
+EXF-074	Gramps	Apply privacy before export	no (value lost)
+EXF-075	Gramps	INDI-level 1 ASSO @I@ / 2 RELA <role>; for event witnesses in 5.5.1 add 2 _WITN @I@ (GEDCOM-L style extension)	partial (via _)
+EXF-076	Gramps	Use PEDI when both parents share the relation; for per-parent relations omit PEDI and write _FREL/_MREL under INDI.FAMC	partial (via _)
+EXF-077	Gramps	One NAME per name with 2 TYPE aka|married	yes
+EXF-078	Gramps	Do not use the Geneanet SURN packing for Gramps; alternate surnames as separate NAMEs	yes
+EXF-079	Gramps	English month dates; same calendar on both ends of a range	partial (INT phrase)
+EXF-080	Gramps	Keep extensions at level 1 or use ones Gramps knows	partial (deep _ lost)
+EXF-081	Gramps	PACS-like unions as 1 MARR / 2 TYPE Civil Union; cohabitation as 2 TYPE Unmarried	yes
+EXF-082	Gramps	Write the exporter's own HEAD.SOUR, never another vendor's id	yes
+EXF-083	webtrees 2.2	UTF-8 + exactly 1 CHAR UTF-8	yes
+EXF-084	webtrees	Avoid CONC (no limit); if wrapping, split mid-word or start the CONC with the space	yes
+EXF-085	webtrees	Write OBJE records, one FILE each (5.5.1 layout FILE/FORM/TYPE, TITL)	yes
+EXF-086	webtrees	Relative FILE paths with '/' (relative to the media folder)	yes
+EXF-087	webtrees	5.5.1 FORM jpg|png|pdf	yes
+EXF-088	webtrees	Every level-0 record (except HEAD/TRLR) with an xref; place data via GEDCOM-L _LOC records, not _PLAC	yes
+EXF-089	webtrees	Short xrefs such as @I123@	yes
+EXF-090	webtrees	Spec dates (1 FEB 1900)	yes
+EXF-091	webtrees	Standard 3 MAP / 4 LATI N.. / 4 LONG E.. under 2 PLAC; optional GEDCOM-L _LOC records for a place gazetteer (inferred)	yes
+EXF-092	webtrees	Prefer 5.5.1 with NOTE records (inferred)	partial (7.0 partial)
+EXF-093	webtrees	5.5.1 event witnesses as 2 _ASSO @I@ / 3 RELA witness; 7.0 as 2 ASSO / 3 ROLE	yes
+EXF-094	Ancestris (import wizard)	Always write HEAD.PLAC.FORM and the same number of comma fields in every PLAC	yes
+EXF-095	Ancestris	1 BIRT Y (or empty); description in TYPE/NOTE	yes
+EXF-096	Ancestris	Custom events as 1 EVEN / 2 TYPE <label>	yes
+EXF-097	Ancestris	5.5.1: write the association on the associated person with RELA '<role>@INDI:<EVENT>' (Ancestris convention, conformant free text)	yes
+EXF-098	Ancestris	Do not wrap PAGE or other single-line values; wrap only multi-line text tags	yes
+EXF-099	Ancestris	Citation date under DATA, REFN on the SOUR record, addresses under RESI	yes
+EXF-100	Ancestris 12+	7.0 or 5.5.1 UTF-8	yes
+EXC-001	Ancestry.com	Warn above 75 MB; offer branch/generation split. Target 5.5.1, UTF-8.	yes (no data change)
+EXC-002	Ancestry.com	Drop local-path OBJE/FILE (or keep only URL FILE values, inferred); no GEDZIP	no (media dropped)
+EXC-003	Ancestry.com	For each bare event/attribute add `2 NOTE No recorded date or place` (standard NOTE)	yes (synthetic note)
+EXC-004	Ancestry.com	Write `1 EVEN <value>` + `2 TYPE <label>` instead of FACT	partial (attribute→event)
+EXC-005	Ancestry.com	Convert each to `1 EVEN <value>` + `2 TYPE Alias|ID number|Children|Marriages`	partial (typed event)
+EXC-006	Ancestry.com	Optional: write CENS as `1 RESI` + `2 TYPE Census` (inferred conformant form of FH's CENS→RESI)	partial (event kind)
+EXC-007	Ancestry.com	`1 EVEN` + `2 TYPE Associate` + `2 NOTE Associate: <name>; Relationship: <RELA>`	partial (pointer→text)
+EXC-008	Ancestry.com	Move to event NOTE `Age: <age>`	partial (structure→text)
+EXC-009	Ancestry.com	Append address to PLAC after ` at `, or move it to the event NOTE	partial (address flattened)
+EXC-010	Ancestry.com	Move record notes into `1 EVEN`/`2 TYPE Record Note`/`2 NOTE`; put text over 256 characters into a citation `3 DATA`/`4 TEXT` of a synthetic source	partial (relocated text)
+EXC-011	Ancestry.com	Re-attach to a synthetic `1 EVEN`/`2 TYPE Whole Record Citation`/`2 SOUR @Sx@`	partial (relocated citation)
+EXC-012	Ancestry.com	Always write citations as pointers; make `0 @Sx@ SOUR`/`1 TITL <text>` from each text citation	yes (structure change)
+EXC-013	Ancestry.com	If no TITL, promote ABBR to TITL; move PUBL/TEXT/ABBR into the source NOTE with labels	partial (fields flattened)
+EXC-014	Ancestry.com	Move to labelled REPO NOTE	partial (fields flattened)
+EXC-015	Ancestry.com	Write the home person as the first record after HEAD; omit _ROOT/_LIST	yes (ordering only)
+EXC-016	Ancestry.com	Strip rich text (7.0 MIME text/html → plain text) when targeting Ancestry	partial (formatting lost)
+EXC-017	Ancestry.com; Family Tree Maker	Keep standard INDI.FAMC.PEDI and also write `2 _FREL <Natural|Adopted|…>` and `2 _MREL …` under FAM.CHIL	yes (redundant extension)
+EXC-018	Family Tree Maker 2019/2024	Option only: `1 SOUR FTM` (legal value, but spoofs the writer id; default off)	yes (header only)
+EXC-019	Family Tree Maker 2017+	Write alternate names as extra `1 NAME` + `2 TYPE aka`; keep NICK (never put a name on INDI.ALIA, which takes a pointer)	partial (nick→AKA)
+EXC-020	Family Tree Maker 2014+	One `1 NAME` per name; the primary name comes first	yes (native support)
+EXC-021	Family Tree Maker 2019	Move NPFX to `1 TITL <prefix>`; put NSFX after the surname in the NAME value (`John /Doe/ Jr`)	partial (pieces merged)
+EXC-022	Family Tree Maker 2019	`1 EVEN <associate name>` + `2 TYPE Associate`	partial (pointer→text)
+EXC-023	Family Tree Maker 2019	INDI: `1 FACT <value>` + `2 TYPE <label>`; FAM: `1 EVEN <value>` + `2 TYPE <label>` (5.5.1 has no FAM.FACT)	partial (typed fact)
+EXC-024	Family Tree Maker 2019	Move to event NOTE `Age: …`	partial (structure→text)
+EXC-025	Family Tree Maker 2019	If the event value is empty, put the first ADDR line there; otherwise use the event NOTE	partial (address flattened)
+EXC-026	Family Tree Maker 2019	Move CAUS on other events to NOTE `Cause: …`	partial (structure→text)
+EXC-027	Family Tree Maker 2019	Write `_FREL`/`_MREL` (EXC-017); also keep PEDI and add an INDI NOTE `Relationship: adopted…`	partial (needs extension)
+EXC-028	Family Tree Maker 2019	Move record-level citations to a synthetic EVEN; copy source-level OBJE and URL notes to each citation; write the first URL as `3 _LINK <url>`	partial (relocated citation)
+EXC-029	Family Tree Maker 2019	With OBJE records, add `1 _PHOTO @Ox@` for the preferred image	yes (extension)
+EXC-030	Family Tree Maker 2019	Promote ABBR to TITL when TITL is missing; move the rest to the source NOTE	partial (fields flattened)
+EXC-031	Family Tree Maker 2019	Join all e-mail and web addresses into one EMAIL; join PHON and FAX into one PHON	partial (fields merged)
+EXC-032	Family Tree Maker 2019	Absolute FILE paths, with `/` on macOS targets; ship the media folder alongside	partial (paths rebased)
+EXC-033	Family Tree Maker 2019 (24.0)	Never write CONC/CONT under HEAD; keep header values on one line	yes (layout only)
+EXC-034	Family Tree Maker (current MacKiev)	Declare `2 VERS 5.5.1`, never older	yes (header only)
+EXC-035	Family Tree Maker 2017	UTF-8; no trailing whitespace; split CONC inside words, never right after a space	yes (encoding only)
+EXC-036	Family Tree Maker 16 (2006)	Legacy option: no CONC under NAME; warn when a name is over 40 characters or a family is over 99	no (truncation)
+EXC-037	MyHeritage (Family Tree Builder and site)	Make the NAME value complete (`Given /Surname/ Suffix`); put pieces that disagree with it into a labelled INDI NOTE	partial (pieces→text)
+EXC-038	MyHeritage	Append it to `2 NICK`	partial (merged field)
+EXC-039	MyHeritage	`1 EVEN <value>` + `2 TYPE <label>`	partial (attribute→event)
+EXC-040	MyHeritage	Convert each to `1 EVEN <value>` + `2 TYPE <label>`	partial (typed event)
+EXC-041	MyHeritage	`1 EVEN` + `2 TYPE Associate` + labelled NOTE	partial (pointer→text)
+EXC-042	MyHeritage	Append the address to PLAC after ` at `	partial (address flattened)
+EXC-043	MyHeritage	Move to labelled event NOTE	partial (structure→text)
+EXC-044	MyHeritage	Move to labelled record NOTE `Custom Id: …`	partial (ids→text)
+EXC-045	MyHeritage	Write only `<date>`; put the phrase in the event NOTE	partial (phrase→note)
+EXC-046	MyHeritage Family Tree Builder	Use local OBJE links; mark the preferred image `_PRIM Y` and `_PRIM_CUTOUT Y`	yes (extension)
+EXC-047	MyHeritage.com (site upload)	Site: drop OBJE local paths. FTB: absolute local paths next to the .ged	no (site drops media)
+EXC-048	MyHeritage Family Tree Builder	No change needed (cosmetic); optional for the site: ADOP/BLES → `1 EVEN` + `2 TYPE Adoption|Blessing` (inferred)	partial (cosmetic only)
+EXC-049	MyHeritage (FTB 8)	Never CONC/CONT in HEAD	yes (layout only)
+EXC-050	MyHeritage (FTB 4)	No CONC under NAME (not allowed by 5.5.1 either); NAME ≤120 characters	yes (layout only)
+EXC-051	MyHeritage	Keep rich text as HTML in NOTE (FH's default for MYH)	yes (format kept)
+EXC-052	FamilySearch (Genealogies upload)	Target 5.5.1; never 7.0 or GEDZIP for this upload	yes (version choice)
+EXC-053	FamilySearch	Warn above 100 MB; offer a subset export	yes (no data change)
+EXC-054	FamilySearch	Brief profile: append ADDR to PLAC after ` at `; put key citation detail in source TITL/AUTH; omit the rest	no (display subset)
+EXC-055	FamilySearch	Drop OBJE; keep notes/sources only for the static tree view	no (compare drops them)
+EXC-056	FamilySearch	Keep living people unprivatized for structure (they stay hidden) or omit them (user option)	yes (site hides)
+EXC-057	RootsMagic 8–11	Option only: `1 SOUR ROOTSMAGIC` (legal, spoofs the writer id; default off). Prefer stable xrefs plus RIN/_UID	yes (header only)
+EXC-058	RootsMagic	Make the NAME value authoritative; write GIVN/SURN only when they agree with it; put _USED/odd pieces into a labelled NOTE	partial (pieces→text)
+EXC-059	RootsMagic	`1 EVEN` + `2 TYPE Associate` + NOTE (or `_SHAR` when the association is to an event; EXC-063)	partial (pointer→text)
+EXC-060	RootsMagic	Convert each to `1 EVEN <value>` + `2 TYPE <label>`	partial (typed event)
+EXC-061	RootsMagic	FACT → `1 EVEN <value>` + `2 TYPE`; any other TYPE → event NOTE `Descriptor: …`	partial (descriptor→text)
+EXC-062	RootsMagic	Move to labelled event NOTE	partial (structure→text)
+EXC-063	RootsMagic	5.5.1: `_SHAR` + `ROLE` for linked witnesses; name-only witnesses → event NOTE `Witness: …`; lift witness/note citations to the event or record	partial (name-only lost)
+EXC-064	RootsMagic	Keep `2 _SDATE <date>` when the user set an explicit sort date	yes (extension)
+EXC-065	RootsMagic	Text citations → SOUR records; citation entry date → citation NOTE `Entry date: …`	partial (date→text)
+EXC-066	RootsMagic	Omit SUBN (or a synthetic source holding its details)	no (record dropped)
+EXC-067	RootsMagic	Use local OBJE links; add `_PRIM Y` to the preferred image	yes (extension)
+EXC-068	RootsMagic	Omit CHAN for this target (option)	no (timestamps dropped)
+EXC-069	RootsMagic 4+	Write each alternate name as its own `1 NAME`, always with `/surname/` delimiters	yes (structure change)
+EXC-070	RootsMagic 8	Write PEDI under INDI.FAMC; `_FREL`/`_MREL` optional	yes (standard tag)
+EXC-071	RootsMagic 8+	Write `1 _UID` as 36 uppercase hex digits (UUID + PAF checksum), no hyphens	yes (format choice)
+EXC-072	RootsMagic 10/11	Target 5.5.1 UTF-8; never GEDZIP	yes (version choice)
+EXC-073	RootsMagic	Reduce rich text to those HTML tags	partial (formatting reduced)
+EXC-074	RootsMagic 4 (2010)	No CONC under NAME; NAME ≤120 characters	yes (layout only)
+EXC-075	Legacy Family Tree 9/10	UTF-8 (default); optional ANSEL 5.5.1 profile that warns on unmappable characters	partial (charset gaps)
+EXC-076	Legacy Family Tree	Write the home person first	yes (ordering only)
+EXC-077	Legacy Family Tree	`1 EVEN <value>` + `2 TYPE <label>`; ASSO → EVEN + labelled NOTE	partial (typed event)
+EXC-078	Legacy Family Tree	`1 EVEN <value>` + `2 TYPE <label>`	partial (attribute→event)
+EXC-079	Legacy Family Tree 9+	`2 _SHAR @Ix@` + `3 ROLE <role>`; name-only witnesses → event NOTE	partial (name-only lost)
+EXC-080	Legacy Family Tree	Join PHON and FAX into one PHON; use standard EMAIL/WWW (not _EMAIL/_WEB)	partial (fields merged)
+EXC-081	Legacy Family Tree	Lift NOTE.SOUR to the parent event or record; never write SOUR under NOTE	partial (citation relocated)
+EXC-082	Legacy Family Tree	Write `1 _STAT Never Married|Unmarried|…` for non-marital unions (keep any standard MARR/DIV)	yes (extension)
+EXC-083	Legacy Family Tree	Inline NOTE-record subtags into the text; name note xrefs @NI…@, @HI…@ (research notes) and @MI…@ (medical notes)	partial (subtags→text)
+EXC-084	Legacy Family Tree	5.5.1: copy LATI/LONG into every `2 PLAC`/`3 MAP`; drop the place records	partial (record flattened)
+EXC-085	Legacy Family Tree	Local OBJE links with `_PRIM Y` and `_DATE` where known	yes (extension)
+EXC-086	Legacy Family Tree 9	36 hex digits (UUID + checksum), uppercase, no hyphens	yes (format choice)
+EXC-087	Legacy Family Tree	Map bold/italic/etc. to those codes in NOTE text	partial (formatting reduced)
+EXC-088	Legacy Family Tree 7	Warn when a family has over 60 children; no CONC under NAME	no (children dropped)
+EXC-089	Ancestral Quest 15/16	Keep SPFX in the NAME value only; put _USED into a labelled NOTE	partial (pieces→text)
+EXC-090	Ancestral Quest	`1 EVEN <value>` + `2 TYPE <label>` when the attribute has DATE/PLAC/SOUR subtags; otherwise keep the bare standard tag	partial (typed event)
+EXC-091	Ancestral Quest	ASSO → EVEN + NOTE; AGE → NOTE; ADDR appended to PLAC after ` at `; contact details → NOTE	partial (structure→text)
+EXC-092	Ancestral Quest	Move them into labelled NOTE text; lift NOTE.SOUR to the parent	partial (structure→text)
+EXC-093	Ancestral Quest	Local OBJE (not OBJE records) with `2 _TYPE PHOTO` (images) or `2 _TYPE OTHER`, plus `_PRIM Y` on the preferred image	yes (extension)
+EXC-094	Ancestral Quest 15	Never CONC in HEAD	yes (layout only)
+EXC-095	Ancestral Quest	UTF-8 (BOM recommended, inferred)	yes (encoding only)
+EXC-096	PAF 5.2	First NAME = primary; join the other names into `2 _AKA` under it	partial (names merged)
+EXC-097	PAF 5.2	Move AGE to the event NOTE	partial (structure→text)
+EXC-098	PAF 5	UTF-8 with BOM (preferred), or UTF-16LE with BOM; never UTF-16BE	yes (encoding only)
+EXC-099	PAF 5.2.18	No CONC under NAME; NAME ≤120 characters, warn above	no (truncation risk)
+EXC-100	PAF	One terminator for the whole file (CRLF for Windows targets)	yes (layout only)
+EXC-101	WikiTree (GEDCOMpare)	Subset export (an ancestor's descendants, N generations) with a person-count guard	yes (subset only)
+EXC-102	WikiTree	Omit them (smaller file); move key ids (such as a FamilySearch id) into a NOTE	no (tags skipped)
+EXC-103	WikiTree	Minimal profile: drop technical tags and default notes; use standard tags whose labels read well	partial (text, not data)
+EXC-104	WikiTree	Do not replace living names with “Living” for this target	yes (no masking)
+EXC-105	WikiTree	5.5.1 UTF-8	yes (version choice)
+EXC-106	Geni	Subset export with a person-count guard	yes (subset only)
+EXC-107	Findmypast	Size and count guard; drop OBJE local paths	no (media dropped)
+EXC-108	Findmypast	Complete NAME value; NPFX → `1 TITL`; other pieces → labelled INDI NOTE	partial (pieces→text)
+EXC-109	Findmypast	`1 EVEN <value>` + `2 TYPE <label>` (ASSO with a labelled NOTE)	partial (typed event)
+EXC-110	Findmypast	Move to labelled NOTE (PEDI → INDI NOTE `Relationship: …`)	partial (structure→text)
+EXC-111	Findmypast	FAM notes → `1 EVEN`/`2 TYPE Family Story`/`2 NOTE`; record citations → a synthetic `Story` EVEN carrying the SOUR	partial (relocated text)
+EXC-112	Findmypast	Write `0 @Nx@ NOTE` with no value, then `1 CONC <text>` (borderline: 5.5.1 wants a value on that line)	yes (layout only)
+EXC-113	Findmypast	Keep rich text as HTML	yes (format kept)
+EXC-114	TNG (The Next Generation)	Write standard multiple NAME and CENS; the export report tells the admin to configure them	yes (config needed)
+EXC-115	TNG	FACT/_ATTR → `1 EVEN <value>` + `2 TYPE <label>`; ALIA → EVEN; list every TYPE used in the export report	partial (attribute→event)
+EXC-116	TNG	5.5.1 `1 FILE media/<collection>/<file>` + `2 FORM <ext>` + `3 TYPE photo|document` (+ `_TYPE`, `_PRIM Y`); FORM and TITL under FILE	yes (layout only)
+EXC-117	TNG	Keep PEDI; add `_FREL`/`_MREL`; no SOUR under them	partial (citations lost)
+EXC-118	TNG	Write FAX as PHON; EMAIL/WWW as 5.5.1 tags	partial (field merged)
+EXC-119	TNG v15	7.0: standard `CROP`; 5.5.1: omit (or user opt-in)	partial (5.5.1 loses)
+EXC-120	TNG v14+	Offer GEDZIP (7.0) or a zip of .ged + media	yes (bundle)
+EXC-121	TNG	UTF-8; tell admins to copy large files to the GEDCOM folder over FTP	yes (encoding only)
+EXC-122	Reunion 9–14	UTF-8; OBJE FILE relative to a media folder (Reunion relinks via search folders); `_PRIM Y` on the preferred image (inferred)	yes (paths relinked)
+EXC-123	Reunion 14	Write a stable `1 _UID` per record	yes (extension)
+EXC-124	Reunion	Standard tags; custom facts as `EVEN`/`FACT` + `TYPE`; flat citations (SOUR pointer + PAGE)	partial (manual mapping)
+EXC-125	MacFamilyTree 10/11	5.5.1 or 7.0 UTF-8; media in a sibling folder with relative FILE paths	yes (native support)
+EXC-126	Family Historian 7/8	7.0 + GEDZIP with media bundled; or 5.5.1 + FH extensions	yes (native support)
+EXC-127	Family Historian	Avoid foreign extensions: _AKA → extra NAME; _MILT → `1 EVEN` + `2 TYPE Military Service`; use FH's own `_SHAR`/`_SDATE`/`_ATTR` (≤ v6) where needed	yes (mapped tags)
+EXC-128	Family Historian	Write witnesses as `_SHAR @Ix@` + `ROLE` (5.5.1) or event `ASSO` + `ROLE` (7.0)	yes (structure kept)
+EXC-129	Ahnenblatt 3.02	Never CONC in HEAD	yes (layout only)
+EXC-130	Ahnenblatt 2.62	No CONC under NAME	yes (layout only)
+EXC-131	Ahnenblatt 2.72+	PAF-style 36-hex `_UID`	yes (extension)
+EXC-132	Ahnenblatt	Optional: `2 _GODP <names>` under BAPM/CHR in addition to standard ASSO/RELA	yes (redundant extension)
+EXF-201	Geneanet (online GEDCOM import)	Keep two profiles: 'geneanet' targets gnt ged2gwb, 'geneweb' targets master ged2gwb; re-check both against the branches when they move	n/a
+EXF-202	Geneanet (gnt ged2gwb)	Export 5.5.1 for Geneanet. If 7.0 is forced: no SNOTE (inline NOTE), never @VOID@ (omit the pointer), dates with 7.0 calendar keywords avoided, and accept portrait and witness-kind loss	partial (7.0 structures lost)
+EXF-203	Geneanet (gnt ged2gwb)	UTF-8 without BOM + 1 CHAR UTF-8 stays the safe default (a BOM is harmless on current gnt)	yes
+EXF-204	Geneanet (gnt ged2gwb)	Never write UTF-16 or UTF-32	yes
+EXF-205	Geneanet (gnt ged2gwb)	No conformant fix without inventing data: write the PACS with its date or place when known; report an empty PACS as lossy for Geneanet	partial (empty PACS lost)
+EXF-206	GeneWeb ged2gwb; Geneanet	No conformant carrier for the kind: 7.0 event ASSO + ROLE arrives as a plain witness; godparents go through INDI-level ASSO (EXF-207). Never write GodFather/GodMother as a kind; the strings above are the only ones ged2gwb maps	partial (kind lost in 7.0)
+EXF-207	GeneWeb ged2gwb; Geneanet	5.5.1: 1 ASSO @I@ / 2 RELA Godfather then 1 ASSO @I@ / 2 RELA Godmother in the godchild, each godfather directly followed by his co-godmother; optionally also the baptism witness form	yes
+EXF-208	Geneanet (gnt ged2gwb)	7.0: event ASSO + NOTE (conformant); 5.5.1: event ASSO is already non-conformant (EXF-026)	yes
+EXF-209	GeneWeb ged2gwb; Geneanet	Split CONC mid-word, never next to a space (the generic-551 default); plain-text notes	yes
+EXF-210	Geneanet (gnt ged2gwb, since 2025-04)	Never put markup-like '<...>' in names or places; in notes escape a literal '<' and '&' as &lt; and &amp; (inferred)	partial (markup-like text lost)
+EXF-211	Geneanet (gnt ged2gwb, since 2024-07)	One NAME per alternative name with slashes; readable by both branches	partial (types lost)
+EXF-212	Geneanet (gnt ged2gwb, since 2025-07)	One 1 ADOP / 2 FAMC @F@ / 3 ADOP HUSB|WIFE|BOTH per adoption	yes
+EXF-213	GeneWeb ged2gwb; Geneanet	Write a single HEAD.NOTE for tree-level notes	partial (pages flattened)
+EXF-214	Geneanet (gnt ged2gwb, since 2025-01)	Validate day/month before export and report invalid dates	partial (precision)
+EXF-215	Geneanet (pre-processing before ged2gwb)	Profession as OCCU, never FACT TYPE Profession; URLs under 255 characters without CONC (or in a NOTE whose CONC split is not inside the URL); keep the 'no _ tags' rule	partial (FACT/WWW degraded)
+EXF-216	Geneanet (pre-processing)	Write EVEN TYPE unmarried for 'not married' and EVEN TYPE nomen for 'unknown'; never rely on a missing MARR to mean 'not married'	yes
+EXF-217	Geneanet (upload form)	Tell the user to keep the encoding on Default (the file says CHAR UTF-8) and to tick the quoted-first-name option; given-name capitalisation may be rewritten by Geneanet	partial (option-dependent)
+EXF-218	Geneanet (web upload)	Send the .ged alone (optionally zipped as .zip); never GEDZIP; media through the Upload app or the API (EXF-042, EXF-219)	partial (media need a second channel)
+EXF-219	Geneanet (upload API, used by Ancestris)	Keep OBJE.FILE paths unique and stable per file so the server-side media parser maps them back to INDI xrefs; titles <= 100 characters; choose a deposit type per media category	yes
+EXF-220	Geneanet (Ancestris export profile)	Conformant subset for oxidged: NSFX -> NICK fold, GIVN omitted when it equals the given part, ADOP + FAMC ADOP BOTH, EVEN TYPE unmarried, no _ tags, place rewrite; not the move of witness ASSOs onto events, which is non-conformant in 5.5.1 (EXF-026)	partial
+EXF-221	Geneanet (gnt ged2gwb)	For Geneanet write inline citations: 2 SOUR <title, page, repository> as one text (5.5.1 SOURCE_CITATION without pointer), which is also what Geneanet's own export does (FR-091)	partial (structure flattened)
+EXF-222	Geneanet (unmerged gnt-gedcom-control branch)	Warn when a person or family exceeds these counts or lengths (warn only)	n/a (limits)

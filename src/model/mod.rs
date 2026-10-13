@@ -218,6 +218,7 @@ pub use edit::{
     EditError, Editable, Handle, Holder, Link, RecordHandle, RecordKind, RecordMut, RecordType,
     Removal,
 };
+pub(crate) use enums::Enumeration;
 pub use enums::{
     Adoption, BirthKind, Certainty, CharacterSet, ChildStatus, EnumList, EventKind, GedcomForm,
     LdsStatus, Medium, MultimediaFormat, NameType, NoteKind, OrdinanceFlag, OrdinanceStatus,

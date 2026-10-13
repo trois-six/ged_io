@@ -220,7 +220,7 @@ pub(super) const FAMILYSEARCH_PERSON: &str = "https://gedcom.io/exid-type/Family
 /// Extension tags 5.5.1 files use whose meaning has a URI, declared in
 /// `HEAD.SCHMA` when they are written in 7.x (the GEDCOM-L tags, as the
 /// gedcom7code converter declares them).
-pub(super) const KNOWN_EXTENSIONS: &[(&str, &str)] = &[
+pub(crate) const KNOWN_EXTENSIONS: &[(&str, &str)] = &[
     ("_AIDN", "http://genealogy.net/GEDCOM#_AIDN"),
     ("_DMGD", "http://genealogy.net/GEDCOM#_DMGD"),
     ("_GOV", "http://genealogy.net/GEDCOM#_GOV"),

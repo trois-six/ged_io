@@ -7,6 +7,7 @@
 #![no_main]
 
 use ged_io::model::{Age, Dataset, Date};
+use ged_io::profile::Interpretation;
 use ged_io::value::{AgeValue, Calendar, DateExact, DatePeriod, DateValue, Time};
 use ged_io::{GedcomBuilder, GedcomVersion, GedcomWriter, IndexedDataset};
 use libfuzzer_sys::fuzz_target;
@@ -89,8 +90,11 @@ fuzz_target!(|data: &[u8]| {
             .write_to_string(&d)
         {
             let _ = GedcomBuilder::new().strict(true).build_from_str(&out);
-            // Writing is idempotent: write(read(write(x))) == write(x).
+            // Writing is idempotent: write(read(write(x))) == write(x),
+            // read as written (the producer's conventions interpreted are
+            // the `profiles` target's).
             let back = GedcomBuilder::new()
+                .interpretation(Interpretation::None)
                 .build_from_str(out.as_str())
                 .expect("lenient reading never fails");
             let again = GedcomWriter::new()

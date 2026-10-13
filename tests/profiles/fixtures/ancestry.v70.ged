@@ -1,0 +1,38 @@
+0 HEAD
+1 GEDC
+2 VERS 7.0
+1 SOUR Ancestry.com Family Trees
+2 VERS 2021.07
+2 NAME Ancestry.com Member Trees
+2 CORP Ancestry.com
+2 _TREE Example tree
+3 RIN 12345678
+1 SCHMA
+2 TAG _APID https://github.com/trois-six/oxidged/blob/main/docs/extensions.md#ancestry-_APID
+2 TAG _TREE https://github.com/trois-six/oxidged/blob/main/docs/extensions.md#ancestry-_TREE
+0 @I1@ INDI
+1 NAME Ann /Example/
+1 SEX F
+1 BIRT
+2 DATE 28 OCT 1910
+2 SOUR @S1@
+3 PAGE Entry 4
+3 NOTE Transcribed from the register
+3 _APID 1,7602::1234567
+1 EVEN
+2 DATE 1930
+2 TYPE Military service
+1 OBJE @M2@
+1 OBJE @M1@
+0 @S1@ SOUR
+1 TITL Example census
+1 NOTE <i>Example</i> collection
+2 MIME text/html
+1 _APID 1,7602::0
+0 @M1@ OBJE
+1 FILE first.jpg
+2 FORM image/jpeg
+0 @M2@ OBJE
+1 FILE preferred.jpg
+2 FORM image/jpeg
+0 TRLR

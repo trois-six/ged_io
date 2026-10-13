@@ -1,0 +1,3 @@
+HEAD.SOUR EXAMPLE_APP written as ged_io (relabelled; EXF-082, EXC-018, EXC-057)
+repair: INDI.BURI.DATE "31 FEB 1920": the month has no day 31; moved to PHRASE
+repair: OBJE.FILE "https://example.org/a b.jpg": not a valid URL string; written as https://example.org/a%20b.jpg

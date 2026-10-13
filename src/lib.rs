@@ -12,6 +12,10 @@ Reads and writes GEDCOM, the genealogical data format, in versions 5.5.1,
   version or another, converting it between 5.5.1 and 7.x as the migration
   guide says ([`convert`]), repairing what the target does not permit
   ([`spec::conform`]) and emitting every line by the target's line rules.
+- **Producer profiles.** [`profile`] recognises the program that wrote
+  a file, reads its `CHAR` and its extensions as it meant them (without
+  losing anything), and writes files shaped for an importer, conformant,
+  reporting every lossy fold.
 - **Streaming and indexing.** [`GedcomStreamParser`] reads one record at a
   time in bounded memory; [`IndexedDataset`] finds records and families in
   constant time; `ged_io::gedzip` reads and writes GEDZIP archives (feature
@@ -61,6 +65,7 @@ pub mod error;
 pub mod gedzip;
 pub mod indexed;
 pub mod model;
+pub mod profile;
 pub mod spec;
 pub mod stream;
 pub mod tree;
@@ -68,7 +73,7 @@ pub mod value;
 pub mod version;
 pub mod writer;
 
-pub use builder::GedcomBuilder;
+pub use builder::{GedcomBuilder, ReadReport};
 pub use encoding::GedcomEncoding;
 pub use error::GedcomError;
 pub use indexed::IndexedDataset;

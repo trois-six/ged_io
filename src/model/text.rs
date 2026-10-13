@@ -1137,9 +1137,13 @@ impl Store {
     }
 
     /// The text, which spans point into.
-    #[cfg(test)]
     pub(crate) fn input(&self) -> &str {
         &self.text
+    }
+
+    /// The text, the rest of the store dropped.
+    pub(crate) fn into_input(self) -> String {
+        self.text
     }
 
     /// The size of the text, in bytes.
@@ -1159,6 +1163,11 @@ impl Store {
 
     pub(crate) fn set_tags(&mut self, tags: Vec<Box<str>>) {
         self.tags = tags;
+    }
+
+    /// The tags read that are not standard, once each.
+    pub(crate) fn other_tags(&self) -> impl Iterator<Item = &str> {
+        self.tags.iter().map(|t| &**t)
     }
 
     pub(crate) fn shrink(&mut self) {

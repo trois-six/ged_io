@@ -1,0 +1,24 @@
+0 HEAD
+1 GEDC
+2 VERS 7.0
+1 SOUR webtrees
+2 VERS 2.2.0
+2 NAME webtrees
+1 SCHMA
+2 TAG _WT_USER https://github.com/trois-six/oxidged/blob/main/docs/extensions.md#webtrees-_WT_USER
+0 @I1@ INDI
+1 NAME Anna /Example/
+1 SEX F
+1 NOTE A comment
+1 CHAN
+2 DATE 1 JAN 2020
+2 _WT_USER editor
+1 OBJE @M1@
+1 OBJE @M2@
+0 @M1@ OBJE
+1 FILE a.jpg
+2 FORM image/jpeg
+0 @M2@ OBJE
+1 FILE b.jpg
+2 FORM image/jpeg
+0 TRLR

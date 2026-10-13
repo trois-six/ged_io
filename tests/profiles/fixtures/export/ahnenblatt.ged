@@ -1,0 +1,135 @@
+0 HEAD
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+1 SOUR ged_io
+2 VERS 0.17.0
+1 SUBM @U1@
+1 PLAC
+2 FORM Town, Area code, County, Region, Country, Subdivision
+1 NOTE Notes of the example tree
+1 _SCHMA
+2 TAG _ROOT https://example.invalid/root
+2 TAG _RUFNAME http://genealogy.net/GEDCOM#_RUFNAME
+1 _ROOT @I2@
+0 @U1@ SUBM
+1 NAME Unknown
+0 @I1@ INDI
+1 NAME Jean Pierre /Fictif/
+2 NPFX Dr
+2 GIVN Jean Pierre
+2 SURN Fictif
+2 NICK Petit-Jean
+2 _RUFNAME Pierre
+1 NAME Jean Pierre /Fictive/
+1 NAME Johnny /Example/
+2 NICK JJ
+2 TYPE aka
+1 SEX M
+1 OCCU Miller
+1 OCCU Farmer
+1 OCCU Mayor
+2 DATE 1880
+1 FACT Weaving
+2 TYPE Hobby
+1 IDNO 12-345
+2 TYPE Register
+1 BIRT
+2 DATE 1 JAN 1850
+2 PLAC Villefictive, 99999, Departement-A, Region-B, Pays-C, Hameau-D
+2 AGE 0y
+2 _SDATE 1 JAN 1850
+1 BAPM
+2 DATE 3 JAN 1850
+2 _ASSO @I3@
+3 RELA godparent
+2 _ASSO @I4@
+3 RELA godparent
+2 _ASSO @I5@
+3 RELA witness
+2 _ASSO @@VOID@@
+3 PHRASE The parish clerk
+3 RELA Clerk
+1 BURI
+2 DATE 31 FEB 1920
+2 ADDR 1 Cemetery Road
+2 CAUS Old age
+1 FAMC @F1@
+2 PEDI birth
+1 FAMC @F3@
+2 PEDI adopted
+1 FAMS @F2@
+1 NOTE A <b>bold</b> note & more
+1 SOUR @S1@
+2 PAGE folio 12
+2 DATA
+3 TEXT Baptism entry
+1 ASSO @I5@
+2 RELA friend
+1 OBJE @M1@
+1 OBJE @M2@
+2 _CROP
+3 TOP 1
+3 LEFT 2
+1 REFN 42
+2 TYPE local
+1 _UID 0AA1B2C3000040008000000000000001E133
+0 @I2@ INDI
+1 NAME Marie /Exemple/
+1 SEX F
+1 DEAT
+2 DATE INT 1930 (about the war)
+1 FAMS @F2@
+0 @I3@ INDI
+1 NAME Paul /Exemple/
+1 SEX M
+0 @I4@ INDI
+1 NAME Louise /Exemple/
+1 SEX F
+0 @I5@ INDI
+1 NAME Luc /Exemple/
+1 SEX M
+1 RESN privacy
+0 @I6@ INDI
+1 NAME Claire /Exemple/
+1 SEX F
+1 FAMC @F2@
+2 PEDI birth
+0 @F1@ FAM
+1 CHIL @I1@
+0 @F2@ FAM
+1 HUSB @I1@
+1 WIFE @I2@
+1 CHIL @I6@
+1 MARR
+2 DATE 10 JUN 1875
+2 PLAC Villefictive, 99999, Departement-A, Region-B, Pays-C,
+2 HUSB
+3 AGE 25y
+2 ADDR Town hall
+1 NOTE Family note
+1 SOUR @S1@
+0 @F3@ FAM
+1 WIFE @I4@
+1 CHIL @I1@
+1 _NO MARR
+0 @S1@ SOUR
+1 TITL Registre fictif
+1 ABBR RF
+1 PUBL Example publisher
+1 REPO @R1@
+2 CALN 9 E 999
+0 @R1@ REPO
+1 NAME Archives fictives
+1 PHON +1 555 0100
+1 EMAIL archives@@example.invalid
+1 WWW https://archives.example.invalid
+0 @M1@ OBJE
+1 FILE photos/portrait.jpg
+2 FORM jpg
+2 TITL Portrait
+0 @M2@ OBJE
+1 FILE https://example.org/a b.jpg
+2 FORM jpg
+0 TRLR

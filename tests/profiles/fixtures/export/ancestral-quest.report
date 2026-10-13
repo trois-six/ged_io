@@ -1,0 +1,19 @@
+HEAD.SOUR EXAMPLE_APP written as ged_io (relabelled; EXF-082, EXC-018, EXC-057)
+@I1@: the usual given name (as text, lossy; EXC-089)
+@I1@: IDNO as EVEN + TYPE ID number (relabelled, lossy; EXC-090)
+@I1@: an association as EVEN TYPE Associate (as text, lossy; EXC-091)
+@I1@: an association as EVEN TYPE Associate (as text, lossy; EXC-091)
+@I1@: an association as EVEN TYPE Associate (as text, lossy; EXC-091)
+@I1@: an association as EVEN TYPE Associate (as text, lossy; EXC-091)
+@I1@: an association as EVEN TYPE Associate (as text, lossy; EXC-091)
+@I1@: 1 fields of BIRT in its note (as text, lossy; EXC-091)
+@F2@: 1 fields of MARR in its note (as text, lossy; EXC-091)
+@I1@: an address of BURI as text (as text, lossy; EXC-091)
+@F2@: an address of MARR as text (as text, lossy; EXC-091)
+@I1@: identifiers in a note (as text, lossy; EXC-092)
+@I1@: _PRIM on the preferred image (added; EXC-093)
+@I1@: _UID in the PAF form (recoded; EXC-071)
+repair: HEAD.SCHMA: not permitted here, written as _SCHMA
+repair: INDI.BIRT.SDATE: not permitted here, written as _SDATE
+repair: INDI.OBJE.CROP: not permitted here, written as _CROP
+repair: FAM.NO: not permitted here, written as _NO

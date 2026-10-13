@@ -1,0 +1,20 @@
+HEAD.SOUR EXAMPLE_APP written as ged_io (relabelled; EXF-082, EXC-018, EXC-057)
+1 places in the format Town, Area code, County, Region, Country, Subdivision (recoded; EXF-052, EXF-053)
+@I1@: _PRIM on the preferred image (added; EXF-059, EXF-060)
+@I1@: extension _UID as EVEN (relabelled, lossy; EXF-054)
+@F3@: extension _NO as EVEN (relabelled, lossy; EXF-054)
+repair: HEAD.SCHMA: not permitted here, written as _SCHMA
+repair: INDI.NAME.TYPE "AKA" written as aka
+repair: INDI.BIRT.SDATE: not permitted here, written as _SDATE
+repair: INDI.BAPM.ASSO: not permitted here, written as _ASSO
+repair: INDI.BAPM.ASSO: not permitted here, written as _ASSO
+repair: INDI.BAPM.ASSO: not permitted here, written as _ASSO
+repair: _ASSO @VOID@ names no record: kept as text
+repair: INDI.BAPM.ASSO: not permitted here, written as _ASSO
+repair: INDI.FAMC.PEDI "BIRTH" written as birth
+repair: INDI.FAMC.PEDI "ADOPTED" written as adopted
+repair: INDI.OBJE.CROP: not permitted here, written as _CROP
+repair: INDI.UID: not permitted here, written as _UID
+repair: INDI.RESN "PRIVACY" written as privacy
+repair: INDI.FAMC.PEDI "BIRTH" written as birth
+repair: FAM.NO: not permitted here, written as _NO

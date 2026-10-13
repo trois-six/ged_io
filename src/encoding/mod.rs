@@ -83,7 +83,9 @@ pub enum GedcomEncoding {
     Iso8859_15,
     /// Windows-1252 (`CHAR ANSI`, `WINDOWS-1252`, `CP1252`).
     Windows1252,
-    /// Windows-1250, Central European (`CHAR WINDOWS-1250`, `CP1250`).
+    /// Windows-1250, Central European (`CHAR WINDOWS-1250`, `CP1250`); also
+    /// what byte statistics find under some `CHAR ANSI` files
+    /// ([`crate::profile`]).
     Windows1250,
     /// Windows-1251, Cyrillic (`CHAR WINDOWS-1251`, `CP1251`).
     Windows1251,
@@ -216,6 +218,72 @@ fn decoded(text: String, sniff: detect::Sniff) -> Decoded {
         encoding: sniff.encoding,
         declared,
     }
+}
+
+/// What a reader asks for single-byte bytes: given the `HEAD.CHAR` payload
+/// and the bytes, the encoding to decode them with, if not the default.
+pub(crate) type ChooseEncoding<'a> = dyn Fn(Option<&str>, &[u8]) -> Option<GedcomEncoding> + 'a;
+
+/// Decodes GEDCOM bytes it owns as [`decode_owned`] does, except that when
+/// the bytes are neither UTF-8 nor UTF-16 — when the declared single-byte
+/// set would apply — `choose` is asked first, with the `HEAD.CHAR` payload
+/// and the bytes after any byte order mark: the encoding it names (a
+/// single-byte one) is used instead. This is how a producer profile reads
+/// `CHAR ANSI` as its producer meant it ([`crate::profile`]).
+pub(crate) fn decode_owned_with(bytes: Vec<u8>, choose: &ChooseEncoding<'_>) -> Decoded {
+    let sniff = sniff_input(&bytes);
+    if matches!(sniff.mode, Mode::Single(_)) {
+        let body = bytes.get(sniff.bom..).unwrap_or_default();
+        if let Some(encoding) = choose(sniff.declared.as_deref(), body).filter(|e| {
+            !matches!(
+                e,
+                GedcomEncoding::Utf8 | GedcomEncoding::Utf16Le | GedcomEncoding::Utf16Be
+            )
+        }) {
+            return Decoded {
+                text: decode_body(body, mode_for(encoding)),
+                encoding,
+                declared: sniff.declared,
+            };
+        }
+    }
+    decode_owned(bytes)
+}
+
+/// Whether single-byte text reads better as Windows-1250 (Central European)
+/// than as Windows-1252: some producers label either `ANSI`. Only the bytes
+/// that are a letter in one code page and a symbol, a control or nothing in
+/// the other decide, and only when they stand inside a word; Windows-1250
+/// must win by at least two such bytes and be clearly ahead.
+#[must_use]
+pub(crate) fn reads_as_cp1250(body: &[u8]) -> bool {
+    let (mut cp1250, mut cp1252) = (0_usize, 0_usize);
+    let letter = |b: u8, set: SingleByte| match set.decode(b) {
+        charset::Decoded::Char(c) => c.is_alphabetic(),
+        charset::Decoded::Mark(_) => false,
+    };
+    for (i, &b) in body.iter().enumerate() {
+        if b < 0x80 {
+            continue;
+        }
+        let (in_1250, in_1252) = (letter(b, SingleByte::Cp1250), letter(b, SingleByte::Cp1252));
+        if in_1250 == in_1252 {
+            continue;
+        }
+        let near = |j: Option<usize>| {
+            j.and_then(|j| body.get(j))
+                .is_some_and(|&n| n.is_ascii_alphabetic() || n >= 0x80)
+        };
+        if !(near(i.checked_sub(1)) || near(i.checked_add(1))) {
+            continue;
+        }
+        if in_1250 {
+            cp1250 += 1;
+        } else {
+            cp1252 += 1;
+        }
+    }
+    cp1250 >= 2 && cp1250 > cp1252.saturating_mul(4)
 }
 
 /// Decodes bytes with a given encoding, skipping its byte order mark.

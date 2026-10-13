@@ -1,0 +1,17 @@
+HEAD.SOUR EXAMPLE_APP written as ged_io (relabelled; EXF-082, EXC-018, EXC-057)
+1 places in the format Town, Area code, County, Region, Country, Subdivision (recoded; EXF-094)
+@I1@: FACT as EVEN (relabelled, lossy; EXF-096)
+@I1@: a witness of BAPM on the witness, RELA godparent@INDI:BAPM (moved; EXF-097)
+@I1@: a witness of BAPM on the witness, RELA godparent@INDI:BAPM (moved; EXF-097)
+@I1@: a witness of BAPM on the witness, RELA witness@INDI:BAPM (moved; EXF-097)
+@I1@: a witness of BAPM as a note (as text, lossy; EXF-097)
+repair: HEAD.SCHMA: not permitted here, written as _SCHMA
+repair: INDI.NAME.TYPE "AKA" written as aka
+repair: INDI.BIRT.SDATE: not permitted here, written as _SDATE
+repair: INDI.FAMC.PEDI "BIRTH" written as birth
+repair: INDI.FAMC.PEDI "ADOPTED" written as adopted
+repair: INDI.OBJE.CROP: not permitted here, written as _CROP
+repair: INDI.UID: not permitted here, written as _UID
+repair: INDI.RESN "PRIVACY" written as privacy
+repair: INDI.FAMC.PEDI "BIRTH" written as birth
+repair: FAM.NO: not permitted here, written as _NO
