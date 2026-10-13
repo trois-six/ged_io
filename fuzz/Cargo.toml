@@ -65,3 +65,10 @@ path = "fuzz_targets/editing.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "profiles"
+path = "fuzz_targets/profiles.rs"
+test = false
+doc = false
+bench = false
