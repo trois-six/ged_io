@@ -19,7 +19,11 @@ use crate::version::GedcomVersion;
 /// its first line. Memory is bounded by the largest record.
 pub(crate) struct RecordSplitter<R> {
     inner: R,
-    buf: Vec<u8>,
+    /// The text read and not yet split: checked once as it is read, not
+    /// line by line.
+    buf: String,
+    /// The bytes of a character cut at the end of the last bytes read.
+    carry: Vec<u8>,
     /// Start of the unread part of `buf`.
     pos: usize,
     /// Bytes after `pos` known to hold no line terminator.
@@ -32,11 +36,46 @@ pub(crate) struct RecordSplitter<R> {
     line: String,
 }
 
+/// Appends `bytes` to `buf`, invalid UTF-8 replaced as
+/// [`String::from_utf8_lossy`] replaces it, but for a character cut at the
+/// end: its bytes are kept in `carry`, for the bytes that follow.
+fn push_lossy(buf: &mut String, carry: &mut Vec<u8>, bytes: &[u8]) {
+    if !carry.is_empty() {
+        let mut joined = std::mem::take(carry);
+        joined.extend_from_slice(bytes);
+        return push_lossy(buf, carry, &joined);
+    }
+    let mut bytes = bytes;
+    loop {
+        match std::str::from_utf8(bytes) {
+            Ok(text) => {
+                buf.push_str(text);
+                return;
+            }
+            Err(e) => {
+                let (valid, rest) = bytes.split_at(e.valid_up_to());
+                buf.push_str(std::str::from_utf8(valid).unwrap_or_default());
+                match e.error_len() {
+                    None => {
+                        carry.extend_from_slice(rest);
+                        return;
+                    }
+                    Some(n) => {
+                        buf.push(char::REPLACEMENT_CHARACTER);
+                        bytes = rest.get(n..).unwrap_or_default();
+                    }
+                }
+            }
+        }
+    }
+}
+
 impl<R: BufRead> RecordSplitter<R> {
     pub(crate) fn new(inner: R) -> Self {
         Self {
             inner,
-            buf: Vec::with_capacity(64 * 1024),
+            buf: String::with_capacity(64 * 1024),
+            carry: Vec::new(),
             pos: 0,
             scanned: 0,
             eof: false,
@@ -54,7 +93,7 @@ impl<R: BufRead> RecordSplitter<R> {
     fn next_line(&mut self) -> io::Result<bool> {
         self.line.clear();
         loop {
-            let avail = self.buf.get(self.pos..).unwrap_or_default();
+            let avail = self.buf.as_bytes().get(self.pos..).unwrap_or_default();
             let found = avail
                 .get(self.scanned..)
                 .and_then(find_eol)
@@ -62,8 +101,9 @@ impl<R: BufRead> RecordSplitter<R> {
             match found {
                 Some(k) if self.eof || k + TERMINATOR_LOOKAHEAD <= avail.len() => {
                     let term = avail.get(k..).map_or(1, terminator_len);
+                    // A terminator is ASCII: the line ends on a character.
                     self.line
-                        .push_str(&String::from_utf8_lossy(avail.get(..k).unwrap_or_default()));
+                        .push_str(self.buf.get(self.pos..self.pos + k).unwrap_or_default());
                     self.pos += k + term;
                     self.scanned = 0;
                     return Ok(true);
@@ -73,7 +113,8 @@ impl<R: BufRead> RecordSplitter<R> {
                     if avail.is_empty() {
                         return Ok(false);
                     }
-                    self.line.push_str(&String::from_utf8_lossy(avail));
+                    self.line
+                        .push_str(self.buf.get(self.pos..).unwrap_or_default());
                     self.pos = self.buf.len();
                     self.scanned = 0;
                     return Ok(true);
@@ -93,11 +134,16 @@ impl<R: BufRead> RecordSplitter<R> {
             match self.inner.fill_buf() {
                 Ok([]) => {
                     self.eof = true;
+                    // A character cut by the end of the input.
+                    if !self.carry.is_empty() {
+                        self.carry.clear();
+                        self.buf.push(char::REPLACEMENT_CHARACTER);
+                    }
                     return Ok(());
                 }
                 Ok(chunk) => {
                     let len = chunk.len();
-                    self.buf.extend_from_slice(chunk);
+                    push_lossy(&mut self.buf, &mut self.carry, chunk);
                     self.inner.consume(len);
                     return Ok(());
                 }
@@ -343,6 +389,25 @@ mod tests {
                 ],
                 "capacity {capacity}"
             );
+        }
+    }
+
+    /// Bytes that are not UTF-8 are replaced as `from_utf8_lossy` replaces
+    /// them, wherever the reads cut them.
+    #[test]
+    fn invalid_bytes_replaced_whatever_the_reads() {
+        let bytes: &[u8] =
+            b"0 HEAD\n1 NOTE a\xC3\xA9b\xFFc\xE2\x82\n0 @I1@ INDI\n1 NAME \xF0\x9F\x98\x80\xF0\x9F";
+        let mut lines = String::from_utf8_lossy(bytes).into_owned();
+        lines.push('\n');
+        for capacity in [1, 2, 3, 4, 64] {
+            let mut splitter = RecordSplitter::new(BufReader::with_capacity(capacity, bytes));
+            let mut all = String::new();
+            let mut record = String::new();
+            while splitter.next_record(&mut record).unwrap().is_some() {
+                all.push_str(&record);
+            }
+            assert_eq!(all, lines, "capacity {capacity}");
         }
     }
 }
