@@ -7,13 +7,17 @@
 //! perf check <file> [threshold=value…]    # every pipeline, against limits
 //! ```
 //!
-//! Pipelines: `read` (the bytes into a `Dataset`), `write` (read once, then
-//! `write_to_string`, timed), `stream` (`GedcomStreamParser` over the file),
-//! `stream-write` (`GedcomStreamParser` into a `GedcomStreamWriter`), `tree`
-//! (the lossless `Tree`). `run` prints one tab-separated line: the
-//! pipeline, the file, the median and minimum time of `iterations` runs
-//! (default 5), the throughput, the peak resident set (Linux `VmHWM`) and
-//! its ratio to the file's size.
+//! Pipelines: `read` (the bytes into a `Dataset`, with the default
+//! lossless interpretation of the producer's extensions), `read-none` (the
+//! same, without interpretation), `write` (read once, then
+//! `write_to_string`, timed), `write-v7` (the same, in GEDCOM 7.0),
+//! `export` (read once, then the `geneanet` export profile's
+//! `write_to_string`, timed), `stream` (`GedcomStreamParser` over the
+//! file), `stream-write` (`GedcomStreamParser` into a
+//! `GedcomStreamWriter`), `tree` (the lossless `Tree`). `run` prints one
+//! tab-separated line: the pipeline, the file, the median and minimum time
+//! of `iterations` runs (default 5), the throughput, the peak resident set
+//! (Linux `VmHWM`) and its ratio to the file's size.
 //!
 //! `check` runs each pipeline once in a child process and fails (exit 1)
 //! when a peak or a throughput passes its threshold. The thresholds, which
@@ -34,8 +38,12 @@ use std::process::{Command, ExitCode};
 use std::time::Instant;
 
 use ged_io::model::RecordRef;
+use ged_io::profile::{Exporter, Interpretation};
 use ged_io::tree::Tree;
-use ged_io::{GedcomBuilder, GedcomStreamParser, GedcomStreamWriter, GedcomWriter, WriterConfig};
+use ged_io::{
+    GedcomBuilder, GedcomStreamParser, GedcomStreamWriter, GedcomVersion, GedcomWriter,
+    WriterConfig,
+};
 
 /// The peak resident set of this process, in bytes (Linux `VmHWM`); 0
 /// elsewhere.
@@ -49,11 +57,18 @@ fn peak_rss() -> u64 {
         .map_or(0, |kb| kb * 1024)
 }
 
-/// Reads `path` into a dataset.
-fn read(path: &str) -> ged_io::Dataset {
+/// Reads `path` into a dataset, interpreting its producer's extensions
+/// at `level`.
+fn read_at(path: &str, level: Interpretation) -> ged_io::Dataset {
     GedcomBuilder::new()
+        .interpretation(level)
         .build_from_bytes(fs::read(path).expect("read the file"))
         .expect("reading never fails")
+}
+
+/// Reads `path` into a dataset, as the builder does by default.
+fn read(path: &str) -> ged_io::Dataset {
+    read_at(path, Interpretation::default())
 }
 
 /// Streams `path` record by record, into a stream writer when `write`.
@@ -90,16 +105,36 @@ fn run(pipeline: &str, path: &str, iterations: usize) -> Result<String, String> 
     let mut times = Vec::with_capacity(iterations);
     let mut out_len = size;
     match pipeline {
-        "read" => {
+        "read" | "read-none" => {
+            let level = if pipeline == "read" {
+                Interpretation::default()
+            } else {
+                Interpretation::None
+            };
             for _ in 0..iterations {
                 let t = Instant::now();
-                black_box(read(path));
+                black_box(read_at(path, level));
                 times.push(t.elapsed().as_secs_f64());
             }
         }
-        "write" => {
+        "export" => {
             let data = read(path);
-            let writer = GedcomWriter::new();
+            let exporter = Exporter::named("geneanet").expect("a shipped profile");
+            for _ in 0..iterations {
+                let t = Instant::now();
+                let (out, report) = exporter.write_to_string(black_box(&data)).expect("writes");
+                out_len = out.len() as u64;
+                black_box((out, report));
+                times.push(t.elapsed().as_secs_f64());
+            }
+        }
+        "write" | "write-v7" => {
+            let data = read(path);
+            let writer = if pipeline == "write" {
+                GedcomWriter::new()
+            } else {
+                GedcomWriter::new().gedcom_version(GedcomVersion::V7_0)
+            };
             for _ in 0..iterations {
                 let t = Instant::now();
                 let out = writer.write_to_string(black_box(&data)).expect("writes");
