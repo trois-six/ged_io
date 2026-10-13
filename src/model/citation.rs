@@ -3,7 +3,7 @@
 use crate::tree::{FlatPayload, Payload};
 
 use super::date::Date;
-use super::driver::{gedcom_struct, NodeRef, PayloadField, ReadCx, WriteCx};
+use super::driver::{gedcom_struct, pointer_or_text_raw, PayloadField, WriteCx};
 use super::enums::{Certainty, EventKind, Medium, Phrased, Role};
 use super::list::ThinVec;
 use super::multimedia::MultimediaLink;
@@ -27,13 +27,6 @@ impl Default for CitationSource {
 }
 
 impl PayloadField for CitationSource {
-    fn read(node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> Option<Self> {
-        match cx.pointer(node) {
-            Some(id) => Some(CitationSource::Pointer(id)),
-            None => cx.text(node).map(CitationSource::Description),
-        }
-    }
-
     fn write(&self, cx: &WriteCx<'_>) -> Payload {
         match self {
             CitationSource::Pointer(id) => cx.pointer(*id),
@@ -47,15 +40,8 @@ impl PayloadField for CitationSource {
             CitationSource::Description(t) => cx.text_flat(t),
         }
     }
-}
 
-impl super::relocate::Relocate for CitationSource {
-    fn relocate(&mut self, r: &mut super::relocate::Relocation<'_>) {
-        match self {
-            CitationSource::Pointer(id) => id.relocate(r),
-            CitationSource::Description(t) => t.relocate(r),
-        }
-    }
+    pointer_or_text_raw!(CitationSource, Pointer, Description);
 }
 
 impl super::pointers::Pointers for CitationSource {
@@ -115,7 +101,7 @@ gedcom_struct! {
     /// A source citation (`SOUR`): the source, where in it (`PAGE`), what
     /// it says (`DATA`), the event it records (`EVEN`), how reliable it is
     /// (`QUAY`), and media and notes.
-    pub struct Citation [chain = notes: Note] {
+    pub struct Citation => CitationRow [chain = notes: Note] {
         @payload
         /// The source cited.
         source: CitationSource;
@@ -124,7 +110,7 @@ gedcom_struct! {
         @detail
         /// What fewer citations have: what the source says, the event it
         /// records, its quality, texts, media and notes.
-        CitationDetail {
+        CitationDetail => CitationDetailRow {
             /// What the source says (`DATA`).
             "DATA" => data: Option<CitationData>,
             /// The event the source records (`EVEN`).
@@ -149,7 +135,7 @@ gedcom_struct! {
 gedcom_struct! {
     /// What a cited source says (`DATA` of a citation): when it was
     /// recorded and its text.
-    pub struct CitationData {
+    pub struct CitationData => CitationDataRow {
         /// When the entry was recorded (`DATE`).
         "DATE" => date: Option<Date>,
         /// The text of the entry (`TEXT`).
@@ -165,7 +151,7 @@ gedcom_struct! {
 gedcom_struct! {
     /// The event a cited source records (`EVEN` of a citation) and the
     /// role of the person in it.
-    pub struct CitedEvent {
+    pub struct CitedEvent => CitedEventRow {
         @payload
         /// The event or attribute type (5.5.1: any text, kept in
         /// `Unknown` when it is not a tag).
@@ -185,7 +171,7 @@ gedcom_struct! {
 gedcom_struct! {
     /// A repository citation (`REPO` of a source): the repository, the
     /// call numbers and notes. 5.5.1 allows it without a pointer.
-    pub struct RepositoryCitation {
+    pub struct RepositoryCitation => RepositoryCitationRow {
         @payload
         /// The repository (7.x: `@VOID@` when unknown).
         repository: Option<XrefId>;
@@ -204,7 +190,7 @@ gedcom_struct! {
 gedcom_struct! {
     /// A call number in a repository (`CALN`) and the medium of the item
     /// (`MEDI`).
-    pub struct CallNumber {
+    pub struct CallNumber => CallNumberRow {
         @payload
         /// The call number.
         value: Text;
@@ -216,4 +202,8 @@ gedcom_struct! {
         v70: ["CALN"],
         v71: ["CALN"],
     }
+}
+
+impl super::table::sealed::Field for CitationSource {
+    type View<'a> = Self;
 }

@@ -5,7 +5,8 @@
 //! name and value is fictitious.
 
 use ged_io::model::{
-    Dataset, Family, Individual, IndividualRef, Name, RecordRef, Removal, Repository, Sex, XrefId,
+    Dataset, Family, Individual, IndividualRef, Name, RecordRef, Removal, Repository, Sex, View,
+    XrefId,
 };
 use ged_io::IndexedDataset;
 
@@ -32,17 +33,13 @@ fn family() -> Dataset {
     Dataset::parse(FAMILY)
 }
 
-fn names<'a>(data: &Dataset, people: impl Iterator<Item = &'a Individual>) -> Vec<String> {
-    people.filter_map(|i| i.full_name(data)).collect()
+fn names<'a>(people: impl Iterator<Item = View<'a, Individual>>) -> Vec<String> {
+    people.filter_map(View::full_name).collect()
 }
 
-fn xrefs<'a, T: 'a>(
-    data: &Dataset,
-    records: impl Iterator<Item = &'a T>,
-    xref: impl Fn(&T) -> Option<XrefId>,
-) -> Vec<String> {
-    records
-        .filter_map(xref)
+fn xrefs<'a>(data: &Dataset, families: impl Iterator<Item = View<'a, Family>>) -> Vec<String> {
+    families
+        .filter_map(|f| f.xref())
         .map(|id| data.store().xref(id).to_string())
         .collect()
 }
@@ -55,33 +52,18 @@ fn xrefs<'a, T: 'a>(
 fn records_are_found_by_identifier() {
     let data = family();
     let john = data.find_individual("@I1@").unwrap();
-    assert_eq!(
-        john.full_name(&data).as_deref(),
-        Some("John Robert Example Jr.")
-    );
+    assert_eq!(john.full_name().as_deref(), Some("John Robert Example Jr."));
     assert_eq!(
         data.find_family("@F1@").unwrap().husband_id(),
         data.store().find_xref("@I1@")
     );
     let source = data.find_source("@S1@").unwrap();
-    assert!(source
-        .title
-        .as_ref()
-        .unwrap()
-        .eq_str(&data, "Census of Sampleton"));
+    assert_eq!(source.title().unwrap(), "Census of Sampleton");
     let repo = data.find_repository("@R1@").unwrap();
-    assert!(repo
-        .name
-        .as_ref()
-        .unwrap()
-        .eq_str(&data, "Sampleton Archives"));
+    assert_eq!(repo.name().unwrap(), "Sampleton Archives");
     assert!(data.find_multimedia("@M1@").is_some());
     assert!(data.find_submitter("@U1@").is_some());
-    assert!(data
-        .find_note("@N1@")
-        .unwrap()
-        .text
-        .eq_str(&data, "A shared note"));
+    assert_eq!(data.find_note("@N1@").unwrap().text(), "A shared note");
     assert!(matches!(data.find("@X1@"), Some(RecordRef::Other(_))));
     assert!(matches!(data.find("@F2@"), Some(RecordRef::Family(_))));
 
@@ -98,16 +80,11 @@ fn every_kind_of_key_finds_the_same_record() {
     let data = family();
     let id = data.store().find_xref("@I2@").unwrap();
     let by_str = data.find_individual("@I2@").unwrap();
-    assert_eq!(by_str.xref, Some(id));
-    assert!(std::ptr::eq(data.find_individual(id).unwrap(), by_str));
-    assert!(std::ptr::eq(
-        data.find_individual(Some(id)).unwrap(),
-        by_str
-    ));
-    assert!(std::ptr::eq(
-        data.find_individual(String::from("@I2@")).unwrap(),
-        by_str
-    ));
+    assert_eq!(by_str.xref(), Some(id));
+    // Views of the same record of the same dataset are equal.
+    assert_eq!(data.find_individual(id), Some(by_str));
+    assert_eq!(data.find_individual(Some(id)), Some(by_str));
+    assert_eq!(data.find_individual(String::from("@I2@")), Some(by_str));
     assert!(data.find_individual(None::<XrefId>).is_none());
 }
 
@@ -120,11 +97,14 @@ fn the_first_record_of_a_duplicate_identifier_wins() {
     // Both are kept.
     assert_eq!(data.individuals().len(), 2);
     let found = data.find_individual("@I1@").unwrap();
-    assert_eq!(found.full_name(&data).as_deref(), Some("Ann Example"));
+    assert_eq!(found.full_name().as_deref(), Some("Ann Example"));
     let indexed = IndexedDataset::new(data.clone());
     let found = indexed.find_individual("@I1@").unwrap();
-    assert_eq!(found.full_name(&*indexed).as_deref(), Some("Ann Example"));
-    assert_eq!(indexed.find("@I1@"), data.find("@I1@"));
+    assert_eq!(found.full_name().as_deref(), Some("Ann Example"));
+    assert_eq!(
+        indexed.find("@I1@").map(RecordRef::into_owned),
+        data.find("@I1@").map(RecordRef::into_owned)
+    );
 }
 
 #[test]
@@ -149,12 +129,12 @@ fn record_counts_include_the_header() {
 #[test]
 fn families_of_an_individual() {
     let data = family();
-    let f = |x| xrefs(&data, data.families_as_spouse(x), |f| f.xref);
+    let f = |x| xrefs(&data, data.families_as_spouse(x));
     assert_eq!(f("@I1@"), ["@F1@", "@F2@"]);
     assert_eq!(f("@I4@"), ["@F2@"]);
     assert!(f("@I999@").is_empty());
 
-    let c = |x| xrefs(&data, data.families_as_child(x), |f| f.xref);
+    let c = |x| xrefs(&data, data.families_as_child(x));
     assert_eq!(c("@I3@"), ["@F1@", "@F3@"]);
     assert!(c("@I1@").is_empty());
 }
@@ -164,20 +144,16 @@ fn parents_children_and_spouses() {
     let data = family();
     let f1 = data.find_family("@F1@").unwrap();
     assert_eq!(
-        names(&data, data.parents(f1)),
+        names(data.parents(f1)),
         ["John Robert Example Jr.", "Jane Example"]
     );
-    assert_eq!(names(&data, data.children(f1)), ["Child Example"]);
+    assert_eq!(names(data.children(f1)), ["Child Example"]);
     assert_eq!(
-        data.spouse("@I1@", f1)
-            .and_then(|s| s.full_name(&data))
-            .as_deref(),
+        data.spouse("@I1@", f1).and_then(View::full_name).as_deref(),
         Some("Jane Example")
     );
     assert_eq!(
-        data.spouse("@I2@", f1)
-            .and_then(|s| s.full_name(&data))
-            .as_deref(),
+        data.spouse("@I2@", f1).and_then(View::full_name).as_deref(),
         Some("John Robert Example Jr.")
     );
     assert!(data.spouse("@I3@", f1).is_none()); // a child, not a partner
@@ -192,7 +168,7 @@ fn parents_children_and_spouses() {
 #[test]
 fn names_are_searched_ignoring_case_and_slashes() {
     let data = family();
-    let search = |q| names(&data, data.search_individuals(q));
+    let search = |q| names(data.search_individuals(q));
     assert_eq!(search("example").len(), 3);
     assert_eq!(search("EXAMPLE").len(), 3);
     assert_eq!(search("jane"), ["Jane Example"]);
@@ -207,38 +183,26 @@ fn individual_helpers() {
     let data = family();
     let john = data.find_individual("@I1@").unwrap();
     let jane = data.find_individual("@I2@").unwrap();
-    assert_eq!(john.sex, Some(Sex::Male));
-    assert_eq!(jane.sex, Some(Sex::Female));
-    assert!(data.find_individual("@I3@").unwrap().sex.is_none());
+    assert_eq!(john.sex(), Some(Sex::Male));
+    assert_eq!(jane.sex(), Some(Sex::Female));
+    assert!(data.find_individual("@I3@").unwrap().sex().is_none());
 
     let name = john.name().unwrap();
-    assert_eq!(name.value.to_str(&data), "John Robert /Example/ Jr.");
-    assert_eq!(name.surname_in_value(&data).as_deref(), Some("Example"));
+    assert_eq!(name.value(), "John Robert /Example/ Jr.");
+    assert_eq!(name.surname_in_value().as_deref(), Some("Example"));
 
     let birth = john.birth().unwrap();
-    assert_eq!(
-        birth.date.as_ref().unwrap().value.to_str(&data),
-        "1 JAN 1900"
-    );
-    assert_eq!(
-        birth.place.as_ref().unwrap().name.to_str(&data),
-        "Sampleton"
-    );
+    assert_eq!(birth.date().unwrap().value(), "1 JAN 1900");
+    assert_eq!(birth.place().unwrap().name(), "Sampleton");
     let death = john.death().unwrap();
-    assert_eq!(
-        death.date.as_ref().unwrap().value.to_str(&data),
-        "31 DEC 1980"
-    );
-    assert_eq!(
-        death.place.as_ref().unwrap().name.to_str(&data),
-        "Exampleville"
-    );
+    assert_eq!(death.date().unwrap().value(), "31 DEC 1980");
+    assert_eq!(death.place().unwrap().name(), "Exampleville");
 
-    assert_eq!(john.events.len(), 2);
-    assert!(jane.events.is_empty());
+    assert_eq!(john.events().len(), 2);
+    assert!(jane.events().is_empty());
     assert!(jane.birth().is_none());
-    assert_eq!(john.citations.len(), 1);
-    assert!(jane.citations.is_empty());
+    assert_eq!(john.citations().len(), 1);
+    assert!(jane.citations().is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -324,54 +288,75 @@ fn the_index_agrees_with_the_linear_lookups() {
         "@I9@", // pointed to, but no record: its families are found alike
         "@nothing@",
     ] {
-        assert_eq!(indexed.find(xref), data.find(xref), "{xref}");
         assert_eq!(
-            indexed.find_individual(xref),
-            data.find_individual(xref),
-            "{xref}"
-        );
-        assert_eq!(indexed.find_family(xref), data.find_family(xref), "{xref}");
-        assert_eq!(indexed.find_source(xref), data.find_source(xref), "{xref}");
-        assert_eq!(
-            indexed.find_repository(xref),
-            data.find_repository(xref),
+            indexed.find(xref).map(RecordRef::into_owned),
+            data.find(xref).map(RecordRef::into_owned),
             "{xref}"
         );
         assert_eq!(
-            indexed.find_multimedia(xref),
-            data.find_multimedia(xref),
+            indexed.find_individual(xref).map(|v| v.into_owned()),
+            data.find_individual(xref).map(|v| v.into_owned()),
             "{xref}"
         );
         assert_eq!(
-            indexed.find_submitter(xref),
-            data.find_submitter(xref),
+            indexed.find_family(xref).map(|v| v.into_owned()),
+            data.find_family(xref).map(|v| v.into_owned()),
             "{xref}"
         );
-        assert_eq!(indexed.find_note(xref), data.find_note(xref), "{xref}");
-        let spouse: Vec<_> = indexed.families_as_spouse(xref).collect();
+        assert_eq!(
+            indexed.find_source(xref).map(|v| v.into_owned()),
+            data.find_source(xref).map(|v| v.into_owned()),
+            "{xref}"
+        );
+        assert_eq!(
+            indexed.find_repository(xref).map(|v| v.into_owned()),
+            data.find_repository(xref).map(|v| v.into_owned()),
+            "{xref}"
+        );
+        assert_eq!(
+            indexed.find_multimedia(xref).map(|v| v.into_owned()),
+            data.find_multimedia(xref).map(|v| v.into_owned()),
+            "{xref}"
+        );
+        assert_eq!(
+            indexed.find_submitter(xref).map(|v| v.into_owned()),
+            data.find_submitter(xref).map(|v| v.into_owned()),
+            "{xref}"
+        );
+        assert_eq!(
+            indexed.find_note(xref).map(|v| v.into_owned()),
+            data.find_note(xref).map(|v| v.into_owned()),
+            "{xref}"
+        );
+        let owned = |f: View<'_, Family>| f.into_owned();
+        let spouse: Vec<_> = indexed.families_as_spouse(xref).map(owned).collect();
         assert_eq!(
             spouse,
-            data.families_as_spouse(xref).collect::<Vec<_>>(),
+            data.families_as_spouse(xref).map(owned).collect::<Vec<_>>(),
             "{xref}"
         );
-        let child: Vec<_> = indexed.families_as_child(xref).collect();
+        let child: Vec<_> = indexed.families_as_child(xref).map(owned).collect();
         assert_eq!(
             child,
-            data.families_as_child(xref).collect::<Vec<_>>(),
+            data.families_as_child(xref).map(owned).collect::<Vec<_>>(),
             "{xref}"
         );
     }
-    for family in data.families() {
+    // The index is of a clone: its families are of the clone.
+    for family in indexed.families() {
         assert_eq!(
             indexed.parents(family).collect::<Vec<_>>(),
-            data.parents(family).collect::<Vec<_>>()
+            indexed.data().parents(family).collect::<Vec<_>>()
         );
         assert_eq!(
             indexed.children(family).collect::<Vec<_>>(),
-            data.children(family).collect::<Vec<_>>()
+            indexed.data().children(family).collect::<Vec<_>>()
         );
         for xref in ["@I1@", "@I2@", "@I4@"] {
-            assert_eq!(indexed.spouse(xref, family), data.spouse(xref, family));
+            assert_eq!(
+                indexed.spouse(xref, family),
+                indexed.data().spouse(xref, family)
+            );
         }
     }
     // A dataset still, through Deref and data().
@@ -403,8 +388,8 @@ fn edits_through_data_mut_reindex() {
         eve.names.push(Name::new("Eve /Example/"));
         data.add(eve).unwrap();
         // Eve replaces Bob in @F2@, and joins @F1@ as a child.
-        let f2 = data.find_family("@F2@").unwrap().xref;
-        let at = data.families().iter().position(|f| f.xref == f2).unwrap();
+        let f2 = data.find_family("@F2@").unwrap().xref();
+        let at = data.families().iter().position(|f| f.xref() == f2).unwrap();
         data.get_mut_at::<Family>(at).unwrap().wife = Some(IndividualRef::new(id));
         data.get_mut_at::<Family>(0)
             .unwrap()
@@ -416,7 +401,7 @@ fn edits_through_data_mut_reindex() {
         }
     }
     let eve = indexed.find_individual("@I7@").unwrap();
-    assert_eq!(eve.full_name(&*indexed).as_deref(), Some("Eve Example"));
+    assert_eq!(eve.full_name().as_deref(), Some("Eve Example"));
     assert_eq!(indexed.families_as_spouse("@I7@").count(), 1);
     assert_eq!(indexed.families_as_child("@I7@").count(), 1);
     assert_eq!(indexed.families_as_spouse("@I4@").count(), 0);
@@ -446,40 +431,46 @@ fn a_cloned_dataset_equals_its_original() {
     assert_eq!(cloned.individuals().len(), 4);
     // Its texts resolve against its own store.
     let john = cloned.find_individual("@I1@").unwrap();
-    assert_eq!(
-        john.full_name(&cloned).as_deref(),
-        Some("John Robert Example Jr.")
-    );
+    assert_eq!(john.full_name().as_deref(), Some("John Robert Example Jr."));
     assert_eq!(cloned.to_structures(), data.to_structures());
 }
 
 #[test]
 fn cloned_records_equal_their_originals() {
     let data = family();
+    // Records copied out, as owned types, clone and compare.
     assert_eq!(data.header().clone(), data.header());
-    assert_eq!(data.individuals()[0].clone(), data.individuals()[0]);
-    assert_eq!(data.families()[0].clone(), data.families()[0]);
-    assert_eq!(data.sources()[0].clone(), data.sources()[0]);
-    assert_eq!(data.repositories()[0].clone(), data.repositories()[0]);
-    assert_eq!(data.multimedia()[0].clone(), data.multimedia()[0]);
-    assert_eq!(data.submitters()[0].clone(), data.submitters()[0]);
-    assert_eq!(data.notes()[0].clone(), data.notes()[0]);
-    assert_eq!(data.extra()[0].clone(), data.extra()[0]);
+    let first = |r: Option<RecordRef<'_>>| r.unwrap().into_owned();
+    for record in [
+        first(data.individuals().first().map(RecordRef::Individual)),
+        first(data.families().first().map(RecordRef::Family)),
+        first(data.sources().first().map(RecordRef::Source)),
+        first(data.repositories().first().map(RecordRef::Repository)),
+        first(data.multimedia().first().map(RecordRef::Multimedia)),
+        first(data.submitters().first().map(RecordRef::Submitter)),
+        first(data.notes().first().map(RecordRef::Note)),
+        first(data.extra().first().map(RecordRef::Other)),
+    ] {
+        assert_eq!(record.clone(), record);
+    }
     let individuals = data.individuals().to_vec();
-    assert_eq!(individuals, data.individuals());
-    assert!(data.individuals().contains(&individuals[2]));
+    assert_eq!(individuals.len(), data.individuals().len());
+    assert!(data
+        .individuals()
+        .iter()
+        .any(|i| i.into_owned() == individuals[2]));
 }
 
 #[test]
 fn a_modified_clone_differs_and_leaves_the_original_alone() {
     let mut data = family();
-    let original = data.individuals()[0].clone();
+    let original = data.individuals().first().unwrap().into_owned();
     let mut modified = original.clone();
     let id = data.store_mut().intern_xref("@I8@").unwrap();
     modified.xref = Some(id);
     modified.sex = Some(Sex::Undetermined);
     assert_ne!(original, modified);
-    assert_eq!(data.individuals()[0], original);
+    assert_eq!(data.individuals().first().unwrap().into_owned(), original);
     assert_eq!(data.store().xref(original.xref.unwrap()), "@I1@");
 
     let mut changed = data.clone();
@@ -489,15 +480,17 @@ fn a_modified_clone_differs_and_leaves_the_original_alone() {
 
 #[test]
 fn equal_input_reads_to_equal_datasets() {
+    let at = |d: &Dataset, i: usize| d.individuals().get(i).unwrap().into_owned();
+    let fam = |d: &Dataset, i: usize| d.families().get(i).unwrap().into_owned();
     assert_eq!(family(), family());
-    assert_eq!(family().individuals()[1], family().individuals()[1]);
-    assert_eq!(family().families()[0], family().families()[0]);
+    assert_eq!(at(&family(), 1), at(&family(), 1));
+    assert_eq!(fam(&family(), 0), fam(&family(), 0));
 
     let other = Dataset::parse(FAMILY.replace("1 SEX F", "1 SEX M"));
     assert_ne!(other, family());
-    assert_ne!(other.individuals()[1], family().individuals()[1]);
+    assert_ne!(at(&other, 1), at(&family(), 1));
     let other = Dataset::parse(FAMILY.replace("1 WIFE @I4@", "1 WIFE @I3@"));
-    assert_ne!(other.families()[1], family().families()[1]);
+    assert_ne!(fam(&other, 1), fam(&family(), 1));
 }
 
 #[test]
@@ -509,11 +502,12 @@ fn texts_compare_as_held_so_records_of_other_datasets_compare_by_their_structure
     let b = Dataset::parse(
         "0 HEAD\n1 GEDC\n2 VERS 7.0\n1 LANG en\n0 @I1@ INDI\n1 NAME Ann /Example/\n0 TRLR\n",
     );
-    let structure =
-        |d: &Dataset| RecordRef::Individual(&d.individuals()[0]).to_structure_in(d, d.version());
+    fn first(d: &Dataset) -> View<'_, Individual> {
+        d.individuals().first().unwrap()
+    }
+    let structure = |d: &Dataset| RecordRef::Individual(first(d)).to_structure_in(d.version());
     assert_eq!(structure(&a), structure(&b));
-    assert_eq!(
-        a.individuals()[0].full_name(&a),
-        b.individuals()[0].full_name(&b)
-    );
+    assert_eq!(first(&a).full_name(), first(&b).full_name());
+    // Copied out, they hold spans of their own stores: they differ.
+    assert_ne!(first(&a).into_owned(), first(&b).into_owned());
 }

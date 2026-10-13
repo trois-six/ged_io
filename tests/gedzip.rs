@@ -41,7 +41,7 @@ fn a_dataset_round_trips_through_an_archive() {
     assert_eq!(read.individuals().len(), 2);
     assert_eq!(read.families().len(), 1);
     assert_eq!(read.to_structures(), Dataset::parse(FAMILY).to_structures());
-    let ann = read.find_individual("@I1@").unwrap();
+    let ann = read.find_individual("@I1@").unwrap().into_owned();
     assert_eq!(ann.full_name(&read).as_deref(), Some("Ann Example"));
 
     // The builder reads the same archive.
@@ -72,7 +72,7 @@ fn the_reader_and_writer_types() {
 
     let read = reader.read_dataset(&GedcomBuilder::new()).unwrap();
     // The FILE reference of the dataset finds its entry.
-    let path = read.multimedia()[0].files[0]
+    let path = read.multimedia().get(0).unwrap().into_owned().files[0]
         .path
         .to_str(&read)
         .into_owned();
@@ -198,7 +198,11 @@ fn the_builder_limit_and_strict_mode_apply_to_the_archive() {
     ));
     // Leniently, the value is kept.
     let lenient = read_gedzip(&raw).unwrap();
-    assert!(lenient.individuals()[0]
+    assert!(lenient
+        .individuals()
+        .get(0)
+        .unwrap()
+        .into_owned()
         .sex
         .as_ref()
         .is_some_and(|s| !s.is_known()));

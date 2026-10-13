@@ -7,7 +7,7 @@ gedcom_struct! {
     /// A postal address (`ADDR`): the address as a whole, with its lines,
     /// and its parts. The contacts that go with it (`PHON`, `EMAIL`, `FAX`,
     /// `WWW`) are fields of the structure that holds it.
-    pub struct Address {
+    pub struct Address => AddressRow {
         @payload
         /// The whole address, lines joined with newlines.
         value: Text;

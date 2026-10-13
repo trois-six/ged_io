@@ -215,13 +215,20 @@ fn text(s: Option<String>) -> Option<Text> {
 
 fn convert_date(date: &Date, cx: &WriteCx<'_>) -> Converted<Date> {
     let detail = date.detail();
-    let c = match date_to_version(
+    let conversion = date_to_version(
         &date.value,
         detail.time.as_ref(),
         detail.phrase.as_ref(),
         Kind::Date,
         cx,
-    ) {
+    );
+    date_of(conversion, || date.extra.clone())
+}
+
+/// What [`convert_date`] makes of a date's conversion, the date's untyped
+/// substructures given by `extra` (asked for only when it is converted).
+fn date_of(conversion: DateConversion, extra: impl FnOnce() -> Extra) -> Converted<Date> {
+    let c = match conversion {
         DateConversion::Valid => return Converted::AsIs(Some(Kind::Date)),
         DateConversion::AsIs => return Converted::AsIs(None),
         DateConversion::Into(c) => c,
@@ -230,12 +237,18 @@ fn convert_date(date: &Date, cx: &WriteCx<'_>) -> Converted<Date> {
     Converted::Into(Date {
         value: Text::new(c.value.unwrap_or_default()),
         detail: (time.is_some() || phrase.is_some()).then(|| Box::new(DateDetail { time, phrase })),
-        extra: date.extra.clone(),
+        extra: extra(),
     })
 }
 
 fn convert_exact(date: &ExactDate, cx: &WriteCx<'_>) -> Converted<ExactDate> {
-    let c = match date_to_version(&date.value, date.time.as_ref(), None, Kind::DateExact, cx) {
+    let conversion = date_to_version(&date.value, date.time.as_ref(), None, Kind::DateExact, cx);
+    exact_of(conversion, || date.extra.clone())
+}
+
+/// What [`convert_exact`] makes of a date's conversion.
+fn exact_of(conversion: DateConversion, extra: impl FnOnce() -> Extra) -> Converted<ExactDate> {
+    let c = match conversion {
         DateConversion::Valid => return Converted::AsIs(Some(Kind::DateExact)),
         DateConversion::AsIs => return Converted::AsIs(None),
         DateConversion::Into(c) => c,
@@ -245,20 +258,26 @@ fn convert_exact(date: &ExactDate, cx: &WriteCx<'_>) -> Converted<ExactDate> {
         None => Converted::Into(ExactDate {
             value: Text::new(c.value.unwrap_or_default()),
             time: text(c.time),
-            extra: date.extra.clone(),
+            extra: extra(),
         }),
         Some(_) => Converted::AsIs(None),
     }
 }
 
 fn convert_period(period: &Period, cx: &WriteCx<'_>) -> Converted<Period> {
-    let c = match date_to_version(
+    let conversion = date_to_version(
         &period.value,
         None,
         period.phrase.as_ref(),
         Kind::DatePeriod,
         cx,
-    ) {
+    );
+    period_of(conversion, || period.extra.clone())
+}
+
+/// What [`convert_period`] makes of a period's conversion.
+fn period_of(conversion: DateConversion, extra: impl FnOnce() -> Extra) -> Converted<Period> {
+    let c = match conversion {
         DateConversion::Valid => return Converted::AsIs(Some(Kind::DatePeriod)),
         DateConversion::AsIs => return Converted::AsIs(None),
         DateConversion::Into(c) => c,
@@ -267,7 +286,7 @@ fn convert_period(period: &Period, cx: &WriteCx<'_>) -> Converted<Period> {
         None => Converted::Into(Period {
             value: Text::new(c.value.unwrap_or_default()),
             phrase: text(c.phrase),
-            extra: period.extra.clone(),
+            extra: extra(),
         }),
         Some(_) => Converted::AsIs(None),
     }
@@ -306,6 +325,48 @@ fn convert_age(a: &Age, cx: &WriteCx<'_>) -> Converted<Age> {
     })
 }
 
+/// [`convert_date`] of a row: the date is copied out only when it is
+/// written otherwise.
+fn convert_date_row(row: &DateRow, at: u32, cx: &WriteCx<'_>) -> Converted<Date> {
+    use super::table::HasTable;
+    let detail = row
+        .detail
+        .and_then(|d| DateDetail::table(cx.tables).rows.get(d.get() as usize));
+    let value = Text::from_span(row.value);
+    let time = detail.and_then(|d| d.time).map(Text::from_span);
+    let phrase = detail.and_then(|d| d.phrase).map(Text::from_span);
+    let conversion = date_to_version(&value, time.as_ref(), phrase.as_ref(), Kind::Date, cx);
+    date_of(conversion, || {
+        super::node::load_extra(row.extra_in(at, cx.tables), cx.tables)
+    })
+}
+
+/// [`convert_exact`] of a row.
+fn convert_exact_row(row: &ExactDateRow, at: u32, cx: &WriteCx<'_>) -> Converted<ExactDate> {
+    let value = Text::from_span(row.value);
+    let time = row.time.map(Text::from_span);
+    let conversion = date_to_version(&value, time.as_ref(), None, Kind::DateExact, cx);
+    exact_of(conversion, || {
+        super::node::load_extra(row.extra_in(at, cx.tables), cx.tables)
+    })
+}
+
+/// [`convert_period`] of a row.
+fn convert_period_row(row: &PeriodRow, at: u32, cx: &WriteCx<'_>) -> Converted<Period> {
+    let value = Text::from_span(row.value);
+    let phrase = row.phrase.map(Text::from_span);
+    let conversion = date_to_version(&value, None, phrase.as_ref(), Kind::DatePeriod, cx);
+    period_of(conversion, || {
+        super::node::load_extra(row.extra_in(at, cx.tables), cx.tables)
+    })
+}
+
+/// [`convert_age`] of a row.
+fn convert_age_row(row: &AgeRow, at: u32, cx: &WriteCx<'_>) -> Converted<Age> {
+    use super::table::Item;
+    convert_age(&Age::load_elem(row, at, cx.tables), cx)
+}
+
 gedcom_struct! {
     /// A date (`DATE`, 7.x also `SDATE`): a date value, the time of day
     /// (7.x) and the date in words (7.x `PHRASE`).
@@ -313,13 +374,13 @@ gedcom_struct! {
     /// Written in another version's grammar, it is converted
     /// ([`Date::to_version`]): `@#DJULIAN@` and `JULIAN`, `B.C.`
     /// and `BCE`, dual years, phrases.
-    pub struct Date [convert = convert_date, untyped_date] {
+    pub struct Date => DateRow [convert = convert_date, untyped_date, convert_date_row] {
         @payload
         /// The date value as written (`ABT 1900`, `@#DJULIAN@ 1 JAN 1700`).
         value: Text;
         @detail
         /// The time and phrase of a [`Date`], which few dates have.
-        DateDetail {
+        DateDetail => DateDetailRow {
             /// The time (`TIME`).
             "TIME" => time: Option<Text>,
             /// The date in words (`PHRASE`).
@@ -365,7 +426,8 @@ impl Date {
     /// use ged_io::value::{Approximation, Calendar, DateValue};
     ///
     /// let data = Dataset::parse("0 HEAD\n0 @I1@ INDI\n1 BIRT\n2 DATE ABT @#DJULIAN@ 1700\n0 TRLR\n");
-    /// let date = data.individuals()[0].birth().unwrap().date.as_ref().unwrap();
+    /// let date = data.individuals().first().unwrap().birth().unwrap().date().unwrap();
+    /// let date = date.into_owned();
     /// let DateValue::Approximated(Approximation::About, year) = date.parse(&data) else {
     ///     panic!()
     /// };
@@ -498,7 +560,7 @@ impl Date {
 gedcom_struct! {
     /// An exact date (`DATE` of `CHAN`, `CREA`, an ordinance status or the
     /// header) and its time.
-    pub struct ExactDate [convert = convert_exact, untyped_exact] {
+    pub struct ExactDate => ExactDateRow [convert = convert_exact, untyped_exact, convert_exact_row] {
         @payload
         /// The date as written (`1 JAN 2000`).
         value: Text;
@@ -538,7 +600,7 @@ impl ExactDate {
 gedcom_struct! {
     /// A date period (`DATE` of a source's recorded events, 7.x `NO`) and
     /// its phrase.
-    pub struct Period [convert = convert_period, untyped_period] {
+    pub struct Period => PeriodRow [convert = convert_period, untyped_period, convert_period_row] {
         @payload
         /// The period as written (`FROM 1900 TO 1910`).
         value: Text;
@@ -564,7 +626,7 @@ impl Period {
 gedcom_struct! {
     /// An age at an event (`AGE`) and its phrase. Written in another
     /// version's grammar, it is converted ([`Age::to_version`]).
-    pub struct Age [convert = convert_age, untyped_age] {
+    pub struct Age => AgeRow [convert = convert_age, untyped_age, convert_age_row] {
         @payload
         /// The age as written (`> 25y 3m`, `CHILD`).
         value: Text;
@@ -659,7 +721,7 @@ impl Age {
 
 gedcom_struct! {
     /// When a record last changed (`CHAN`), with notes about the change.
-    pub struct ChangeDate {
+    pub struct ChangeDate => ChangeDateRow {
         /// The date and time of the change (`DATE`).
         "DATE" => date: Option<ExactDate>,
         /// Notes about the change (`NOTE`, 7.x `SNOTE`).
@@ -674,7 +736,7 @@ gedcom_struct! {
 
 gedcom_struct! {
     /// When a record was created (7.x `CREA`).
-    pub struct CreationDate {
+    pub struct CreationDate => CreationDateRow {
         /// The date and time of the creation (`DATE`).
         "DATE" => date: Option<ExactDate>,
     }
@@ -682,5 +744,65 @@ gedcom_struct! {
         v551: [],
         v70: ["CREA"],
         v71: ["CREA"],
+    }
+}
+
+impl super::View<'_, Date> {
+    /// The date value read by the date grammar of either version
+    /// ([`Date::parse`]).
+    #[must_use]
+    pub fn parse(self) -> DateValue {
+        DateValue::parse(&self.value().to_str())
+    }
+
+    /// The time read by the time grammar.
+    #[must_use]
+    pub fn parse_time(self) -> Option<Time> {
+        Time::parse(&self.time()?.to_str())
+    }
+
+    /// The value and the time in one string ([`Date::datetime`]).
+    #[must_use]
+    pub fn datetime(self) -> Option<String> {
+        let time = self
+            .time()
+            .map(|t| t.to_string())
+            .filter(|t| !t.is_empty())?;
+        let value = self.value().to_string();
+        Some(if value.is_empty() {
+            time
+        } else {
+            format!("{value} {time}")
+        })
+    }
+}
+
+impl super::View<'_, ExactDate> {
+    /// The date read by the exact-date grammar ([`ExactDate::parse`]).
+    #[must_use]
+    pub fn parse(self) -> Option<DateExact> {
+        DateExact::parse(&self.value().to_str())
+    }
+
+    /// The time read by the time grammar.
+    #[must_use]
+    pub fn parse_time(self) -> Option<Time> {
+        Time::parse(&self.time()?.to_str())
+    }
+}
+
+impl super::View<'_, Period> {
+    /// The period read by the date-period grammar ([`Period::parse`]).
+    #[must_use]
+    pub fn parse(self) -> Option<DatePeriod> {
+        DatePeriod::parse(&self.value().to_str())
+    }
+}
+
+impl super::View<'_, Age> {
+    /// The age read by the age grammar of either version ([`Age::parse`]).
+    #[must_use]
+    pub fn parse(self) -> AgeValue {
+        AgeValue::parse(&self.value().to_str())
     }
 }

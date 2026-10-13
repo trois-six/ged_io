@@ -9,16 +9,19 @@ use ged_io::model::{
 };
 use ged_io::{GedcomVersion, GedcomWriter};
 
-fn indi<'a>(data: &'a Dataset, xref: &str) -> &'a Individual {
-    data.find_individual(xref).expect("individual")
+/// The individual with identifier `xref`, copied out.
+fn indi(data: &Dataset, xref: &str) -> Individual {
+    data.find_individual(xref).expect("individual").into_owned()
 }
 
-fn source<'a>(data: &'a Dataset, xref: &str) -> &'a Source {
+/// The source with identifier `xref`, copied out.
+fn source(data: &Dataset, xref: &str) -> Source {
     let id = data.store().find_xref(xref).expect("xref");
     data.sources()
         .iter()
-        .find(|s| s.xref == Some(id))
+        .find(|s| s.xref() == Some(id))
         .expect("source")
+        .into_owned()
 }
 
 /// The first event of a kind.
@@ -58,7 +61,8 @@ fn extensions_are_kept_where_they_are() {
     let data = Dataset::parse(v551(
         "0 @I1@ INDI\n1 BIRT\n2 DATE 1 JAN 1900\n3 _DX date extension\n1 NOTE A note\n2 _NX under a note\n2 FOO unknown standard-looking tag\n1 CHAN\n2 DATE 1 JAN 2000\n3 _CX change extension\n",
     ));
-    let note = &indi(&data, "@I1@").notes[0];
+    let note_indi = indi(&data, "@I1@");
+    let note = &note_indi.notes[0];
     assert_eq!(note.extra.len(), 2);
     assert_eq!(data.store().tag(note.extra[0].tag), "_NX");
     let out = write(&data);
@@ -83,7 +87,8 @@ fn identifiers_are_repeatable_and_keep_their_type() {
     let data = Dataset::parse(v7(
         "0 @I1@ INDI\n1 REFN a\n2 TYPE user\n1 REFN b\n1 UID 0b0f2b0a-0000-4000-8000-000000000001\n1 UID 0b0f2b0a-0000-4000-8000-000000000002\n1 EXID 123\n2 TYPE http://example.com\n",
     ));
-    let detail = indi(&data, "@I1@").detail();
+    let detail_indi = indi(&data, "@I1@");
+    let detail = detail_indi.detail();
     let refns = &detail.refns;
     assert_eq!(refns.len(), 2);
     assert_eq!(text(&data, &refns[0].value), "a");
@@ -111,7 +116,8 @@ fn notes() {
     let data = Dataset::parse(v7(
         "0 @I1@ INDI\n1 NOTE <p>Bonjour</p>\n2 MIME text/html\n2 LANG fr\n2 TRAN Hello\n3 LANG en\n2 SOUR @S1@\n3 PAGE 4\n1 SNOTE @N1@\n1 NOTE @@N1@ is an address\n0 @N1@ SNOTE Shared\n0 @S1@ SOUR\n1 TITL Register\n",
     ));
-    let notes = &indi(&data, "@I1@").notes;
+    let notes_indi = indi(&data, "@I1@");
+    let notes = &notes_indi.notes;
     assert_eq!(notes.len(), 3);
     let detail = notes[0].detail();
     assert_eq!(text(&data, detail.mime.as_ref().unwrap()), "text/html");
@@ -129,7 +135,8 @@ fn notes() {
     );
     // 5.5.1 points to a note record with NOTE.
     let data = Dataset::parse(v551("0 @I1@ INDI\n1 NOTE @N1@\n0 @N1@ NOTE Shared\n"));
-    let note = &indi(&data, "@I1@").notes[0];
+    let note_indi = indi(&data, "@I1@");
+    let note = &note_indi.notes[0];
     assert!(matches!(note.content, NoteContent::Shared(_)));
     assert!(write(&data).contains("1 NOTE @N1@\n"));
     // 7.x points to a shared note with SNOTE (the record itself becomes a
@@ -147,7 +154,8 @@ fn citations() {
     let data = Dataset::parse(v7(
         "0 @I1@ INDI\n1 BIRT\n2 SOUR @S1@\n3 PAGE 12\n3 PAGE 13\n3 DATA\n4 DATE 1 JAN 1900\n4 TEXT Born at home\n5 LANG en\n3 EVEN BIRT\n4 PHRASE Birth\n4 ROLE OTHER\n5 PHRASE Midwife\n3 QUAY 3\n0 @S1@ SOUR\n1 TITL Register\n",
     ));
-    let citation = &event(indi(&data, "@I1@"), EventKind::Birth).citations[0];
+    let citation_indi = indi(&data, "@I1@");
+    let citation = &event(&citation_indi, EventKind::Birth).citations[0];
     assert!(matches!(citation.source, CitationSource::Pointer(_)));
     assert_eq!(text(&data, citation.page.as_ref().unwrap()), "12");
     assert_eq!(citation.extra.len(), 1, "the second PAGE");
@@ -165,7 +173,8 @@ fn citations() {
     let data = Dataset::parse(v551(
         "0 @I1@ INDI\n1 SOUR Parish register\n2 TEXT Born on a Sunday\n2 QUAY 2\n",
     ));
-    let citation = &indi(&data, "@I1@").citations[0];
+    let citation_indi = indi(&data, "@I1@");
+    let citation = &citation_indi.citations[0];
     assert!(
         matches!(&citation.source, CitationSource::Description(t) if t.to_str(&data) == "Parish register")
     );
@@ -187,7 +196,8 @@ fn repository_citations() {
     let data = Dataset::parse(v7(
         "0 @S1@ SOUR\n1 REPO @R1@\n2 CALN 123\n3 MEDI _MYMEDIUM\n2 CALN 456\n3 MEDI OTHER\n4 PHRASE Glass plate\n0 @R1@ REPO\n1 NAME Archive\n",
     ));
-    let repo = &source(&data, "@S1@").repositories[0];
+    let repo_source = source(&data, "@S1@");
+    let repo = &repo_source.repositories[0];
     assert_eq!(repo.call_numbers.len(), 2);
     let medium = repo.call_numbers[0].medium.as_ref().unwrap();
     assert!(matches!(&medium.value, Medium::Unknown(t) if t.to_str(&data) == "_MYMEDIUM"));
@@ -212,7 +222,8 @@ fn multimedia_links() {
     let data = Dataset::parse(v7(
         "0 @I1@ INDI\n1 OBJE @O1@\n2 CROP\n3 TOP 10\n3 LEFT 20\n3 HEIGHT 300\n3 WIDTH 50%\n2 TITL party\n0 @O1@ OBJE\n1 FILE media/a.jpg\n2 FORM image/jpeg\n",
     ));
-    let link = &indi(&data, "@I1@").detail().multimedia[0];
+    let link_indi = indi(&data, "@I1@");
+    let link = &link_indi.detail().multimedia[0];
     let crop = link.crop.as_ref().unwrap();
     assert_eq!(
         (crop.top, crop.left, crop.height, crop.width),
@@ -235,7 +246,8 @@ fn multimedia_links() {
     let data = Dataset::parse(v551(
         "0 @I1@ INDI\n1 OBJE\n2 FILE photo.jpg\n3 FORM jpg\n4 MEDI photo\n2 TITL Portrait\n",
     ));
-    let link = &indi(&data, "@I1@").detail().multimedia[0];
+    let link_indi = indi(&data, "@I1@");
+    let link = &link_indi.detail().multimedia[0];
     let form: &FileForm = link.files[0].form.as_ref().unwrap();
     assert_eq!(form.medium.as_ref().unwrap().value, Medium::Photo);
     let out = write(&data);
@@ -252,7 +264,8 @@ fn places() {
     let data = Dataset::parse(v7(
         "0 @I1@ INDI\n1 BIRT\n2 PLAC Sampleton, Example County\n3 FORM City, County\n3 LANG en\n3 TRAN Sampleville, Exemple\n4 LANG fr\n3 MAP\n4 LATI N18.150944\n4 LONG E168.150944\n3 EXID 77\n4 TYPE http://example.com/places\n3 NOTE Near the river\n",
     ));
-    let place = event(indi(&data, "@I1@"), EventKind::Birth)
+    let place_indi = indi(&data, "@I1@");
+    let place = event(&place_indi, EventKind::Birth)
         .place
         .as_ref()
         .unwrap()
@@ -270,7 +283,8 @@ fn places() {
     let data = Dataset::parse(v551(
         "0 @I1@ INDI\n1 BIRT\n2 PLAC Sample City\n3 FONE Sanpuru\n4 TYPE kana\n3 ROMN Sanpuru Shi\n4 TYPE romaji\n3 MAP\n4 LATI N35.0\n4 LONG E135.0\n",
     ));
-    let place = event(indi(&data, "@I1@"), EventKind::Birth)
+    let place_indi = indi(&data, "@I1@");
+    let place = event(&place_indi, EventKind::Birth)
         .place
         .as_ref()
         .unwrap()
@@ -287,12 +301,14 @@ fn associations() {
     let data = Dataset::parse(v7(
         "0 @I1@ INDI\n1 ASSO @I2@\n2 PHRASE The neighbour\n2 ROLE NGHBR\n0 @I2@ INDI\n",
     ));
-    let asso = &indi(&data, "@I1@").detail().associations[0];
+    let asso_indi = indi(&data, "@I1@");
+    let asso = &asso_indi.detail().associations[0];
     assert_eq!(asso.role.as_ref().unwrap().value, Role::Neighbor);
     let data = Dataset::parse(v551(
         "0 @I1@ INDI\n1 ASSO @I2@\n2 RELA Godfather\n0 @I2@ INDI\n",
     ));
-    let asso = &indi(&data, "@I1@").detail().associations[0];
+    let asso_indi = indi(&data, "@I1@");
+    let asso = &asso_indi.detail().associations[0];
     assert_eq!(text(&data, asso.relation.as_ref().unwrap()), "Godfather");
     assert!(write(&data).contains("1 ASSO @I2@\n2 RELA Godfather\n"));
 }
@@ -304,7 +320,8 @@ fn enumeration_values_are_never_fatal() {
     let data = Dataset::parse(v7(
         "0 @I1@ INDI\n1 SEX _I\n1 FAMC @F1@\n2 PEDI OTHER\n3 PHRASE Guardianship\n2 STAT _DOUBTED\n1 FAMC @F2@\n2 PEDI _ENUMVAL\n0 @F1@ FAM\n0 @F2@ FAM\n",
     ));
-    let person = indi(&data, "@I1@");
+    let person_indi = indi(&data, "@I1@");
+    let person = &person_indi;
     assert!(matches!(&person.sex, Some(Sex::Unknown(t)) if t.to_str(&data) == "_I"));
     let famc = person.child_of[0].detail();
     let pedi = famc.pedigree.as_ref().unwrap();
@@ -326,7 +343,8 @@ fn enumeration_values_are_never_fatal() {
     let data = Dataset::parse(v551(
         "0 @I1@ INDI\n1 SEX m\n1 FAMC @F1@\n2 PEDI stepchild\n1 SOUR @S1@\n2 QUAY 5\n0 @F1@ FAM\n0 @S1@ SOUR\n",
     ));
-    let person = indi(&data, "@I1@");
+    let person_indi = indi(&data, "@I1@");
+    let person = &person_indi;
     assert_eq!(person.sex, Some(Sex::Male));
     let pedi = &person.child_of[0].detail().pedigree.as_ref().unwrap().value;
     assert!(matches!(pedi, Pedigree::Unknown(t) if t.to_str(&data) == "stepchild"));
@@ -348,7 +366,8 @@ fn enumeration_spellings_per_version() {
     let data = Dataset::parse(v551(
         "0 @I1@ INDI\n1 NAME Ann /Sample/\n2 TYPE birth\n1 FAMC @F1@\n2 PEDI adopted\n2 STAT challenged\n0 @F1@ FAM\n1 CHIL @I1@\n2 ADOP BOTH\n",
     ));
-    let name = &indi(&data, "@I1@").names[0];
+    let name_indi = indi(&data, "@I1@");
+    let name = &name_indi.names[0];
     assert_eq!(
         name.detail().kind.as_ref().map(|k| &k.value),
         Some(&NameType::Birth)
@@ -371,10 +390,8 @@ fn ordinance_statuses() {
     let data = Dataset::parse(v7(
         "0 @I1@ INDI\n1 BAPL\n2 STAT PRE_1970\n3 DATE 27 MAR 2022\n1 INIL\n2 STAT EXCLUDED\n3 DATE 27 MAR 2022\n0 @F1@ FAM\n1 SLGS\n2 STAT DNS_CAN\n3 DATE 1 JAN 2000\n",
     ));
-    let stat = indi(&data, "@I1@").detail().ordinances[0]
-        .status
-        .as_ref()
-        .unwrap();
+    let stat_indi = indi(&data, "@I1@");
+    let stat = stat_indi.detail().ordinances[0].status.as_ref().unwrap();
     assert_eq!(stat.value, OrdinanceStatus::Pre1970);
     assert_eq!(
         text(&data, &stat.date.as_ref().unwrap().value),
@@ -406,7 +423,8 @@ fn dates_and_ages() {
     let data = Dataset::parse(v551(
         "0 @I1@ INDI\n1 BIRT\n2 DATE @#DJULIAN@ 1 JAN 1700\n1 DEAT\n2 DATE 2 FEB 1750\n2 AGE 50y\n1 CHAN\n2 DATE 1 JAN 2000\n3 TIME 12:00:00\n",
     ));
-    let person = indi(&data, "@I1@");
+    let person_indi = indi(&data, "@I1@");
+    let person = &person_indi;
     let date = event(person, EventKind::Birth).date.as_ref().unwrap();
     assert_eq!(text(&data, &date.value), "@#DJULIAN@ 1 JAN 1700");
     assert!(matches!(
@@ -437,14 +455,15 @@ fn payloads_that_do_not_fit_are_kept_aside() {
     let data = Dataset::parse(v7(
         "0 @I1@ INDI\n1 ASSO a neighbour\n2 ROLE NGHBR\n1 @X1@ NOTE A note with an identifier\n0 @F1@ FAM stray text\n1 MARR\n2 DATE 1 JAN 1900\n",
     ));
-    let person = indi(&data, "@I1@");
+    let person_indi = indi(&data, "@I1@");
+    let person = &person_indi;
     let asso = &person.detail().associations[0];
     assert_eq!(asso.individual, None);
     assert_eq!(asso.role.as_ref().unwrap().value, Role::Neighbor);
     assert_eq!(asso.extra[0].tag, ged_io::model::TagId::ASIDE);
     assert!(person.notes[0].extra[0].xref.is_some());
     assert_eq!(
-        data.families()[0].events.len(),
+        data.families().get(0).unwrap().into_owned().events.len(),
         1,
         "a record with a payload is typed"
     );
@@ -650,7 +669,8 @@ fn values_of_the_other_version_keep_their_spelling() {
     let data = Dataset::parse(v551(
         "0 @S1@ SOUR\n1 REPO @R1@\n2 CALN 1\n3 MEDI Other\n2 CALN 2\n3 MEDI Photo\n0 @R1@ REPO\n1 NAME Archive\n",
     ));
-    let repo = &source(&data, "@S1@").repositories[0];
+    let repo_source = source(&data, "@S1@");
+    let repo = &repo_source.repositories[0];
     assert!(matches!(
         &repo.call_numbers[0].medium.as_ref().unwrap().value,
         Medium::Unknown(t) if t.to_str(&data) == "Other"
@@ -757,4 +777,32 @@ fn an_enumeration_value_with_a_line_break_is_kept() {
         .unwrap();
     assert_eq!(once, twice);
     assert!(once.contains("3 TYPE hangul\n4 CONT\n"), "{once}");
+}
+
+/// An optional enumeration value is kept as it is set, an empty unknown
+/// value included, whatever the dataset stores it as.
+#[test]
+fn an_optional_value_kept_as_set() {
+    for sex in [
+        None,
+        Some(Sex::Female),
+        Some(Sex::Unknown(Text::new("x"))),
+        Some(Sex::Unknown(Text::default())),
+    ] {
+        let mut data = Dataset::default();
+        let handle = data
+            .add(Individual {
+                sex: sex.clone(),
+                ..Individual::default()
+            })
+            .expect("added");
+        let stored = data.get(handle).expect("stored").into_owned();
+        assert_eq!(stored.sex.is_some(), sex.is_some());
+        match (&stored.sex, &sex) {
+            (Some(Sex::Unknown(a)), Some(Sex::Unknown(b))) => {
+                assert_eq!(a.to_str(&data), b.to_str(&data));
+            }
+            (a, b) => assert_eq!(a, b),
+        }
+    }
 }

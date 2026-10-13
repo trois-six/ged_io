@@ -86,7 +86,7 @@ let gedcom_7 = "\
 let data = Dataset::parse(gedcom_7);
 assert_eq!(data.notes().len(), 1);
 let note = data.find_note("@N1@").unwrap();
-assert!(note.text.to_str(&data).contains("referenced"));
+assert!(note.text().to_str().contains("referenced"));
 ```
 
 A 5.5.1 `NOTE` record is a shared note too, written `NOTE` in 5.5.1 and
@@ -181,9 +181,9 @@ use ged_io::Dataset;
 use ged_io::model::OrdinanceKind;
 
 let data = Dataset::parse("0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 INIL\n2 DATE 15 MAR 1990\n2 TEMP SLAKE\n0 TRLR\n");
-let ordinance = &data.individuals()[0].detail().ordinances[0];
-assert_eq!(ordinance.kind, OrdinanceKind::Initiatory);
-assert_eq!(ordinance.kind.tag(), "INIL");
+let ordinance = data.individuals().first().unwrap().ordinances().first().unwrap();
+assert_eq!(ordinance.kind(), OrdinanceKind::Initiatory);
+assert_eq!(ordinance.kind().tag(), "INIL");
 ```
 
 Written as 5.5.1, which has no `INIL`, it is kept as the extension `_INIL`.
@@ -238,7 +238,7 @@ let data = Dataset::parse("0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @N1@ SNOTE Shared\n0 TR
 
 if data.version().is_v7() {
     for note in data.notes() {
-        println!("Shared note: {}", note.text.to_str(&data));
+        println!("Shared note: {}", note.text());
     }
 }
 // The declaration as written (`7.0`, `7.0.14`, `5.5`, …)

@@ -30,14 +30,14 @@ Dates are the backbone of genealogy. Every downstream app (timelines, reports, t
 Any app that edits genealogy data needs operations that keep the dataset consistent.
 
 ### Records
-- ✅ Every record type is a plain struct in a list of the `Dataset`; `Dataset::push(Record)` adds one, `Dataset::store_mut().intern_xref()` gives identifiers, `Text::new` owned texts — `src/model/dataset.rs`
-- `remove_*(xref)` returning the record; generated unique identifiers for new records
-- Clean up or report pointers left dangling by a removal (`Dataset::dangling_references()` ✅ finds them)
+- ✅ Every structure is a row of the table of its type in the `Dataset`, read through views (`View`, `Items`, `TextRef`); `Dataset::add` and `Dataset::push(Record)` store owned records, `Dataset::store_mut().intern_xref()` gives identifiers, `Text::new` owned texts — `src/model/dataset.rs`, `src/model/table.rs`
+- ✅ `Dataset::remove(handle, Removal)` (refuse, detach the pointers, or leave them dangling); `Dataset::add` gives a record without identifier a free one
+- ✅ Pointers left dangling are reported (`Dataset::dangling_references()`), and refused by `add` and `link`
 
 ### Cross-reference Linking/Unlinking
 - ✅ Relationship traversal: `families_as_spouse`, `families_as_child`, `parents`, `children`, `spouse`, on `Dataset` and, in constant time, on `IndexedDataset`
-- `link_child_to_family(indi, fam)` — adds `CHIL` to the family and `FAMC` to the individual
-- `link_spouse_to_family(indi, fam, role)`, `unlink_individual_from_family(indi, fam)`
+- ✅ `Dataset::link_child(fam, indi)` — adds `CHIL` to the family and `FAMC` to the individual
+- ✅ `Dataset::link_spouse`, `unlink_child`, `unlink_spouse`; `link`/`unlink` of every kind of pointer; `rename`, `redirect`, `detach`
 
 ### Index Sync
 - ✅ `IndexedDataset::new(Dataset)` builds the index; `data_mut()` reindexes when the edit ends — `src/indexed.rs`

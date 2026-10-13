@@ -136,7 +136,11 @@ fn check_positions<T: RecordType + PartialEq + std::fmt::Debug>(data: &Dataset) 
     for (pos, (h, record)) in handles.iter().zip(all).enumerate() {
         assert_eq!(data.position(*h), Some(pos));
         assert_eq!(data.handle_at::<T>(pos), Some(*h));
-        assert_eq!(data.get(*h), Some(record));
+        assert!(data.get(*h) == Some(record));
+        assert_eq!(
+            data.get(*h).map(|r| r.into_owned()),
+            Some(record.into_owned())
+        );
     }
 }
 
@@ -546,7 +550,10 @@ fn run(seed: u64, steps: usize) {
     let copy = data.clone();
     assert_eq!(copy, data);
     for (h, r) in data.records_with_handles() {
-        assert_eq!(copy.get_any(h), Some(r));
+        assert_eq!(
+            copy.get_any(h).map(ged_io::model::RecordRef::into_owned),
+            Some(r.into_owned())
+        );
     }
 }
 

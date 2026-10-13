@@ -32,25 +32,46 @@
 //! GEDZIP archives; [`GedcomStreamParser`](crate::GedcomStreamParser) reads
 //! one record at a time.
 //!
+//! # Tables and views
+//!
+//! A dataset keeps every structure but the header as a row of the table
+//! of its type: rows of a fixed size, contiguous, that hold a structure
+//! held once by its index in its table, a list as a run of its table, a
+//! text as an 8-byte span of the store and a pointer as an interned id.
+//! Reading fills the tables in place, a list's run reserved before its
+//! items are read; no structure is allocated on its own, and a dataset
+//! takes about twice the size of its input.
+//!
+//! The dataset's accessors give *views* of the rows ([`View`]): `Copy`
+//! handles with a method per field, which give a substructure as a view, a
+//! list as [`Items`], a text as a [`TextRef`] (which reads, compares and
+//! prints without the store), a pointer as an [`XrefId`] and an
+//! enumeration value as its type. The fields few occurrences of a
+//! structure use, kept in a row of their own (the *detail*), are methods
+//! of the view like the others. [`View::into_owned`] copies a structure
+//! out as its owned type ([`Individual`], [`Event`], …), which is what
+//! records are built and edited as.
+//!
 //! # Texts and identifiers
 //!
 //! A dataset keeps the decoded text it was read from in its [`Store`], and
-//! its model points into it:
+//! its rows point into it:
 //!
-//! - every text is a [`Text`]: a span of the input, or, for a payload
-//!   reading rewrote (continuation lines joined, `@@` unescaped), a run of
-//!   the store's pieces of it — 16 bytes and no copy of the characters;
-//!   text a program sets owns its characters;
+//! - a text is a span of the input, or, for a payload reading rewrote
+//!   (continuation lines joined, `@@` unescaped), a run of the store's
+//!   pieces of it — no copy of the characters; text a program sets is
+//!   appended to the store when its structure is stored. An owned [`Text`]
+//!   (16 bytes) is the same, or owns its characters;
 //! - identifiers and pointers are interned [`XrefId`]s (4 bytes), which the
 //!   store maps to their text (`@I1@`) and back;
 //! - the tags of untyped [`Node`]s are [`TagId`]s.
 //!
-//! [`Text::to_str`] and [`Store::xref`] read them back; both take the
-//! dataset (or anything that holds a store). Fields that few occurrences of
+//! [`TextRef`] reads a text of a view; [`Text::to_str`] and [`Store::xref`]
+//! read an owned text and an identifier, given the dataset (or anything
+//! that holds a store). On the owned types, the fields few occurrences of
 //! a structure use are in its boxed *detail* ([`Event::detail`],
-//! [`Individual::detail`], …), allocated with the first of them, and
-//! lists that seldom repeat are [`ThinVec`]s: a dataset takes about 2.5
-//! times the size of its input.
+//! [`Individual::detail`], …), and lists that seldom repeat are
+//! [`ThinVec`]s.
 //!
 //! # Editing
 //!
@@ -72,8 +93,10 @@
 //!   repositories, submitters, extension structures);
 //!   [`Dataset::link_child`] and [`Dataset::link_spouse`] link a family and
 //!   an individual both ways;
-//! - [`Dataset::get_mut`] lends a record to edit any of its fields, and
-//!   counts its pointers again when the loan ends ([`RecordMut`]);
+//! - [`Dataset::get_mut`] lends a record, copied out as its owned type, to
+//!   edit any of its fields; when the loan ends ([`RecordMut`]), it is
+//!   stored back as new rows and its pointers are counted again (the rows
+//!   it leaves are reclaimed once they outnumber the others);
 //! - [`Dataset::references`] counts the pointers to an identifier in
 //!   constant time, [`Dataset::referrers`] lists their holders and
 //!   [`Dataset::dangling_references`] the pointers to no record.
@@ -116,13 +139,16 @@
 //!     "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 NOTE Hello\n2 LANG en\n\
 //!      1 FAMC @F1@\n2 PEDI OTHER\n3 PHRASE Guardianship\n0 @F1@ FAM\n0 TRLR\n",
 //! );
-//! let indi = &data.individuals()[0];
-//! let note = &indi.notes[0];
-//! assert!(matches!(&note.content, NoteContent::Text(t) if t.to_str(&data) == "Hello"));
-//! assert_eq!(note.detail().language.as_ref().unwrap().to_str(&data), "en");
+//! let indi = data.individuals().first().unwrap();
+//! let note = indi.notes().first().unwrap();
+//! assert_eq!(note.text().unwrap(), "Hello");
+//! assert_eq!(note.language().unwrap(), "en");
 //!
-//! let pedigree = indi.child_of[0].detail().pedigree.as_ref().unwrap();
-//! assert_eq!(pedigree.value, Pedigree::Other);
+//! let pedigree = indi.child_of().first().unwrap().pedigree().unwrap();
+//! assert_eq!(pedigree.value(), Pedigree::Other);
+//! // Copied out as owned types, to edit or keep.
+//! let owned = indi.into_owned();
+//! assert!(matches!(&owned.notes[0].content, NoteContent::Text(t) if t.to_str(&data) == "Hello"));
 //!
 //! let out = GedcomWriter::new().write_to_string(&data).unwrap();
 //! assert!(out.contains("2 PEDI OTHER\n3 PHRASE Guardianship\n"));
@@ -154,6 +180,7 @@ mod record;
 pub(crate) mod relocate;
 #[cfg(feature = "serde")]
 pub(crate) mod serde;
+pub(crate) mod table;
 mod text;
 pub(crate) mod write;
 
@@ -164,7 +191,7 @@ pub use citation::{
     CallNumber, Citation, CitationData, CitationDetail, CitationSource, CitedEvent,
     RepositoryCitation,
 };
-pub use dataset::{DanglingReference, Dataset, Record, RecordRef, XrefKey};
+pub use dataset::{DanglingReference, Dataset, HeaderRef, Record, RecordRef, XrefKey};
 pub use date::{Age, ChangeDate, CreationDate, Date, DateDetail, ExactDate, Period};
 pub(crate) use edit::PLACE_KIND_SHIFT;
 pub use edit::{
@@ -198,7 +225,8 @@ pub use record::{
     Family, FamilyDetail, Individual, IndividualDetail, Multimedia, RecordedEvents, Repository,
     SharedNote, Source, SourceData, Submission, Submitter,
 };
-pub use text::{Store, TagId, Text, XrefId};
+pub use table::{Field, FieldView, Items, ItemsIter, Listed, Stored, View};
+pub use text::{Store, TagId, Text, TextRef, XrefId};
 
 /// The declarations of the typed model, for the coverage ledger
 /// (`tests/spec_coverage.rs`), which checks them against the specification

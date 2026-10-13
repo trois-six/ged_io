@@ -32,7 +32,7 @@ gedcom_struct! {
     /// of an individual, `SLGS` of a family): when and where, in which
     /// temple, its status, the family of a child's sealing, notes and
     /// sources.
-    pub struct Ordinance {
+    pub struct Ordinance => OrdinanceRow {
         @tag
         /// Which ordinance.
         kind: OrdinanceKind;

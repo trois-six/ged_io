@@ -6,7 +6,7 @@ use std::borrow::Cow;
 
 use crate::spec::conform::Build;
 use crate::tree::{Flat, FlatPayload, Structure};
-use crate::version::VersionRules;
+use crate::version::{GedcomVersion, VersionRules};
 use crate::writer::GedcomWriter;
 
 use super::dataset::{Dataset, RecordRef};
@@ -17,32 +17,37 @@ use super::driver::WriteCx;
 pub(crate) struct Built<'d> {
     /// The record; `None` for the trailer, which the dataset does not keep.
     record: Option<RecordRef<'d>>,
-    cx: WriteCx<'d>,
+    /// The version to write.
+    version: GedcomVersion,
 }
 
 impl<'d> Built<'d> {
-    /// A record of a dataset whose store `cx` holds, to write in
-    /// `cx.version`.
-    pub(crate) fn new(record: RecordRef<'d>, cx: WriteCx<'d>) -> Self {
+    /// A record to write in `version`.
+    pub(crate) fn new(record: RecordRef<'d>, version: GedcomVersion) -> Self {
         Self {
             record: Some(record),
-            cx,
+            version,
         }
+    }
+
+    /// How `record`, this one, writes.
+    fn cx(&self, record: RecordRef<'d>) -> WriteCx<'d> {
+        WriteCx::of(record.dataset(), self.version, true)
     }
 }
 
 impl<'d> Build<'d> for Built<'d> {
     fn tag(&self) -> &'d str {
-        self.record
-            .map_or("TRLR", |r| r.tag(self.cx.store, self.cx.version))
+        self.record.map_or("TRLR", |r| r.tag(self.version))
     }
 
     fn xref(&self) -> Option<&'d str> {
-        self.record?.xref().map(|x| self.cx.store.xref(x))
+        let record = self.record?;
+        record.xref().map(|x| record.store().xref(x))
     }
 
     fn is_empty(&self) -> bool {
-        self.record.is_none_or(|r| r.is_empty())
+        self.record.is_none_or(RecordRef::is_empty)
     }
 
     fn xref_id(&self) -> Option<super::XrefId> {
@@ -51,14 +56,14 @@ impl<'d> Build<'d> for Built<'d> {
 
     fn standard_tag(&self) -> Option<u16> {
         match self.record {
-            Some(r) => r.standard_tag(self.cx.version),
+            Some(r) => r.standard_tag(self.version),
             None => const { crate::tree::standard_index_const("TRLR") },
         }
     }
 
     fn build(&self, out: &mut Flat<'d>) {
         if let Some(r) = self.record {
-            r.to_flat(&self.cx, out);
+            r.to_flat(&self.cx(r), out);
         } else {
             let at = out.open(Cow::Borrowed("TRLR"), None, FlatPayload::None);
             out.close(at);
@@ -71,12 +76,13 @@ impl<'d> Build<'d> for Built<'d> {
         if !h.extra.is_empty() || gedcom_aside {
             return None;
         }
-        Some(h.declared_version(self.cx.store).unwrap_or_default())
+        let store = self.record?.store();
+        Some(h.declared_version(store).unwrap_or_default())
     }
 
     fn typed_head(&self) -> Option<&'d super::Header> {
         match self.record {
-            Some(RecordRef::Header(h)) => Some(h),
+            Some(RecordRef::Header(h)) => Some(h.header()),
             _ => None,
         }
     }
@@ -87,13 +93,15 @@ impl<'d> Build<'d> for Built<'d> {
         rules: &VersionRules,
         submitter: FlatPayload<'d>,
     ) -> bool {
-        self.typed_head()
-            .is_some_and(|h| h.write_completed_flat(&self.cx, out, rules, submitter))
+        let (Some(record), Some(h)) = (self.record, self.typed_head()) else {
+            return false;
+        };
+        h.write_completed_flat(&self.cx(record), out, rules, submitter)
     }
 
     fn owned(&self) -> Option<Structure> {
         let header = self.record.filter(|r| matches!(r, RecordRef::Header(_)))?;
-        Some(header.to_structure(&self.cx))
+        Some(header.to_structure(&self.cx(header)))
     }
 }
 
@@ -101,16 +109,47 @@ impl Dataset {
     /// The records, to write with `writer` (in its version, unless one is
     /// configured), then the trailer.
     pub(crate) fn built(&self, writer: &GedcomWriter) -> Vec<Built<'_>> {
-        let cx = WriteCx {
-            store: &self.store,
-            version: writer.config().version.unwrap_or(self.version),
-            convert: true,
-        };
-        self.records()
-            .map(Some)
-            .chain([None])
-            .map(|record| Built { record, cx })
-            .collect()
+        let version = writer.config().version.unwrap_or(self.version);
+        // The records in the order of [`Dataset::records`], one table after
+        // the other.
+        let mut built = Vec::with_capacity(self.record_count() + 1);
+        let mut add = |record| built.push(Built::new(record, version));
+        if let Some(h) = self.header_ref() {
+            add(RecordRef::Header(h));
+        }
+        self.submitters()
+            .into_iter()
+            .for_each(|r| add(RecordRef::Submitter(r)));
+        self.submissions()
+            .into_iter()
+            .for_each(|r| add(RecordRef::Submission(r)));
+        self.individuals()
+            .into_iter()
+            .for_each(|r| add(RecordRef::Individual(r)));
+        self.families()
+            .into_iter()
+            .for_each(|r| add(RecordRef::Family(r)));
+        self.notes()
+            .into_iter()
+            .for_each(|r| add(RecordRef::Note(r)));
+        self.sources()
+            .into_iter()
+            .for_each(|r| add(RecordRef::Source(r)));
+        self.repositories()
+            .into_iter()
+            .for_each(|r| add(RecordRef::Repository(r)));
+        self.multimedia()
+            .into_iter()
+            .for_each(|r| add(RecordRef::Multimedia(r)));
+        self.extra()
+            .into_iter()
+            .for_each(|r| add(RecordRef::Other(r)));
+        // The trailer, which the dataset does not keep.
+        built.push(Built {
+            record: None,
+            version,
+        });
+        built
     }
 }
 
@@ -126,11 +165,7 @@ mod tests {
     /// the check looks at, and of its extension structures.
     fn typed(text: &str, version: GedcomVersion) -> Vec<(bool, Vec<String>, Vec<String>)> {
         let data = Dataset::parse(text);
-        let cx = WriteCx {
-            store: &data.store,
-            version,
-            convert: true,
-        };
+        let cx = WriteCx::of(&data, version, true);
         let mut flat = Flat::default();
         flat.set_typing(Some(Typing::of(version)));
         data.records()

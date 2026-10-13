@@ -872,17 +872,31 @@ impl SerializeIn for Record {
     }
 }
 
+/// The records of a dataset's table, serialized one at a time, each
+/// copied out as its owned type.
+struct Records<'a, T: super::Listed>(super::Items<'a, T>);
+
+impl<T: super::Listed + SerializeIn> Serialize for Records<'_, T> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let store = self.0.dataset().store();
+        let mut seq = s.serialize_seq(Some(self.0.len()))?;
+        for record in self.0.into_owned_iter() {
+            seq.serialize_element(&In(store, &record))?;
+        }
+        seq.end()
+    }
+}
+
 /// Serializes a list of records under `name`, unless it is empty.
-fn records<M: SerializeMap, T: SerializeIn>(
+fn records<M: SerializeMap, T: super::Listed + SerializeIn>(
     map: &mut M,
-    store: &Store,
     name: &'static str,
-    list: &[T],
+    list: super::Items<'_, T>,
 ) -> Result<(), M::Error> {
     if list.is_empty() {
         return Ok(());
     }
-    map.serialize_entry(name, &In(store, list))
+    map.serialize_entry(name, &Records(list))
 }
 
 impl Serialize for Dataset {
@@ -893,15 +907,15 @@ impl Serialize for Dataset {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         let store = &self.store;
         let lists = [
-            self.submitters.is_empty(),
-            self.submissions.is_empty(),
-            self.individuals.is_empty(),
-            self.families.is_empty(),
-            self.notes.is_empty(),
-            self.sources.is_empty(),
-            self.repositories.is_empty(),
-            self.multimedia.is_empty(),
-            self.extra.is_empty(),
+            self.submitters().is_empty(),
+            self.submissions().is_empty(),
+            self.individuals().is_empty(),
+            self.families().is_empty(),
+            self.notes().is_empty(),
+            self.sources().is_empty(),
+            self.repositories().is_empty(),
+            self.multimedia().is_empty(),
+            self.extra().is_empty(),
         ];
         let count = 1
             + usize::from(self.declared_version.is_some())
@@ -915,15 +929,15 @@ impl Serialize for Dataset {
         if let Some(header) = &self.header {
             map.serialize_entry("header", &In(store, header))?;
         }
-        records(&mut map, store, "submitters", &self.submitters)?;
-        records(&mut map, store, "submissions", &self.submissions)?;
-        records(&mut map, store, "individuals", &self.individuals)?;
-        records(&mut map, store, "families", &self.families)?;
-        records(&mut map, store, "notes", &self.notes)?;
-        records(&mut map, store, "sources", &self.sources)?;
-        records(&mut map, store, "repositories", &self.repositories)?;
-        records(&mut map, store, "multimedia", &self.multimedia)?;
-        records(&mut map, store, "extra", &self.extra)?;
+        records(&mut map, "submitters", self.submitters())?;
+        records(&mut map, "submissions", self.submissions())?;
+        records(&mut map, "individuals", self.individuals())?;
+        records(&mut map, "families", self.families())?;
+        records(&mut map, "notes", self.notes())?;
+        records(&mut map, "sources", self.sources())?;
+        records(&mut map, "repositories", self.repositories())?;
+        records(&mut map, "multimedia", self.multimedia())?;
+        records(&mut map, "extra", self.extra())?;
         map.end()
     }
 }
@@ -941,6 +955,7 @@ impl<'de> Deserialize<'de> for Dataset {
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Dataset, A::Error> {
                 let mut data = Dataset::default();
                 let mut store = Store::default();
+                let mut lists = Lists::default();
                 let s = &mut store;
                 while let Some(key) = map.next_key::<Str<'de>>()? {
                     match &*key.0 {
@@ -963,29 +978,31 @@ impl<'de> Deserialize<'de> for Dataset {
                         }
                         "header" => data.header = map.next_value_seed(Seed::new(&mut *s))?,
                         "submitters" => {
-                            data.submitters = map.next_value_seed(Seed::new(&mut *s))?;
+                            lists.submitters = map.next_value_seed(Seed::new(&mut *s))?;
                         }
                         "submissions" => {
-                            data.submissions = map.next_value_seed(Seed::new(&mut *s))?;
+                            lists.submissions = map.next_value_seed(Seed::new(&mut *s))?;
                         }
                         "individuals" => {
-                            data.individuals = map.next_value_seed(Seed::new(&mut *s))?;
+                            lists.individuals = map.next_value_seed(Seed::new(&mut *s))?;
                         }
-                        "families" => data.families = map.next_value_seed(Seed::new(&mut *s))?,
-                        "notes" => data.notes = map.next_value_seed(Seed::new(&mut *s))?,
-                        "sources" => data.sources = map.next_value_seed(Seed::new(&mut *s))?,
+                        "families" => lists.families = map.next_value_seed(Seed::new(&mut *s))?,
+                        "notes" => lists.notes = map.next_value_seed(Seed::new(&mut *s))?,
+                        "sources" => lists.sources = map.next_value_seed(Seed::new(&mut *s))?,
                         "repositories" => {
-                            data.repositories = map.next_value_seed(Seed::new(&mut *s))?;
+                            lists.repositories = map.next_value_seed(Seed::new(&mut *s))?;
                         }
                         "multimedia" => {
-                            data.multimedia = map.next_value_seed(Seed::new(&mut *s))?;
+                            lists.multimedia = map.next_value_seed(Seed::new(&mut *s))?;
                         }
-                        "extra" => data.extra = map.next_value_seed(Seed::new(&mut *s))?,
+                        "extra" => lists.extra = map.next_value_seed(Seed::new(&mut *s))?,
                         _ => skip(&mut map)?,
                     }
                 }
-                store.shrink();
                 data.store = store;
+                lists.store_in(&mut data);
+                data.store.shrink();
+                data.shrink();
                 data.reindex();
                 Ok(data)
             }
@@ -994,15 +1011,50 @@ impl<'de> Deserialize<'de> for Dataset {
     }
 }
 
+/// The records of a dataset being deserialized, owned, before they are
+/// stored in its tables.
+#[derive(Default)]
+struct Lists {
+    submitters: Vec<super::Submitter>,
+    submissions: Vec<super::Submission>,
+    individuals: Vec<super::Individual>,
+    families: Vec<super::Family>,
+    notes: Vec<super::SharedNote>,
+    sources: Vec<super::Source>,
+    repositories: Vec<super::Repository>,
+    multimedia: Vec<super::Multimedia>,
+    extra: Vec<Node>,
+}
+
+impl Lists {
+    /// Stores every record in `data`'s tables, in order.
+    fn store_in(self, data: &mut Dataset) {
+        fn store<T: super::edit::RecordRows>(data: &mut Dataset, list: Vec<T>) {
+            for r in list {
+                data.store_record(&r, None);
+            }
+        }
+        store(data, self.submitters);
+        store(data, self.submissions);
+        store(data, self.individuals);
+        store(data, self.families);
+        store(data, self.notes);
+        store(data, self.sources);
+        store(data, self.repositories);
+        store(data, self.multimedia);
+        store(data, self.extra);
+    }
+}
+
 impl Serialize for crate::StreamedRecord {
     /// The record as a map: `version`, `line` and `record`, externally
     /// tagged by its type (`{"Individual": {…}}`).
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        let (record, store) = (self.record_owned(), self.store());
+        let (record, store) = (self.record().into_owned(), self.store());
         let mut map = s.serialize_map(Some(3))?;
         map.serialize_entry("version", self.version().as_str())?;
         map.serialize_entry("line", &self.line())?;
-        map.serialize_entry("record", &In(store, record))?;
+        map.serialize_entry("record", &In(store, &record))?;
         map.end()
     }
 }

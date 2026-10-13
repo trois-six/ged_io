@@ -13,7 +13,7 @@ use super::{
     Pointers, Repair, RepairKind, RepairPolicy, WriteError, WriteReport, WriterConfig,
 };
 use crate::convert::{built_structure, Converter, Entry, Fate, Fresh, Out, Watch};
-use crate::model::driver::WriteCx;
+use crate::model::driver::{ToNodes, WriteCx};
 use crate::model::write::Built;
 use crate::model::Header;
 use crate::model::{RecordRef, Store};
@@ -108,10 +108,10 @@ const STUB: &str = "@U1@";
 /// let head = records.next().unwrap()?;
 /// let RecordRef::Header(header) = head.record() else { unreachable!() };
 /// let config = WriterConfig { version: Some(GedcomVersion::V7_0), ..WriterConfig::default() };
-/// let mut writer = GedcomStreamWriter::new(Vec::new(), config, header, &head)?;
+/// let mut writer = GedcomStreamWriter::new(Vec::new(), config, header.header(), &head)?;
 /// for record in records {
 ///     let record = record?;
-///     writer.write_record(record.record(), &record)?;
+///     writer.write_record(record.record())?;
 /// }
 /// let (bytes, report) = writer.finish()?;
 /// let text = String::from_utf8(bytes)?;
@@ -186,12 +186,8 @@ impl<W: io::Write> GedcomStreamWriter<W> {
         if gw.wants_bom(rules, encoding, false) {
             sink.bom();
         }
-        let cx = WriteCx {
-            store,
-            version: rules.version,
-            convert: true,
-        };
-        let mut head = RecordRef::Header(header).to_structure(&cx);
+        let cx = WriteCx::owned(store, rules.version, true);
+        let mut head = header.to_node("HEAD", &cx);
         let from = header
             .declared_version(store)
             .map_or_else(GedcomVersion::default, |v| {
@@ -247,25 +243,17 @@ impl<W: io::Write> GedcomStreamWriter<W> {
         Ok(this)
     }
 
-    /// Writes `record`, whose texts and identifiers resolve against
-    /// `store` (a [`StreamedRecord`](crate::StreamedRecord) is both),
-    /// repaired for the version when it needs it. A header is written as a
-    /// `_HEAD` extension record, a trailer with content as `_TRLR`; an
-    /// empty trailer is left out, the writer writing its own.
+    /// Writes `record` (of a [`StreamedRecord`](crate::StreamedRecord), or
+    /// of any dataset), repaired for the version when it needs it. A
+    /// header is written as a `_HEAD` extension record, a trailer with
+    /// content as `_TRLR`; an empty trailer is left out, the writer writing
+    /// its own.
     ///
     /// # Errors
     ///
     /// As [`GedcomStreamWriter::new`].
-    pub fn write_record<S: AsRef<Store> + ?Sized>(
-        &mut self,
-        record: RecordRef<'_>,
-        store: &S,
-    ) -> Result<(), WriteError> {
-        let cx = WriteCx {
-            store: store.as_ref(),
-            version: self.rules.version,
-            convert: true,
-        };
+    pub fn write_record(&mut self, record: RecordRef<'_>) -> Result<(), WriteError> {
+        let cx = WriteCx::of(record.dataset(), self.rules.version, true);
         let mark = self.conform.repairs.len();
         match record {
             RecordRef::Header(_) => {
@@ -279,8 +267,8 @@ impl<W: io::Write> GedcomStreamWriter<W> {
                 self.repairs_since(mark)?;
                 self.put_owned(&s, &|x| cx.store.find_xref(x).is_some())?;
             }
-            RecordRef::Other(n) if store.as_ref().tag(n.tag) == "TRLR" => {
-                if !record.is_empty() || n.xref.is_some() {
+            RecordRef::Other(n) if n.tag() == "TRLR" => {
+                if !record.is_empty() || n.xref().is_some() {
                     let mut s = record.to_structure(&cx);
                     s.tag = Tag::new("_TRLR");
                     s.xref = None;
@@ -295,7 +283,7 @@ impl<W: io::Write> GedcomStreamWriter<W> {
             }
             _ => {
                 let own = record.xref().map(|id| cx.store.xref(id));
-                let tag = record.tag(cx.store, self.rules.version);
+                let tag = record.tag(self.rules.version);
                 let uses = |x: &str| cx.store.find_xref(x).is_some();
                 let xref = self.record_xref(own, tag, &uses)?;
                 let mut converts = false;
@@ -307,7 +295,7 @@ impl<W: io::Write> GedcomStreamWriter<W> {
                     }
                     converts = c.watch.record(tag, own);
                 }
-                let built = Built::new(record, cx);
+                let built = Built::new(record, self.rules.version);
                 if !converts {
                     let xrefs = &mut self.xrefs;
                     let outcome = self.conform.record(

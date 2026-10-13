@@ -9,7 +9,7 @@ gedcom_struct! {
     /// A multimedia link (`OBJE`): a pointer to a multimedia record, with
     /// the part of the image shown (7.x `CROP`) and a title (7.x `TITL`);
     /// or, in 5.5.1, the files themselves (`FILE`) and their title.
-    pub struct MultimediaLink {
+    pub struct MultimediaLink => MultimediaLinkRow {
         @payload
         /// The multimedia record (none for a 5.5.1 link that holds its
         /// files).
@@ -32,7 +32,7 @@ gedcom_struct! {
     /// The part of an image a link shows (7.x `CROP`), in pixels from the
     /// top left corner. A value that is not a non-negative integer stays in
     /// `extra`, as written.
-    pub struct Crop {
+    pub struct Crop => CropRow {
         /// Pixels from the top (`TOP`).
         "TOP" => top: Option<u32>,
         /// Pixels from the left (`LEFT`).
@@ -52,7 +52,7 @@ gedcom_struct! {
 gedcom_struct! {
     /// A multimedia file (`FILE`): its path or URL, its format (`FORM`), a
     /// title (`TITL`) and alternative versions (7.x `TRAN`).
-    pub struct File {
+    pub struct File => FileRow {
         @payload
         /// The file's path or URL.
         path: Text;
@@ -74,7 +74,7 @@ gedcom_struct! {
     /// The format of a file (`FORM`): a media type in 7.x (`image/jpeg`),
     /// a format of [`MultimediaFormat`] in 5.5.1 (`jpg`), kept as written;
     /// and the medium of the original (`MEDI`).
-    pub struct FileForm {
+    pub struct FileForm => FileFormRow {
         @payload
         /// The format as written.
         format: Text;
@@ -105,7 +105,7 @@ impl FileForm {
 gedcom_struct! {
     /// An alternative version of a file (7.x `FILE.TRAN`), such as a
     /// thumbnail or a transcript, and its format.
-    pub struct FileTranslation {
+    pub struct FileTranslation => FileTranslationRow {
         @payload
         /// The path or URL of the version.
         path: Text;
@@ -116,5 +116,13 @@ gedcom_struct! {
         v551: [],
         v70: ["FILE-TRAN"],
         v71: ["FILE-TRAN"],
+    }
+}
+
+impl super::View<'_, FileForm> {
+    /// The format as a 5.5.1 multimedia format.
+    #[must_use]
+    pub fn multimedia_format(self) -> MultimediaFormat {
+        MultimediaFormat::parse(&self.format().to_str())
     }
 }

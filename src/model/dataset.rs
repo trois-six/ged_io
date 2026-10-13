@@ -1,15 +1,18 @@
-//! A dataset: the header and the records of a file, typed, and the store
-//! their texts point into.
+//! A dataset: the header and the records of a file, typed, in the tables
+//! of [`super::table`], and the store their texts point into.
+
+use std::fmt;
 
 use crate::tree::{Flat, Node as _, PayloadRef, Structure, Tag};
 use crate::version::GedcomVersion;
 
 use super::driver::{StdTag, ToNodes, WriteCx};
 use super::header::Header;
-use super::node::{Extra, Node, Value};
+use super::node::{Node, Value};
 use super::record::{
     Family, Individual, Multimedia, Repository, SharedNote, Source, Submission, Submitter,
 };
+use super::table::{HasTable, Item, Items, TableBox, View};
 use super::text::{Store, XrefId};
 
 /// A GEDCOM dataset: its header and records, typed, and the store their
@@ -20,6 +23,12 @@ use super::text::{Store, XrefId};
 /// the model has (extension and unknown records, a second header, a
 /// trailer with content) are kept in [`Dataset::extra`], in order. The
 /// trailer itself carries nothing and is written by the writer.
+///
+/// Every structure of a record is a row of the table of its type (see
+/// [`crate::model`], Tables and views): the dataset allocates nothing per
+/// record, and reads it where it is, through views ([`View`], [`Items`]). The owned types of
+/// the model are what a program builds and edits: [`Dataset::add`] stores
+/// one, [`View::into_owned`] and [`Dataset::get_mut`] give one back.
 ///
 /// A dataset keeps its references whole as it is edited: the records are
 /// read through it and changed through it ([`Dataset::add`],
@@ -33,33 +42,18 @@ use super::text::{Store, XrefId};
 ///
 /// let data = Dataset::parse("0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n0 @F1@ FAM\n1 CHIL @I1@\n0 _LOC Place\n0 TRLR\n");
 /// assert_eq!(data.individuals().len(), 1);
-/// assert_eq!(data.families()[0].children.len(), 1);
+/// assert_eq!(data.families().first().unwrap().children().len(), 1);
 /// assert_eq!(data.extra().len(), 1); // the extension record
 /// assert!(matches!(data.find("@F1@"), Some(RecordRef::Family(_))));
 /// assert_eq!(data.records().count(), 4); // the header, two records, the extension
 /// ```
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Default)]
 pub struct Dataset {
     /// The header (`HEAD`), when the file has one.
-    pub(crate) header: Option<Header>,
-    /// The individuals (`INDI`).
-    pub(crate) individuals: Vec<Individual>,
-    /// The families (`FAM`).
-    pub(crate) families: Vec<Family>,
-    /// The sources (`SOUR`).
-    pub(crate) sources: Vec<Source>,
-    /// The repositories (`REPO`).
-    pub(crate) repositories: Vec<Repository>,
-    /// The multimedia objects (`OBJE`).
-    pub(crate) multimedia: Vec<Multimedia>,
-    /// The submitters (`SUBM`).
-    pub(crate) submitters: Vec<Submitter>,
-    /// The submissions (5.5.1 `SUBN`).
-    pub(crate) submissions: Vec<Submission>,
-    /// The shared notes (5.5.1 `NOTE`, 7.x `SNOTE`).
-    pub(crate) notes: Vec<SharedNote>,
-    /// The records of no type the model has, in order.
-    pub(crate) extra: Extra,
+    pub(crate) header: Option<Box<Header>>,
+    /// Every structure but the header, in its table: the records in the
+    /// tables of their types, in order.
+    pub(crate) tables: TableBox,
     pub(crate) store: Store,
     pub(crate) version: GedcomVersion,
     pub(crate) declared_version: Option<Box<str>>,
@@ -73,10 +67,40 @@ impl AsRef<Store> for Dataset {
     }
 }
 
-/// A record of any type, owned: what a
-/// [`GedcomStreamParser`](crate::GedcomStreamParser) yields, and what
-/// [`Dataset::push`] takes. Its variants are boxed, so that it is two
-/// words.
+/// Two datasets are equal when they declare the same version and hold the
+/// same structures (whatever their stores: texts compare by their
+/// characters, identifiers by their text).
+impl PartialEq for Dataset {
+    fn eq(&self, other: &Self) -> bool {
+        self.version == other.version
+            && self.declared_version == other.declared_version
+            && self.record_count() == other.record_count()
+            && self.to_structures() == other.to_structures()
+    }
+}
+
+impl fmt::Debug for Dataset {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Dataset")
+            .field("version", &self.version)
+            .field("header", &self.header.is_some())
+            .field("individuals", &self.tables.individual.len())
+            .field("families", &self.tables.family.len())
+            .field("sources", &self.tables.source.len())
+            .field("repositories", &self.tables.repository.len())
+            .field("multimedia", &self.tables.multimedia.len())
+            .field("submitters", &self.tables.submitter.len())
+            .field("submissions", &self.submissions().len())
+            .field("notes", &self.tables.shared_note.len())
+            .field("extra", &self.tables.others.len())
+            .field("store", &self.store)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A record of any type, owned: what [`Dataset::push`] takes and what a
+/// record of a dataset copies out as ([`RecordRef::into_owned`]). Its
+/// variants are boxed, so that it is two words.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq)]
 pub enum Record {
@@ -103,74 +127,159 @@ pub enum Record {
 }
 
 impl Record {
-    /// The record, borrowed.
-    #[must_use]
-    pub fn record_ref(&self) -> RecordRef<'_> {
+    /// The record as an owned structure, written by its type's
+    /// [`ToNodes`].
+    pub(crate) fn to_node(&self, cx: &WriteCx<'_>) -> Structure {
         match self {
-            Record::Header(r) => RecordRef::Header(r),
-            Record::Individual(r) => RecordRef::Individual(r),
-            Record::Family(r) => RecordRef::Family(r),
-            Record::Source(r) => RecordRef::Source(r),
-            Record::Repository(r) => RecordRef::Repository(r),
-            Record::Multimedia(r) => RecordRef::Multimedia(r),
-            Record::Submitter(r) => RecordRef::Submitter(r),
-            Record::Submission(r) => RecordRef::Submission(r),
-            Record::Note(r) => RecordRef::Note(r),
-            Record::Other(n) => RecordRef::Other(n),
+            Record::Header(r) => r.to_node("HEAD", cx),
+            Record::Individual(r) => r.to_node("INDI", cx),
+            Record::Family(r) => r.to_node("FAM", cx),
+            Record::Source(r) => r.to_node("SOUR", cx),
+            Record::Repository(r) => r.to_node("REPO", cx),
+            Record::Multimedia(r) => r.to_node("OBJE", cx),
+            Record::Submitter(r) => r.to_node("SUBM", cx),
+            Record::Submission(r) => r.to_node("SUBN", cx),
+            Record::Note(r) => r.to_node("SNOTE", cx),
+            Record::Other(n) => n.to_structure(cx.store),
         }
     }
 }
 
-/// A record of a [`Dataset`], whatever its type.
+/// The header of a dataset, with the dataset: it dereferences to the
+/// [`Header`].
+#[derive(Clone, Copy)]
+pub struct HeaderRef<'a> {
+    data: &'a Dataset,
+    header: &'a Header,
+}
+
+impl<'a> HeaderRef<'a> {
+    /// The header.
+    #[must_use]
+    pub fn header(self) -> &'a Header {
+        self.header
+    }
+
+    /// The dataset the header is of.
+    #[must_use]
+    pub fn dataset(self) -> &'a Dataset {
+        self.data
+    }
+
+    /// The store its texts and identifiers resolve against.
+    #[must_use]
+    pub fn store(self) -> &'a Store {
+        &self.data.store
+    }
+}
+
+impl std::ops::Deref for HeaderRef<'_> {
+    type Target = Header;
+
+    fn deref(&self) -> &Header {
+        self.header
+    }
+}
+
+impl AsRef<Store> for HeaderRef<'_> {
+    fn as_ref(&self) -> &Store {
+        &self.data.store
+    }
+}
+
+impl fmt::Debug for HeaderRef<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.header.fmt(f)
+    }
+}
+
+impl PartialEq for HeaderRef<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self.header, other.header)
+    }
+}
+
+/// A record of a [`Dataset`], whatever its type, read where it is.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RecordRef<'a> {
     /// The header.
-    Header(&'a Header),
+    Header(HeaderRef<'a>),
     /// An individual.
-    Individual(&'a Individual),
+    Individual(View<'a, Individual>),
     /// A family.
-    Family(&'a Family),
+    Family(View<'a, Family>),
     /// A source.
-    Source(&'a Source),
+    Source(View<'a, Source>),
     /// A repository.
-    Repository(&'a Repository),
+    Repository(View<'a, Repository>),
     /// A multimedia object.
-    Multimedia(&'a Multimedia),
+    Multimedia(View<'a, Multimedia>),
     /// A submitter.
-    Submitter(&'a Submitter),
+    Submitter(View<'a, Submitter>),
     /// A submission.
-    Submission(&'a Submission),
+    Submission(View<'a, Submission>),
     /// A shared note.
-    Note(&'a SharedNote),
+    Note(View<'a, SharedNote>),
     /// A record of no type the model has.
-    Other(&'a Node),
+    Other(View<'a, Node>),
+}
+
+/// Runs `$body` with `$r` the view of a typed record, `$h` the header and
+/// `$n` an untyped record.
+macro_rules! each_kind {
+    ($record:expr, |$r:ident| $typed:expr, |$h:ident| $header:expr, |$n:ident| $other:expr) => {
+        match $record {
+            RecordRef::Header($h) => $header,
+            RecordRef::Individual($r) => $typed,
+            RecordRef::Family($r) => $typed,
+            RecordRef::Source($r) => $typed,
+            RecordRef::Repository($r) => $typed,
+            RecordRef::Multimedia($r) => $typed,
+            RecordRef::Submitter($r) => $typed,
+            RecordRef::Submission($r) => $typed,
+            RecordRef::Note($r) => $typed,
+            RecordRef::Other($n) => $other,
+        }
+    };
 }
 
 impl<'a> RecordRef<'a> {
+    /// The dataset the record is of.
+    #[must_use]
+    pub fn dataset(self) -> &'a Dataset {
+        each_kind!(self, |r| r.dataset(), |h| h.dataset(), |n| n.dataset())
+    }
+
+    /// The store the record's texts and identifiers resolve against.
+    #[must_use]
+    pub fn store(self) -> &'a Store {
+        &self.dataset().store
+    }
+
     /// The record's identifier.
     #[must_use]
-    pub fn xref(&self) -> Option<XrefId> {
+    pub fn xref(self) -> Option<XrefId> {
         match self {
             RecordRef::Header(_) => None,
-            RecordRef::Individual(r) => r.xref,
-            RecordRef::Family(r) => r.xref,
-            RecordRef::Source(r) => r.xref,
-            RecordRef::Repository(r) => r.xref,
-            RecordRef::Multimedia(r) => r.xref,
-            RecordRef::Submitter(r) => r.xref,
-            RecordRef::Submission(r) => r.xref,
-            RecordRef::Note(r) => r.xref,
-            RecordRef::Other(n) => n.xref,
+            RecordRef::Individual(r) => r.xref(),
+            RecordRef::Family(r) => r.xref(),
+            RecordRef::Source(r) => r.xref(),
+            RecordRef::Repository(r) => r.xref(),
+            RecordRef::Multimedia(r) => r.xref(),
+            RecordRef::Submitter(r) => r.xref(),
+            RecordRef::Submission(r) => r.xref(),
+            RecordRef::Note(r) => r.xref(),
+            RecordRef::Other(n) => n.xref(),
         }
     }
 
     /// The record's tag: the version's tag of its type (5.5.1 `NOTE`, 7.x
     /// `SNOTE` for a shared note), or an untyped record's own.
     #[must_use]
-    pub fn tag<S: AsRef<Store> + ?Sized>(&self, store: &'a S, version: GedcomVersion) -> &'a str {
+    pub fn tag(self, version: GedcomVersion) -> &'a str {
         match self {
-            RecordRef::Other(n) => store.as_ref().tag(n.tag),
+            RecordRef::Other(n) => n.tag(),
             RecordRef::Note(_) if version.is_v7() => "SNOTE",
             RecordRef::Note(_) => "NOTE",
             r => r.std_tag(),
@@ -179,10 +288,10 @@ impl<'a> RecordRef<'a> {
 
     /// The index among the standard tags of the record's tag
     /// ([`RecordRef::tag`]).
-    pub(crate) fn standard_tag(&self, version: GedcomVersion) -> Option<u16> {
+    pub(crate) fn standard_tag(self, version: GedcomVersion) -> Option<u16> {
         use crate::tree::standard_index_const as index;
         match self {
-            RecordRef::Other(n) => u16::try_from(n.tag.get())
+            RecordRef::Other(n) => u16::try_from(n.tag_id().get())
                 .ok()
                 .filter(|&t| usize::from(t) < crate::tree::STANDARD_TAGS.len()),
             RecordRef::Note(_) if version.is_v7() => const { index("SNOTE") },
@@ -199,7 +308,7 @@ impl<'a> RecordRef<'a> {
     }
 
     /// The tag of a typed record (`SNOTE` for a shared note).
-    fn std_tag(&self) -> &'static str {
+    fn std_tag(self) -> &'static str {
         match self {
             RecordRef::Header(_) => "HEAD",
             RecordRef::Individual(_) => "INDI",
@@ -215,65 +324,97 @@ impl<'a> RecordRef<'a> {
 
     /// Whether the record has neither payload nor substructure. Asked of
     /// trailers only, which are never typed: a typed record answers no.
-    pub(crate) fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(self) -> bool {
         match self {
             RecordRef::Other(n) => {
-                let payload = match &n.payload {
+                let payload = match n.payload() {
                     Value::None => true,
                     Value::Pointer(_) => false,
                     Value::Text(t) => t.is_empty(),
                 };
-                payload && n.children.is_empty()
+                payload && n.children().is_empty()
             }
             _ => false,
         }
     }
 
-    /// The record, into a flat arena, its texts borrowed.
+    /// The record, into a flat arena, its texts borrowed, for `cx.version`.
     pub(crate) fn to_flat(self, cx: &WriteCx<'a>, out: &mut Flat<'a>) {
+        macro_rules! row {
+            ($t:ty, $r:expr, $tag:literal) => {
+                <$t as Item>::write_elem($r.row, $r.at, const { StdTag::new($tag) }, cx, out)
+            };
+        }
         match self {
-            RecordRef::Header(r) => r.to_flat(const { StdTag::new("HEAD") }, cx, out),
-            RecordRef::Individual(r) => r.to_flat(const { StdTag::new("INDI") }, cx, out),
-            RecordRef::Family(r) => r.to_flat(const { StdTag::new("FAM") }, cx, out),
-            RecordRef::Source(r) => r.to_flat(const { StdTag::new("SOUR") }, cx, out),
-            RecordRef::Repository(r) => r.to_flat(const { StdTag::new("REPO") }, cx, out),
-            RecordRef::Multimedia(r) => r.to_flat(const { StdTag::new("OBJE") }, cx, out),
-            RecordRef::Submitter(r) => r.to_flat(const { StdTag::new("SUBM") }, cx, out),
-            RecordRef::Submission(r) => r.to_flat(const { StdTag::new("SUBN") }, cx, out),
-            RecordRef::Note(r) => r.to_flat(const { StdTag::new("SNOTE") }, cx, out),
-            RecordRef::Other(n) => n.to_flat(cx.store, out),
+            RecordRef::Header(h) => h.header.to_flat(const { StdTag::new("HEAD") }, cx, out),
+            RecordRef::Individual(r) => row!(Individual, r, "INDI"),
+            RecordRef::Family(r) => row!(Family, r, "FAM"),
+            RecordRef::Source(r) => row!(Source, r, "SOUR"),
+            RecordRef::Repository(r) => row!(Repository, r, "REPO"),
+            RecordRef::Multimedia(r) => row!(Multimedia, r, "OBJE"),
+            RecordRef::Submitter(r) => row!(Submitter, r, "SUBM"),
+            RecordRef::Submission(r) => row!(Submission, r, "SUBN"),
+            RecordRef::Note(r) => row!(SharedNote, r, "SNOTE"),
+            RecordRef::Other(n) => super::node::node_row_flat(n.row, cx, out),
         }
     }
 
-    /// The record as an owned structure.
+    /// The record as an owned structure, its values written for
+    /// `cx.version` as `cx` says: copied out as its owned type, which
+    /// writes itself so.
     pub(crate) fn to_structure(self, cx: &WriteCx<'_>) -> Structure {
+        let cx = WriteCx::owned(self.store(), cx.version, cx.convert);
         match self {
-            RecordRef::Header(r) => r.to_node("HEAD", cx),
-            RecordRef::Individual(r) => r.to_node("INDI", cx),
-            RecordRef::Family(r) => r.to_node("FAM", cx),
-            RecordRef::Source(r) => r.to_node("SOUR", cx),
-            RecordRef::Repository(r) => r.to_node("REPO", cx),
-            RecordRef::Multimedia(r) => r.to_node("OBJE", cx),
-            RecordRef::Submitter(r) => r.to_node("SUBM", cx),
-            RecordRef::Submission(r) => r.to_node("SUBN", cx),
-            RecordRef::Note(r) => r.to_node("SNOTE", cx),
-            RecordRef::Other(n) => n.to_structure(cx.store),
+            // The header is owned already.
+            RecordRef::Header(h) => h.header.to_node("HEAD", &cx),
+            r => r.into_owned().to_node(&cx),
         }
     }
 
     /// The record as an owned structure, as the dataset holds it: values
     /// as written, enumeration values in `version`'s spelling.
     #[must_use]
-    pub fn to_structure_in<S: AsRef<Store> + ?Sized>(
-        self,
-        store: &S,
-        version: GedcomVersion,
-    ) -> Structure {
-        self.to_structure(&WriteCx {
-            store: store.as_ref(),
-            version,
-            convert: false,
-        })
+    pub fn to_structure_in(self, version: GedcomVersion) -> Structure {
+        let data = self.dataset();
+        self.to_structure(&WriteCx::of(data, version, false))
+    }
+
+    /// The record, copied out as its owned type.
+    #[must_use]
+    pub fn into_owned(self) -> Record {
+        match self {
+            RecordRef::Header(h) => Record::Header(Box::new(h.header.clone())),
+            RecordRef::Individual(r) => Record::Individual(Box::new(r.into_owned())),
+            RecordRef::Family(r) => Record::Family(Box::new(r.into_owned())),
+            RecordRef::Source(r) => Record::Source(Box::new(r.into_owned())),
+            RecordRef::Repository(r) => Record::Repository(Box::new(r.into_owned())),
+            RecordRef::Multimedia(r) => Record::Multimedia(Box::new(r.into_owned())),
+            RecordRef::Submitter(r) => Record::Submitter(Box::new(r.into_owned())),
+            RecordRef::Submission(r) => Record::Submission(Box::new(r.into_owned())),
+            RecordRef::Note(r) => Record::Note(Box::new(r.into_owned())),
+            RecordRef::Other(n) => Record::Other(Box::new(n.into_owned())),
+        }
+    }
+
+    /// Calls `f` with every pointer of the record.
+    pub(crate) fn each_pointer(self, f: &mut dyn FnMut(XrefId)) {
+        macro_rules! row {
+            ($t:ty, $r:expr) => {
+                <$t as Item>::each_elem($r.row, $r.at, $r.tables(), f)
+            };
+        }
+        match self {
+            RecordRef::Header(h) => super::pointers::Pointers::each(h.header, f),
+            RecordRef::Individual(r) => row!(Individual, r),
+            RecordRef::Family(r) => row!(Family, r),
+            RecordRef::Source(r) => row!(Source, r),
+            RecordRef::Repository(r) => row!(Repository, r),
+            RecordRef::Multimedia(r) => row!(Multimedia, r),
+            RecordRef::Submitter(r) => row!(Submitter, r),
+            RecordRef::Submission(r) => row!(Submission, r),
+            RecordRef::Note(r) => row!(SharedNote, r),
+            RecordRef::Other(n) => super::node::each_node(n.row, n.tables(), f),
+        }
     }
 }
 
@@ -414,50 +555,138 @@ impl Dataset {
         &mut self.store
     }
 
-    /// Releases the spare capacity of the lists of records.
+    /// Bytes the dataset holds: its store, its tables and its index.
+    #[must_use]
+    pub fn heap_size(&self) -> usize {
+        self.store.heap_size() + self.tables.heap_size() + self.index.heap_size()
+    }
+
+    /// The tables' rows by table: name, rows, bytes a row (for the
+    /// memory budget's record).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn table_rows(&self) -> Vec<(&'static str, usize, usize)> {
+        self.tables.row_counts()
+    }
+
+    /// Releases the spare capacity of the tables.
     pub(crate) fn shrink(&mut self) {
-        self.individuals.shrink_to_fit();
-        self.families.shrink_to_fit();
-        self.sources.shrink_to_fit();
-        self.repositories.shrink_to_fit();
-        self.multimedia.shrink_to_fit();
-        self.submitters.shrink_to_fit();
-        self.submissions.shrink_to_fit();
-        self.notes.shrink_to_fit();
-        self.extra.shrink();
+        self.tables.shrink();
+    }
+
+    // ---- Reading the records ------------------------------------------
+
+    /// The header (`HEAD`), when the file has one.
+    #[must_use]
+    pub fn header(&self) -> Option<&Header> {
+        self.header.as_deref()
+    }
+
+    /// The header, with the dataset ([`HeaderRef`]).
+    #[must_use]
+    pub fn header_ref(&self) -> Option<HeaderRef<'_>> {
+        self.header
+            .as_deref()
+            .map(|header| HeaderRef { data: self, header })
+    }
+
+    /// The records of a typed record table, as views.
+    fn rows<
+        T: HasTable
+            + Item
+            + super::table::sealed::Listed<Elem = <T as super::table::sealed::Stored>::Row>,
+    >(
+        &self,
+    ) -> Items<'_, T> {
+        Items::new(self, &T::table(&self.tables).rows, 0)
+    }
+
+    /// The individuals (`INDI`), in order.
+    #[must_use]
+    pub fn individuals(&self) -> Items<'_, Individual> {
+        self.rows()
+    }
+
+    /// The families (`FAM`), in order.
+    #[must_use]
+    pub fn families(&self) -> Items<'_, Family> {
+        self.rows()
+    }
+
+    /// The sources (`SOUR`), in order.
+    #[must_use]
+    pub fn sources(&self) -> Items<'_, Source> {
+        self.rows()
+    }
+
+    /// The repositories (`REPO`), in order.
+    #[must_use]
+    pub fn repositories(&self) -> Items<'_, Repository> {
+        self.rows()
+    }
+
+    /// The multimedia objects (`OBJE`), in order.
+    #[must_use]
+    pub fn multimedia(&self) -> Items<'_, Multimedia> {
+        self.rows()
+    }
+
+    /// The submitters (`SUBM`), in order.
+    #[must_use]
+    pub fn submitters(&self) -> Items<'_, Submitter> {
+        self.rows()
+    }
+
+    /// The submissions (5.5.1 `SUBN`), in order.
+    #[must_use]
+    pub fn submissions(&self) -> Items<'_, Submission> {
+        self.rows()
+    }
+
+    /// The shared notes (5.5.1 `NOTE`, 7.x `SNOTE`), in order.
+    #[must_use]
+    pub fn notes(&self) -> Items<'_, SharedNote> {
+        self.rows()
+    }
+
+    /// The records of no type the model has, in order.
+    #[must_use]
+    pub fn extra(&self) -> Items<'_, Node> {
+        Items::new(self, &self.tables.others.rows, 0)
     }
 
     /// Every record, the header first, then by type (submitters,
     /// submissions, individuals, families, notes, sources, repositories,
     /// multimedia objects), then the others, in order.
     pub fn records(&self) -> impl Iterator<Item = RecordRef<'_>> {
-        self.header
-            .iter()
+        self.header_ref()
+            .into_iter()
             .map(RecordRef::Header)
-            .chain(self.submitters.iter().map(RecordRef::Submitter))
-            .chain(self.submissions.iter().map(RecordRef::Submission))
-            .chain(self.individuals.iter().map(RecordRef::Individual))
-            .chain(self.families.iter().map(RecordRef::Family))
-            .chain(self.notes.iter().map(RecordRef::Note))
-            .chain(self.sources.iter().map(RecordRef::Source))
-            .chain(self.repositories.iter().map(RecordRef::Repository))
-            .chain(self.multimedia.iter().map(RecordRef::Multimedia))
-            .chain(self.extra.iter().map(RecordRef::Other))
+            .chain(self.submitters().into_iter().map(RecordRef::Submitter))
+            .chain(self.submissions().into_iter().map(RecordRef::Submission))
+            .chain(self.individuals().into_iter().map(RecordRef::Individual))
+            .chain(self.families().into_iter().map(RecordRef::Family))
+            .chain(self.notes().into_iter().map(RecordRef::Note))
+            .chain(self.sources().into_iter().map(RecordRef::Source))
+            .chain(self.repositories().into_iter().map(RecordRef::Repository))
+            .chain(self.multimedia().into_iter().map(RecordRef::Multimedia))
+            .chain(self.extra().into_iter().map(RecordRef::Other))
     }
 
     /// The number of records, the header included.
     #[must_use]
     pub fn record_count(&self) -> usize {
+        let t = &self.tables;
         usize::from(self.header.is_some())
-            + self.individuals.len()
-            + self.families.len()
-            + self.sources.len()
-            + self.repositories.len()
-            + self.multimedia.len()
-            + self.submitters.len()
-            + self.submissions.len()
-            + self.notes.len()
-            + self.extra.len()
+            + t.individual.len()
+            + t.family.len()
+            + t.source.len()
+            + t.repository.len()
+            + t.multimedia.len()
+            + t.submitter.len()
+            + Submission::table(t).len()
+            + t.shared_note.len()
+            + t.others.len()
     }
 
     /// The record with this identifier: the first one, when several have
@@ -467,93 +696,115 @@ impl Dataset {
         self.find_record(xref.id_in(&self.store)?)
     }
 
+    /// The record of `T` with identifier `xref` (the first).
+    fn find_of<T>(&self, xref: impl XrefKey) -> Option<View<'_, T>>
+    where
+        T: super::RecordType
+            + HasTable
+            + Item
+            + super::table::sealed::Listed<Elem = <T as super::table::sealed::Stored>::Row>,
+    {
+        let pos = self.first_of(T::KIND, xref.id_in(&self.store)?)?;
+        let row = T::table(&self.tables).rows.get(pos)?;
+        Some(View::new(self, row, u32::try_from(pos).ok()?))
+    }
+
     /// The individual with this identifier (the first, when several have
     /// it). Constant time, as every `find_*`.
     #[must_use]
-    pub fn find_individual(&self, xref: impl XrefKey) -> Option<&Individual> {
-        let pos = self.first_of(super::RecordKind::Individual, xref.id_in(&self.store)?)?;
-        self.individuals.get(pos)
+    pub fn find_individual(&self, xref: impl XrefKey) -> Option<View<'_, Individual>> {
+        self.find_of(xref)
     }
 
     /// The family with this identifier.
     #[must_use]
-    pub fn find_family(&self, xref: impl XrefKey) -> Option<&Family> {
-        let pos = self.first_of(super::RecordKind::Family, xref.id_in(&self.store)?)?;
-        self.families.get(pos)
+    pub fn find_family(&self, xref: impl XrefKey) -> Option<View<'_, Family>> {
+        self.find_of(xref)
     }
 
     /// The source with this identifier.
     #[must_use]
-    pub fn find_source(&self, xref: impl XrefKey) -> Option<&Source> {
-        let pos = self.first_of(super::RecordKind::Source, xref.id_in(&self.store)?)?;
-        self.sources.get(pos)
+    pub fn find_source(&self, xref: impl XrefKey) -> Option<View<'_, Source>> {
+        self.find_of(xref)
     }
 
     /// The repository with this identifier.
     #[must_use]
-    pub fn find_repository(&self, xref: impl XrefKey) -> Option<&Repository> {
-        let pos = self.first_of(super::RecordKind::Repository, xref.id_in(&self.store)?)?;
-        self.repositories.get(pos)
+    pub fn find_repository(&self, xref: impl XrefKey) -> Option<View<'_, Repository>> {
+        self.find_of(xref)
     }
 
     /// The multimedia object with this identifier.
     #[must_use]
-    pub fn find_multimedia(&self, xref: impl XrefKey) -> Option<&Multimedia> {
-        let pos = self.first_of(super::RecordKind::Multimedia, xref.id_in(&self.store)?)?;
-        self.multimedia.get(pos)
+    pub fn find_multimedia(&self, xref: impl XrefKey) -> Option<View<'_, Multimedia>> {
+        self.find_of(xref)
     }
 
     /// The submitter with this identifier.
     #[must_use]
-    pub fn find_submitter(&self, xref: impl XrefKey) -> Option<&Submitter> {
-        let pos = self.first_of(super::RecordKind::Submitter, xref.id_in(&self.store)?)?;
-        self.submitters.get(pos)
+    pub fn find_submitter(&self, xref: impl XrefKey) -> Option<View<'_, Submitter>> {
+        self.find_of(xref)
     }
 
     /// The shared note with this identifier.
     #[must_use]
-    pub fn find_note(&self, xref: impl XrefKey) -> Option<&SharedNote> {
-        let pos = self.first_of(super::RecordKind::Note, xref.id_in(&self.store)?)?;
-        self.notes.get(pos)
+    pub fn find_note(&self, xref: impl XrefKey) -> Option<View<'_, SharedNote>> {
+        self.find_of(xref)
     }
 
     /// The families in which this individual is a partner (`HUSB` or
     /// `WIFE`).
-    pub fn families_as_spouse(&self, individual: impl XrefKey) -> impl Iterator<Item = &Family> {
+    pub fn families_as_spouse(
+        &self,
+        individual: impl XrefKey,
+    ) -> impl Iterator<Item = View<'_, Family>> {
         let id = individual.id_in(&self.store);
-        self.families
-            .iter()
+        self.families()
+            .into_iter()
             .filter(move |f| id.is_some() && (f.husband_id() == id || f.wife_id() == id))
     }
 
     /// The families in which this individual is a child (`CHIL`).
-    pub fn families_as_child(&self, individual: impl XrefKey) -> impl Iterator<Item = &Family> {
+    pub fn families_as_child(
+        &self,
+        individual: impl XrefKey,
+    ) -> impl Iterator<Item = View<'_, Family>> {
         let id = individual.id_in(&self.store);
-        self.families
-            .iter()
-            .filter(move |f| id.is_some() && f.children.iter().any(|c| c.individual == id))
+        self.families()
+            .into_iter()
+            .filter(move |f| id.is_some() && f.children().into_iter().any(|c| c.individual() == id))
     }
 
     /// The partners of a family (`HUSB`, then `WIFE`) that have a record.
-    pub fn parents<'s>(&'s self, family: &'s Family) -> impl Iterator<Item = &'s Individual> {
+    pub fn parents<'s>(
+        &'s self,
+        family: View<'s, Family>,
+    ) -> impl Iterator<Item = View<'s, Individual>> + 's {
         [family.husband_id(), family.wife_id()]
             .into_iter()
             .flatten()
-            .filter_map(|id| self.find_individual(id))
+            .filter_map(move |id| self.find_individual(id))
     }
 
     /// The children of a family (`CHIL`) that have a record, in order.
-    pub fn children<'s>(&'s self, family: &'s Family) -> impl Iterator<Item = &'s Individual> {
+    pub fn children<'s>(
+        &'s self,
+        family: View<'s, Family>,
+    ) -> impl Iterator<Item = View<'s, Individual>> + 's {
         family
-            .children
-            .iter()
-            .filter_map(|c| c.individual)
-            .filter_map(|id| self.find_individual(id))
+            .children()
+            .into_iter()
+            .filter_map(View::<crate::model::IndividualRef>::individual)
+            .filter_map(move |id| self.find_individual(id))
     }
 
     /// The other partner of `individual` in `family`, when it has a record.
     #[must_use]
-    pub fn spouse(&self, individual: impl XrefKey, family: &Family) -> Option<&Individual> {
+    pub fn spouse(
+        &self,
+        individual: impl XrefKey,
+        family: View<'_, Family>,
+    ) -> Option<View<'_, Individual>> {
         let id = individual.id_in(&self.store)?;
         let other = if family.husband_id() == Some(id) {
             family.wife_id()
@@ -571,12 +822,12 @@ impl Dataset {
     pub fn search_individuals<'s>(
         &'s self,
         query: &'s str,
-    ) -> impl Iterator<Item = &'s Individual> + 's {
+    ) -> impl Iterator<Item = View<'s, Individual>> + 's {
         let query = query.to_lowercase();
-        self.individuals.iter().filter(move |i| {
-            i.names
-                .iter()
-                .any(|n| n.full(&self.store).to_lowercase().contains(&query))
+        self.individuals().into_iter().filter(move |i| {
+            i.names()
+                .into_iter()
+                .any(|n| n.full().to_lowercase().contains(&query))
         })
     }
 
@@ -600,17 +851,13 @@ impl Dataset {
     #[must_use]
     pub fn dangling_references(&self) -> Vec<DanglingReference> {
         let mut defined = vec![false; self.store.xref_count()];
-        for id in self.records().filter_map(|r| r.xref()) {
+        for id in self.records().filter_map(RecordRef::xref) {
             if let Some(d) = defined.get_mut(id.index()) {
                 *d = true;
             }
         }
         let family = crate::spec::payload::Family::of(self.version.rules());
-        let cx = WriteCx {
-            store: &self.store,
-            version: self.version,
-            convert: false,
-        };
+        let cx = WriteCx::of(self, self.version, false);
         let mut out = Vec::new();
         let mut flat = Flat::default();
         for record in self.records() {
@@ -658,11 +905,7 @@ impl Dataset {
     }
 
     fn structures(&self, version: GedcomVersion, convert: bool) -> Vec<Structure> {
-        let cx = WriteCx {
-            store: &self.store,
-            version,
-            convert,
-        };
+        let cx = WriteCx::of(self, version, convert);
         // The trailer, which the dataset does not keep, ends them.
         let mut out = Vec::with_capacity(self.record_count() + 1);
         out.extend(self.records().map(|r| r.to_structure(&cx)));

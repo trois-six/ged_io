@@ -196,7 +196,7 @@ pub fn record_count(m: &Model) -> usize {
     m.records()
         .filter(|r| match r {
             RecordRef::Header(_) => false,
-            RecordRef::Other(n) => !["HEAD", "TRLR"].contains(&m.store().tag(n.tag)),
+            RecordRef::Other(n) => !["HEAD", "TRLR"].contains(&n.tag()),
             _ => true,
         })
         .count()
@@ -211,7 +211,7 @@ pub fn read_streaming(bytes: &[u8]) -> Result<Vec<String>, String> {
         parser
             .map(|r| {
                 r.map(|rec| {
-                    let s = rec.record().to_structure_in(&rec, rec.version());
+                    let s = rec.record().to_structure_in(rec.version());
                     format!("{s:?}")
                 })
                 .map_err(|e| e.to_string())

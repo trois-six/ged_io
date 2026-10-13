@@ -37,7 +37,7 @@ reporting each repair.
 | **Type safe** | A Rust type per structure, enumerations whose unknown values keep their text, typed identifiers and pointers |
 | **Validation** | The 5.5.1, 7.0 and 7.1 specification tables: every deviation of a file with its line, an opt-in strict mode, and a repair pass that makes any tree conformant without losing data |
 | **Values** | Date, age and time grammars of both versions, conversions between versions, and calendar arithmetic (feature `calendar`) |
-| **Fast** | 1.3 to 4 times as fast as 0.17 to read and up to 4 times as fast to write, at less than three times the input's size in memory (see [Performance](#performance)) |
+| **Fast** | 1.5 to 3 times as fast as 0.17 to read and up to 4 times as fast to write, at about twice the input's size in memory (see [Performance](#performance)) |
 
 ---
 
@@ -76,22 +76,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("GEDCOM {}", data.version());
     for person in data.individuals() {
-        let name = person.full_name(&data).unwrap_or_default();
-        let born = person
-            .birth()
-            .and_then(|b| b.date.as_ref())
-            .map(|d| d.value.to_str(&data).into_owned())
-            .unwrap_or_default();
-        println!("{name} {born}");
+        let name = person.full_name().unwrap_or_default();
+        let born = person.birth().and_then(|b| b.date()).map(|d| d.value().to_string());
+        println!("{name} {}", born.unwrap_or_default());
     }
     Ok(())
 }
 ```
 
-A dataset keeps the text it was read from, and its model points into it:
-a text is read back with `text.to_str(&data)`, an identifier with
-`data.store().xref(id)`. Fields that few structures use are in a boxed
-*detail* (`person.detail().refns`, `event.detail().age`).
+A dataset keeps the text it was read from once, and every structure as a
+row of the table of its type, pointing into that text. Its accessors give
+*views* of the rows: `Copy` handles with a method per field, which give a
+substructure as a view, a list as `Items`, a text as a `TextRef` that reads
+and compares without the store, a pointer as an `XrefId`
+(`data.store().xref(id)` is its text). `view.into_owned()` copies a
+structure out as its owned type (`Individual`, `Event`, …), which builds and
+edits records.
 
 ### Write a file
 
@@ -147,11 +147,11 @@ let data = Dataset::parse(
     "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 NAME Ann /Example/\n1 SEX f\n\
      1 FAMC @F1@\n2 PEDI stepchild\n1 _HOBBY Weaving\n0 @F1@ FAM\n0 TRLR\n",
 );
-let ann = &data.individuals()[0];
-assert_eq!(ann.sex, Some(Sex::Female)); // 5.5.1 values ignore case
-let pedigree = &ann.child_of[0].detail().pedigree.as_ref().unwrap().value;
+let ann = data.individuals().first().unwrap();
+assert_eq!(ann.sex(), Some(Sex::Female)); // 5.5.1 values ignore case
+let pedigree = ann.child_of().first().unwrap().pedigree().unwrap().value();
 assert!(matches!(pedigree, Pedigree::Unknown(t) if t.to_str(&data) == "stepchild"));
-assert_eq!(data.store().tag(ann.extra[0].tag), "_HOBBY"); // kept, in place
+assert_eq!(ann.extra().first().unwrap().tag(), "_HOBBY"); // kept, in place
 ```
 
 ### Builder options and strict mode
@@ -189,7 +189,8 @@ a GEDZIP container (`GedcomError`).
 
 | Type | Description |
 |------|-------------|
-| `Dataset` | The header and the records by type, in file order, and `extra`: records of no type the model has |
+| `Dataset` | The header and the records by type, in file order, and `extra`: records of no type the model has; every structure in the table of its type |
+| `View<'_, T>`, `Items<'_, T>`, `TextRef` | A structure where the dataset keeps it, a list of them, a text: what the dataset's accessors give |
 | `Individual`, `Family`, `Source`, `Repository`, `Multimedia`, `Submitter`, `Submission`, `SharedNote` | The records (`INDI`, `FAM`, `SOUR`, `REPO`, `OBJE`, `SUBM`, 5.5.1 `SUBN`, 5.5.1 `NOTE` and 7.x `SNOTE`) |
 | `Event`, `Name`, `ChildLink`, `SpouseLink`, `IndividualRef`, `Association`, `Citation`, `Note`, `Place`, `Date`, `Age`, `Ordinance`, … | Every substructure of 5.5.1, 7.0 and 7.1 |
 | `Text`, `XrefId`, `Store` | Texts, interned identifiers and the store they resolve against |
@@ -205,9 +206,9 @@ let data = Dataset::parse(
      1 NAME Bob /Example/\n0 @F1@ FAM\n1 HUSB @I2@\n1 WIFE @I1@\n1 FAMC @F9@\n0 TRLR\n",
 );
 let ann = data.find_individual("@I1@").unwrap();
-let family = data.families_as_spouse(ann.xref).next().unwrap();
-let bob = data.spouse(ann.xref, family).unwrap();
-assert_eq!(bob.full_name(&data).as_deref(), Some("Bob Example"));
+let family = data.families_as_spouse(ann.xref()).next().unwrap();
+let bob = data.spouse(ann.xref(), family).unwrap();
+assert_eq!(bob.full_name().as_deref(), Some("Bob Example"));
 assert_eq!(data.search_individuals("example").count(), 2);
 // Pointers to no record are a query, not an error.
 assert_eq!(data.dangling_references().len(), 1);
@@ -268,8 +269,8 @@ assert!(data.dangling_references().is_empty());
 
 // Renaming moves every pointer at once.
 data.rename("@I1@", "@ANN@").unwrap();
-// Any field can be edited through a lent record: its pointers are counted
-// again when the guard is dropped.
+// Any field can be edited through a lent record, a copy stored back (its
+// pointers counted again) when the guard is dropped.
 data.get_mut(ann).unwrap().names[0] = ged_io::model::Name::new("Anna /Example/");
 
 let out = GedcomWriter::new().write_to_string(&data).unwrap();
@@ -286,7 +287,8 @@ assert!(out.contains("0 @ANN@ INDI\n1 NAME Anna /Example/\n1 FAMS @F1@\n"));
 | `link` / `unlink(holder, Link, target)` | Adds or removes a pointer of any kind from a record or the header: `FAMC`, `FAMS`, `HUSB`, `WIFE`, `CHIL`, `ALIA`, `ASSO`, `SOUR`, `NOTE`/`SNOTE`, `OBJE`, `REPO`, `SUBM`, `ANCI`, `DESI`, `HEAD.SUBN`, extension structures (`_TAG @X1@`); checks the target's type |
 | `link_child`, `link_spouse` (and `unlink_…`) | Link a family and an individual both ways |
 | `redirect(from, to)`, `detach(xref)` | Move every pointer from one record to another (to merge two); remove every pointer to one |
-| `get_mut(handle)`, `get_mut_at::<T>(i)`, `header_mut()`, `edit_all::<T>(f)` | Lend records to edit any field, pointer fields and extensions included |
+| `get(handle)`, `get_any(handle)` | The record of a handle, as a view |
+| `get_mut(handle)`, `get_mut_at::<T>(i)`, `header_mut()`, `edit_all::<T>(f)` | Lend records to edit any field, pointer fields and extensions included: a copy, stored back when the guard is dropped |
 | `references(xref)`, `referrers(xref)`, `dangling_references()` | Count the pointers to an identifier, list their holders, list the pointers to no record |
 
 Identifiers and pointers are 4-byte interned ids, so the integrity of a
@@ -390,7 +392,7 @@ fn main() -> Result<(), ged_io::GedcomError> {
     for record in GedcomStreamParser::new(file)? {
         let record = record?;
         if let RecordRef::Individual(person) = record.record() {
-            println!("{}", person.full_name(&record).unwrap_or_default());
+            println!("{}", person.full_name().unwrap_or_default());
         }
         // Keep the records of interest, without reading the whole file.
         if matches!(record.record(), RecordRef::Header(_) | RecordRef::Family(_)) {
@@ -403,8 +405,9 @@ fn main() -> Result<(), ged_io::GedcomError> {
 
 The streaming parser reads any encoding and any line terminator the
 in-memory reader reads, with the same rules and types, decoding on the fly:
-memory stays bounded by the largest record. Each record comes with the
-store of its own text. `parser.nodes()` yields the records as lossless
+memory stays bounded by the largest record. Each record comes as a dataset
+of its own, which keeps the record's text and rows; `record.record()` is its
+view. `parser.nodes()` yields the records as lossless
 structures instead; for a whole file as structures, nothing interpreted,
 use `ged_io::tree::Tree` (in memory) or `ged_io::tree::TreeReader`
 (streaming).
@@ -425,14 +428,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let head = records.next().ok_or("empty file")??;
     let default = Header::default();
     let header = match head.record() {
-        RecordRef::Header(h) => h,
+        RecordRef::Header(h) => h.header(),
         _ => &default,
     };
     let config = WriterConfig { version: Some(GedcomVersion::V7_0), ..WriterConfig::default() };
     let mut writer = GedcomStreamWriter::new(output, config, header, &head)?;
     for record in records {
         let record = record?;
-        writer.write_record(record.record(), &record)?;
+        writer.write_record(record.record())?;
     }
     let (_, report) = writer.finish()?;
     eprintln!("{} repairs", report.repairs.len());
@@ -627,11 +630,11 @@ clock's changes), instructions in parentheses:
 
 | Input | Read 0.17 | Read 0.18 | Write 0.17 | Write 0.18 |
 |-------|----------:|----------:|-----------:|-----------:|
-| `tests/fixtures/simple.ged` (47 lines) | 27.0k (115k) | 20.0k (91k) | 10.7k (52k) | 9.4k (45k) |
-| `tests/fixtures/sample.ged` (96 lines) | 53.5k (231k) | 34.7k (166k) | 18.8k (94k) | 20.5k (97k) |
-| `tests/fixtures/conformance/maximal551.ged` (704 lines) | 500k (1.69M) | 305k (1.26M) | 123k (608k) | 128k (642k) |
-| `tests/fixtures/washington.ged` (234 KB) | 8.37M (31.0M) | 4.43M (17.5M) | 2.36M (10.9M) | 2.23M (10.3M) |
-| generated, 1,000 individuals (457 KB) | 14.8M (51.4M) | 5.71M (26.0M) | 3.72M (17.8M) | 3.02M (15.5M) |
+| `tests/fixtures/simple.ged` (47 lines) | 25.8k (115k) | 17.5k (90k) | 10.0k (52k) | 9.5k (46k) |
+| `tests/fixtures/sample.ged` (96 lines) | 52.4k (231k) | 29.8k (166k) | 17.9k (94k) | 21.7k (104k) |
+| `tests/fixtures/conformance/maximal551.ged` (704 lines) | 484k (1.69M) | 280k (1.21M) | 116k (608k) | 127k (643k) |
+| `tests/fixtures/washington.ged` (234 KB) | 8.12M (31.0M) | 3.59M (15.9M) | 2.26M (10.9M) | 2.16M (10.2M) |
+| generated, 1,000 individuals (457 KB) | 13.1M (51.3M) | 4.95M (25.3M) | 3.32M (17.8M) | 2.82M (15.3M) |
 
 0.17 writes 653 lines of `maximal551.ged`, 0.18 the 700 it holds; written
 in the other version family (`dataset-converted`), 0.18 converts and
@@ -645,19 +648,21 @@ Large files, wall time (median of 5) and peak resident set (Linux
 
 | Generated input | Read 0.17 | Read 0.18 | Write 0.17 | Write 0.18 |
 |-------|----------:|----------:|-----------:|-----------:|
-| 20,000 individuals (9.4 MB) | 89 ms (106 MB/s) | 28 ms (333 MB/s) | 45 ms | 13 ms |
-| 172,000 individuals (82 MB) | 1.10 s (75 MB/s) | 0.25 s (332 MB/s) | 0.48 s | 0.12 s |
+| 20,000 individuals (9.4 MB) | 89 ms (106 MB/s) | 25 ms (380 MB/s) | 45 ms | 13 ms |
+| 172,000 individuals (82 MB) | 1.10 s (75 MB/s) | 0.25 s (333 MB/s) | 0.48 s | 0.12 s |
 
 | Peak memory, 82 MB input | 0.17 | 0.18 |
 |---|---:|---:|
-| In memory (`GedcomBuilder::build_from_bytes`) | 1.9 GB (23× the input) | 231 MB (2.8×) |
-| Streaming read (`GedcomStreamParser`) | — (UTF-8 only) | 4.4 MB, any encoding |
-| Streaming write (`GedcomStreamParser` into `GedcomStreamWriter`, 140 MB/s) | — | 23 MB |
+| In memory (`GedcomBuilder::build_from_bytes`) | 1.9 GB (23× the input) | 161 MB (1.96×) |
+| Streaming read (`GedcomStreamParser`) | — (UTF-8 only) | 4.5 MB, any encoding |
+| Streaming write (`GedcomStreamParser` into `GedcomStreamWriter`, 147 MB/s) | — | 23 MB |
 
-A dataset keeps the decoded input once and points into it: about 2.6
-times the input in all, the rest of the peak being the allocator's. A
-written file is checked and repaired for its version as it is written,
-one record at a time; the specification tables are built at compile time.
+A dataset keeps the decoded input once and every structure as a row of
+the table of its type, pointing into it: the rows take about two thirds
+of the input's size, and reading makes a few hundred allocations, not one
+or more per structure. A written file is checked and repaired for its
+version as it is written, one record at a time; the specification tables
+are built at compile time.
 `tools/perf check` runs every pipeline against the limits the CI checks;
 Criterion benchmarks: `cargo bench --bench read`, `--bench write`,
 `--bench memory`.

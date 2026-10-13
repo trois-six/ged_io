@@ -5,130 +5,128 @@
 //! [`GedcomStreamParser`](crate::GedcomStreamParser) and GEDZIP archives —
 //! lexes records into the arena of [`crate::tree`] and types each one
 //! through [`dispatch_record`], the one place that knows which type a
-//! level-0 tag stands for.
+//! level-0 tag stands for, into the tables of a dataset.
 
 use crate::tree::{head_version, segment_bounds, Builder, Escaping, TagInterner};
 use crate::version::GedcomVersion;
 
-use super::dataset::{Dataset, Record};
-use super::driver::{Arena, FromNode, NodeRef, ReadCx};
+use super::dataset::Dataset;
+use super::driver::{Arena, NodeRef, ReadCx, Scratch};
+use super::edit::RecordKind;
 use super::header::Header;
-use super::node::Node;
 use super::record::{
     Family, Individual, Multimedia, Repository, SharedNote, Source, Submission, Submitter,
 };
-use super::text::Store;
+use super::table::HasTable;
+use super::text::{Store, XrefId};
 
 /// The largest text one pass of the lexer indexes: offsets are 32-bit, and
 /// a piece's length takes 31 bits.
 const SEGMENT_LIMIT: usize = (u32::MAX / 2) as usize;
 
-/// Where [`dispatch_record`] puts the records it types.
+/// What [`dispatch_record`] tells of the records it types into the
+/// tables.
 pub(crate) trait RecordSink {
     /// Whether a header is already kept: a second one stays untyped.
     fn has_header(&self) -> bool;
-    /// Takes a typed record.
-    fn typed(&mut self, record: Typed);
-    /// Takes a record of no type the model has, or that did not fit its
-    /// type.
-    fn other(&mut self, node: Node);
+    /// Takes the header.
+    fn header(&mut self, header: Header);
+    /// A record was placed: the `pos`-th of its kind, with identifier
+    /// `xref`.
+    fn placed(&mut self, kind: RecordKind, pos: usize, xref: Option<XrefId>);
 }
 
-/// A record typed by [`dispatch_record`], before it is placed.
-// Each value is moved once, from the reader into its list: boxing the
-// larger variants would allocate once more per record.
-#[allow(clippy::large_enum_variant)]
-pub(crate) enum Typed {
-    Header(Header),
-    Individual(Individual),
-    Family(Family),
-    Source(Source),
-    Repository(Repository),
-    Multimedia(Multimedia),
-    Submitter(Submitter),
-    Submission(Submission),
-    Note(SharedNote),
-}
-
-/// Types the record at `node` by its tag and hands it to `sink`.
+/// Types the record at `node` by its tag into the tables of `cx`, and
+/// tells `sink`.
 ///
 /// A record whose tag the model has no type for (an extension or unknown
 /// record, a header after the first, a trailer with content), or that does
-/// not fit its type (`0 INDI payload`), is handed over untyped, whole. An
-/// empty trailer carries nothing and is dropped: writers end every file
-/// with their own.
+/// not fit its type (`0 INDI payload`), is kept untyped, whole. An empty
+/// trailer carries nothing and is dropped: writers end every file with
+/// their own.
 pub(crate) fn dispatch_record(node: NodeRef<'_>, cx: &mut ReadCx<'_>, sink: &mut dyn RecordSink) {
     let typed = match node.standard_tag() {
-        Some("HEAD") if !sink.has_header() => Header::from_node(node, cx).map(Typed::Header),
-        Some("INDI") => Individual::from_node(node, cx).map(Typed::Individual),
-        Some("FAM") => Family::from_node(node, cx).map(Typed::Family),
-        Some("SOUR") => Source::from_node(node, cx).map(Typed::Source),
-        Some("REPO") => Repository::from_node(node, cx).map(Typed::Repository),
-        Some("OBJE") => Multimedia::from_node(node, cx).map(Typed::Multimedia),
-        Some("SUBM") => Submitter::from_node(node, cx).map(Typed::Submitter),
-        Some("SUBN") => Submission::from_node(node, cx).map(Typed::Submission),
-        Some("NOTE" | "SNOTE") => SharedNote::from_node(node, cx).map(Typed::Note),
+        Some("HEAD") if !sink.has_header() => match read_header(node, cx) {
+            Some(header) => {
+                sink.header(header);
+                true
+            }
+            None => false,
+        },
+        Some("INDI") => typed::<Individual>(node, cx, sink),
+        Some("FAM") => typed::<Family>(node, cx, sink),
+        Some("SOUR") => typed::<Source>(node, cx, sink),
+        Some("REPO") => typed::<Repository>(node, cx, sink),
+        Some("OBJE") => typed::<Multimedia>(node, cx, sink),
+        Some("SUBM") => typed::<Submitter>(node, cx, sink),
+        Some("SUBN") => typed::<Submission>(node, cx, sink),
+        Some("NOTE" | "SNOTE") => typed::<SharedNote>(node, cx, sink),
         Some("TRLR") if !node.has_children() && node.has_no_payload() && !node.has_xref() => {
             return;
         }
-        _ => None,
+        _ => false,
     };
-    if let Some(record) = typed {
-        sink.typed(record);
-    } else {
-        let n = cx.node(node);
-        sink.other(n);
+    if !typed {
+        let row = cx.node_row(node);
+        let pos = cx.tables.others.rows.len();
+        cx.tables.others.rows.push(row);
+        sink.placed(RecordKind::Other, pos, row.xref);
     }
 }
 
-impl RecordSink for Dataset {
+/// Reads the header, which a dataset keeps as its owned type: read into
+/// the tables as any structure, then copied out. Its rows, a few, stay in
+/// the tables, held by nothing (a compaction drops them).
+fn read_header(node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> Option<Header> {
+    super::table::read_one_row::<Header>(node, cx)
+        .map(|at| <Header as super::table::Item>::load_one(at, cx.tables))
+}
+
+/// Reads a record of type `T` into its table: whether it fits.
+fn typed<T>(node: NodeRef<'_>, cx: &mut ReadCx<'_>, sink: &mut dyn RecordSink) -> bool
+where
+    T: super::edit::RecordRows
+        + HasTable
+        + super::table::sealed::Listed<Elem = <T as super::table::sealed::Stored>::Row>,
+{
+    let at = super::table::reserve(&mut T::table_mut(cx.tables).rows, 1, T::fill());
+    let Some(row) = T::read_elem(node, at, cx) else {
+        let rows = &mut T::table_mut(cx.tables).rows;
+        if rows.len() == at as usize + 1 {
+            rows.pop();
+        } else {
+            cx.tables.garbage += 1;
+        }
+        return false;
+    };
+    let xref = T::row_xref(&row);
+    if let Some(slot) = T::table_mut(cx.tables).rows.get_mut(at as usize) {
+        *slot = row;
+    }
+    sink.placed(T::ROWS_KIND, at as usize, xref);
+    true
+}
+
+/// A dataset's header and index, which reading fills as it places the
+/// records.
+struct DatasetSink<'d> {
+    header: &'d mut Option<Box<Header>>,
+    index: &'d mut super::edit::Index,
+}
+
+impl RecordSink for DatasetSink<'_> {
     fn has_header(&self) -> bool {
         self.header.is_some()
     }
 
+    fn header(&mut self, header: Header) {
+        *self.header = Some(Box::new(header));
+    }
+
     /// Each record placed is noted in the dataset's index while it is at
-    /// hand ([`Dataset::define_read`]).
-    fn typed(&mut self, record: Typed) {
-        use super::RecordKind as K;
-        macro_rules! place {
-            ($kind:ident, $list:ident, $r:expr) => {{
-                let id = $r.xref;
-                self.define_read(K::$kind, self.$list.len(), id);
-                self.$list.push($r);
-            }};
-        }
-        match record {
-            Typed::Header(r) => self.header = Some(r),
-            Typed::Individual(r) => place!(Individual, individuals, r),
-            Typed::Family(r) => place!(Family, families, r),
-            Typed::Source(r) => place!(Source, sources, r),
-            Typed::Repository(r) => place!(Repository, repositories, r),
-            Typed::Multimedia(r) => place!(Multimedia, multimedia, r),
-            Typed::Submitter(r) => place!(Submitter, submitters, r),
-            Typed::Submission(r) => place!(Submission, submissions, r),
-            Typed::Note(r) => place!(Note, notes, r),
-        }
-    }
-
-    fn other(&mut self, node: Node) {
-        self.define_read(super::RecordKind::Other, self.extra.len(), node.xref);
-        self.extra.push(node);
-    }
-}
-
-impl From<Typed> for Record {
-    fn from(record: Typed) -> Self {
-        match record {
-            Typed::Header(r) => Record::Header(Box::new(r)),
-            Typed::Individual(r) => Record::Individual(Box::new(r)),
-            Typed::Family(r) => Record::Family(Box::new(r)),
-            Typed::Source(r) => Record::Source(Box::new(r)),
-            Typed::Repository(r) => Record::Repository(Box::new(r)),
-            Typed::Multimedia(r) => Record::Multimedia(Box::new(r)),
-            Typed::Submitter(r) => Record::Submitter(Box::new(r)),
-            Typed::Submission(r) => Record::Submission(Box::new(r)),
-            Typed::Note(r) => Record::Note(Box::new(r)),
-        }
+    /// hand ([`super::edit::Index::define_read`]).
+    fn placed(&mut self, kind: RecordKind, pos: usize, xref: Option<XrefId>) {
+        self.index.define_read(kind, pos, xref);
     }
 }
 
@@ -151,9 +149,18 @@ pub(crate) fn read_segmented(text: String, limit: usize) -> Dataset {
     data.declared_version = declared.map(Into::into);
     let mut store = Store::new(text);
     let mut tags = TagInterner::default();
+    let mut scratch = Scratch::default();
     {
-        let (input, pieces, xrefs) = store.parts_mut();
-        let mut cx = ReadCx::new(input, pieces, xrefs, version);
+        let Dataset {
+            header,
+            tables,
+            index,
+            ..
+        } = &mut data;
+        let mut sink = DatasetSink { header, index };
+        let parts = store.parts_mut();
+        let input = parts.text;
+        let mut cx = ReadCx::new(parts, tables, &mut scratch, version);
         let mut builder = Builder::new(escaping, 1).with_spans();
         for (start, end, first_line) in segment_bounds(input, limit) {
             let part = input.get(start..end).unwrap_or_default();
@@ -167,25 +174,42 @@ pub(crate) fn read_segmented(text: String, limit: usize) -> Dataset {
                     xrefs: &b.xrefs,
                 };
                 if let Some(root) = NodeRef::root(&arena) {
-                    dispatch_record(root, &mut cx, &mut data);
+                    dispatch_record(root, &mut cx, &mut sink);
                 }
             });
         }
     }
     store.set_tags(tags.others);
     store.shrink();
+    // The spare rows of a small file, a few kilobytes at most, are not
+    // worth reallocating every table.
+    let small = store.input_len() < SMALL_INPUT;
     data.store = store;
-    data.shrink();
+    if !small {
+        data.shrink();
+    }
     data.index_read();
     data
 }
 
-/// Reads a file one record at a time, each into a store of its own: what
+/// The size of input under which a dataset keeps its tables' spare rows.
+const SMALL_INPUT: usize = 64 * 1024;
+
+/// A record a [`RecordReader`] read: the header, or the position of a
+/// record of a kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Placed {
+    Header,
+    Record(RecordKind, usize),
+}
+
+/// Reads a file one record at a time, each into a dataset of its own: what
 /// a stream reads.
 pub(crate) struct RecordReader {
     builder: Builder,
     version: GedcomVersion,
     header_seen: bool,
+    scratch: Scratch,
 }
 
 impl RecordReader {
@@ -196,6 +220,7 @@ impl RecordReader {
             builder: Builder::new(Escaping::V551, 1).with_spans(),
             version: GedcomVersion::V5_5_1,
             header_seen: false,
+            scratch: Scratch::default(),
         }
     }
 
@@ -206,35 +231,42 @@ impl RecordReader {
     }
 
     /// Reads the records of `text` (normally one; lines without a level
-    /// before the first record form one of their own) into `out`, and
-    /// returns the store they point into, which keeps `text`.
-    pub(crate) fn read(&mut self, text: String, first_line: u32, out: &mut Vec<Record>) -> Store {
+    /// before the first record form one of their own) into a dataset of
+    /// their own, which keeps `text` as its store: the dataset and where
+    /// each record is in it.
+    pub(crate) fn read(&mut self, text: String, first_line: u32, out: &mut Vec<Placed>) -> Dataset {
         struct Sink<'o> {
             header_seen: &'o mut bool,
-            out: &'o mut Vec<Record>,
+            header: &'o mut Option<Box<Header>>,
+            out: &'o mut Vec<Placed>,
         }
         impl RecordSink for Sink<'_> {
             fn has_header(&self) -> bool {
                 *self.header_seen
             }
-            fn typed(&mut self, record: Typed) {
-                *self.header_seen |= matches!(record, Typed::Header(_));
-                self.out.push(record.into());
+            fn header(&mut self, header: Header) {
+                *self.header_seen = true;
+                *self.header = Some(Box::new(header));
+                self.out.push(Placed::Header);
             }
-            fn other(&mut self, node: Node) {
-                self.out.push(Record::Other(Box::new(node)));
+            fn placed(&mut self, kind: RecordKind, pos: usize, _xref: Option<XrefId>) {
+                self.out.push(Placed::Record(kind, pos));
             }
         }
 
-        let mut store = Store::new(text);
+        let mut data = Dataset::new(self.version);
+        let mut store = Store::of_record(text);
         let mut tags = TagInterner::default();
         {
-            let (input, pieces, xrefs) = store.parts_mut();
-            let mut cx = ReadCx::new(input, pieces, xrefs, self.version);
+            let Dataset { header, tables, .. } = &mut data;
             let mut sink = Sink {
                 header_seen: &mut self.header_seen,
+                header,
                 out,
             };
+            let parts = store.parts_mut();
+            let input = parts.text;
+            let mut cx = ReadCx::new(parts, tables, &mut self.scratch, self.version);
             self.builder.reset(first_line);
             self.builder.read_records(input, &mut tags, |b, _| {
                 let arena = Arena {
@@ -251,7 +283,8 @@ impl RecordReader {
         }
         store.set_tags(tags.others);
         store.shrink();
-        store
+        data.store = store;
+        data
     }
 }
 
@@ -272,11 +305,17 @@ mod tests {
         assert_eq!(
             whole
                 .find_individual("@I2@")
-                .map(|r| r.detail().associations.len()),
+                .map(|r| r.associations().len()),
             Some(1)
         );
-        let note = &whole.individuals[0].notes[0];
-        assert!(matches!(&note.content, NoteContent::Text(t) if t.to_str(&whole) == "a@b\nc"));
+        let note = whole
+            .individuals()
+            .first()
+            .unwrap()
+            .notes()
+            .first()
+            .unwrap();
+        assert!(matches!(note.content(), NoteContent::Text(t) if t.to_str(&whole) == "a@b\nc"));
     }
 
     #[test]
@@ -285,22 +324,21 @@ mod tests {
         reader.set_version(GedcomVersion::V7_0, Escaping::V70);
         let mut out = Vec::new();
         reader.read("0 HEAD\n1 GEDC\n2 VERS 7.0\n".into(), 1, &mut out);
-        assert!(matches!(out.as_slice(), [Record::Header(_)]), "{out:?}");
+        assert_eq!(out, [Placed::Header]);
         out.clear();
-        let store = reader.read(
+        let data = reader.read(
             "0 @I1@ INDI\n1 NAME Ann /Example/\n1 _X y\n".into(),
             4,
             &mut out,
         );
-        let [Record::Individual(indi)] = out.as_slice() else {
-            panic!("{out:?}")
-        };
-        assert_eq!(store.xref(indi.xref.unwrap()), "@I1@");
-        assert_eq!(store.tag(indi.extra[0].tag), "_X");
+        assert_eq!(out, [Placed::Record(RecordKind::Individual, 0)]);
+        let indi = data.individuals().first().unwrap();
+        assert_eq!(data.store().xref(indi.xref().unwrap()), "@I1@");
+        assert_eq!(indi.extra().first().unwrap().tag(), "_X");
         out.clear();
         // A second header is kept untyped; an empty trailer, not at all.
         reader.read("0 HEAD\n".into(), 8, &mut out);
-        assert!(matches!(out.as_slice(), [Record::Other(_)]), "{out:?}");
+        assert_eq!(out, [Placed::Record(RecordKind::Other, 0)]);
         out.clear();
         reader.read("0 TRLR\n".into(), 9, &mut out);
         assert!(out.is_empty());

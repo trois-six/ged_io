@@ -23,6 +23,7 @@ use crate::tree::{Flat, FlatPayload, Payload, Structure};
 use crate::version::GedcomVersion;
 
 use super::driver::{gedcom_struct, NodeRef, PayloadField, ReadCx, WriteCx};
+use super::table::{push_span, Code, CopyCx, List, PhrasedRow, StoreCx, Tables};
 use super::text::Text;
 
 /// One value of an enumeration: its variant name and its spellings in
@@ -64,18 +65,79 @@ pub(crate) trait Enumeration: Sized + Default {
     fn unknown(&self) -> Option<&Text>;
     /// An unknown value.
     fn from_unknown(text: Text) -> Self;
+    /// The index of the variant `s` names ([`Enumeration::known`]).
+    fn known_index(s: &str, version: Option<GedcomVersion>) -> Option<usize>;
+    /// The variant at `index` of `DESC.values`.
+    fn variant(index: usize) -> Option<Self>;
+    /// The index of a known value in `DESC.values`.
+    fn index(&self) -> Option<usize>;
 }
 
-/// Reads an enumeration payload: a known value, or the text as written.
-/// No payload, or a pointer, does not fit.
-pub(crate) fn read_enum<E: Enumeration>(node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> Option<E> {
-    if node.is_pointer() || node.has_no_payload() {
-        return None;
+/// An enumeration value of a row, owned: `E::default()` (an empty unknown
+/// value) for none.
+pub(crate) fn enum_from_code<E: Enumeration>(code: Option<Code>, t: &Tables) -> E {
+    let Some(code) = code else {
+        return E::default();
+    };
+    match (code.variant(), code.text_index()) {
+        (Some(i), _) => E::variant(i).unwrap_or_default(),
+        (None, Some(i)) => {
+            E::from_unknown(Text::from_span(t.spans.get(i).copied().unwrap_or_default()))
+        }
+        (None, None) => E::default(),
     }
-    match E::known(&cx.payload_str(node), Some(cx.version)) {
-        Some(v) => Some(v),
-        None => cx.text(node).map(E::from_unknown),
+}
+
+/// An owned enumeration value, for a row: an empty unknown value is none.
+pub(crate) fn enum_to_code<E: Enumeration>(value: &E, cx: &mut StoreCx<'_>) -> Option<Code> {
+    match (value.index(), value.unknown()) {
+        (Some(i), _) => Some(Code::known(i)),
+        (None, Some(t)) if !t.is_empty() => {
+            let span = t.to_span(cx.store);
+            Some(push_span(&mut cx.tables.spans, span))
+        }
+        _ => None,
     }
+}
+
+/// [`enum_to_code`] of a value that is there: an empty unknown value is the
+/// code of an empty text.
+pub(crate) fn enum_to_code_present<E: Enumeration>(value: &E, cx: &mut StoreCx<'_>) -> Code {
+    enum_to_code(value, cx)
+        .unwrap_or_else(|| push_span(&mut cx.tables.spans, super::text::Span::EMPTY))
+}
+
+/// The spelling in `version` of the value at `index` ([`Enumeration::spelling`]).
+fn spelling_at<E: Enumeration>(index: usize, version: GedcomVersion) -> Option<&'static str> {
+    let v = E::DESC.values.get(index)?;
+    if version.is_v7() {
+        v.v7.or(v.v551)
+    } else {
+        v.v551.or(v.v7)
+    }
+}
+
+/// [`write_enum_flat`] of a row's value.
+pub(crate) fn enum_payload_raw<'s, E: Enumeration>(
+    code: Option<Code>,
+    cx: &WriteCx<'s>,
+) -> FlatPayload<'s> {
+    let Some(code) = code else {
+        return FlatPayload::None;
+    };
+    match (code.variant(), code.text_index()) {
+        (Some(i), _) => {
+            spelling_at::<E>(i, cx.version).map_or(FlatPayload::None, WriteCx::static_flat)
+        }
+        (None, Some(i)) => cx.span_flat(cx.tables.spans.get(i).copied().unwrap_or_default()),
+        (None, None) => FlatPayload::None,
+    }
+}
+
+/// [`claim_enum`] of a row's value.
+pub(crate) fn enum_claim_raw<E: Enumeration>(code: Option<Code>, cx: &WriteCx<'_>) -> Option<Kind> {
+    let i = code?.variant()?;
+    spelling_at::<E>(i, cx.version).map(|_| Kind::Enum)
 }
 
 /// Writes an enumeration payload.
@@ -197,12 +259,24 @@ macro_rules! gedcom_enum {
             fn from_unknown(text: Text) -> Self {
                 Self::Unknown(text)
             }
+
+            fn known_index(s: &str, version: Option<GedcomVersion>) -> Option<usize> {
+                find_known(Self::DESC.values, s, version)
+            }
+
+            fn variant(index: usize) -> Option<Self> {
+                Self::KNOWN.get(index).cloned()
+            }
+
+            fn index(&self) -> Option<usize> {
+                match self {
+                    Self::Unknown(_) => None,
+                    known => Self::KNOWN.iter().position(|k| k == known),
+                }
+            }
         }
 
         impl PayloadField for $name {
-            fn read(node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> Option<Self> {
-                read_enum(node, cx)
-            }
 
             fn write(&self, cx: &WriteCx<'_>) -> Payload {
                 write_enum(self, cx)
@@ -215,16 +289,65 @@ macro_rules! gedcom_enum {
             fn claim(&self, cx: &WriteCx<'_>) -> Option<Kind> {
                 claim_enum(self, cx)
             }
+
+            type Raw = Option<Code>;
+            type View<'a> = Self;
+
+            #[inline]
+            fn read_raw(node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> Option<Option<Code>> {
+                cx.enum_code(node, <Self as Enumeration>::known_index).map(Some)
+            }
+
+            #[inline]
+            fn payload_raw<'s>(raw: &Option<Code>, cx: &WriteCx<'s>) -> FlatPayload<'s> {
+                enum_payload_raw::<Self>(*raw, cx)
+            }
+
+            #[inline]
+            fn claim_raw(raw: &Option<Code>, cx: &WriteCx<'_>) -> Option<Kind> {
+                enum_claim_raw::<Self>(*raw, cx)
+            }
+
+            fn load_raw(raw: &Option<Code>, t: &Tables) -> Self {
+                enum_from_code(*raw, t)
+            }
+
+            fn store_raw(&self, cx: &mut StoreCx<'_>) -> Option<Code> {
+                enum_to_code(self, cx)
+            }
+
+            fn copy_raw(raw: &Option<Code>, cx: &mut CopyCx<'_>) -> Option<Code> {
+                raw.map(|c| cx.code(c))
+            }
+
+            fn view_raw(raw: Option<Code>, data: &$crate::model::Dataset) -> Self {
+                enum_from_code(raw, &data.tables)
+            }
         }
 
         $crate::model::driver::leaf!($name);
+        $crate::model::driver::leaf_item!([] $name, Option<$crate::model::table::Code>, $name);
 
-        impl $crate::model::relocate::Relocate for $name {
-            fn relocate(&mut self, r: &mut $crate::model::relocate::Relocation<'_>) {
-                if let Self::Unknown(t) = self {
-                    $crate::model::relocate::Relocate::relocate(t, r);
-                }
+        impl $crate::model::driver::LeafOne for $name {
+            type One = $crate::model::table::Code;
+
+            #[inline]
+            fn one(raw: Option<$crate::model::table::Code>) -> Option<$crate::model::table::Code> {
+                raw
             }
+
+            #[inline]
+            fn raw(one: $crate::model::table::Code) -> Option<$crate::model::table::Code> {
+                Some(one)
+            }
+
+            fn store_one(&self, cx: &mut StoreCx<'_>) -> $crate::model::table::Code {
+                enum_to_code_present(self, cx)
+            }
+        }
+
+        impl $crate::model::table::sealed::Field for $name {
+            type View<'a> = Self;
         }
 
         impl $crate::model::pointers::Pointers for $name {}
@@ -727,6 +850,45 @@ impl super::driver::TagField for EventKind {
         // written as a generic event.
         self.as_str(GedcomVersion::V7_0).unwrap_or("EVEN")
     }
+
+    type Raw = Option<Code>;
+
+    fn raw_of_tag(tag: &'static str) -> Option<Option<Code>> {
+        Self::known_index(tag, None).map(|i| Some(Code::known(i)))
+    }
+
+    fn std_tag_raw(raw: &Option<Code>, _t: &Tables) -> super::driver::StdTag {
+        /// The tag of each variant, and of a generic event.
+        const TAGS: [super::driver::StdTag; EventKind::DESC.values.len() + 1] = {
+            let values = EventKind::DESC.values;
+            let mut tags = [super::driver::StdTag::new("EVEN"); EventKind::DESC.values.len() + 1];
+            let mut i = 0;
+            while i < values.len() {
+                tags[i] = super::driver::StdTag::new(match (values[i].v7, values[i].v551) {
+                    (Some(t), _) | (None, Some(t)) => t,
+                    (None, None) => "EVEN",
+                });
+                i += 1;
+            }
+            tags
+        };
+        let i = raw.and_then(Code::variant).unwrap_or(TAGS.len() - 1);
+        TAGS.get(i)
+            .copied()
+            .unwrap_or(const { super::driver::StdTag::new("EVEN") })
+    }
+
+    fn load_raw(raw: &Option<Code>, t: &Tables) -> Self {
+        enum_from_code(*raw, t)
+    }
+
+    fn store_raw(&self, cx: &mut StoreCx<'_>) -> Option<Code> {
+        enum_to_code(self, cx)
+    }
+
+    fn copy_raw(raw: &Option<Code>, cx: &mut CopyCx<'_>) -> Option<Code> {
+        raw.map(|c| cx.code(c))
+    }
 }
 
 /// Every enumeration type, for the coverage ledger.
@@ -758,26 +920,6 @@ pub(crate) const ENUMS: &[EnumDesc] = &[
 pub struct EnumList<E>(pub Vec<E>);
 
 impl<E: Enumeration> PayloadField for EnumList<E> {
-    /// A list read from its payload: no payload is an empty list (a
-    /// 5.5.1 `DATA.EVEN` may name no event); a pointer does not fit.
-    fn read(node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> Option<Self> {
-        if node.is_pointer() {
-            return None;
-        }
-        if node.has_no_payload() {
-            return Some(Self(Vec::new()));
-        }
-        let items = cx
-            .payload_str(node)
-            .split(',')
-            .map(|item| {
-                E::known(item, Some(cx.version))
-                    .unwrap_or_else(|| E::from_unknown(Text::new(item.trim_matches(' '))))
-            })
-            .collect();
-        Some(Self(items))
-    }
-
     fn write(&self, cx: &WriteCx<'_>) -> Payload {
         // An item as it reads back: without the characters the target
         // bans (which the writer leaves out), then read as reading does
@@ -823,17 +965,107 @@ impl<E: Enumeration> PayloadField for EnumList<E> {
             _ => self.write(cx).into(),
         }
     }
-}
 
-impl<E: Enumeration> super::driver::FromNode for EnumList<E> {
-    const LEAF: bool = true;
+    type Raw = List<Code>;
+    type View<'a> = Self;
 
-    fn from_node(node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> Option<Self> {
-        super::driver::read_leaf(node, cx)
+    fn read_raw(node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> Option<List<Code>> {
+        if node.is_pointer() {
+            return None;
+        }
+        if node.has_no_payload() {
+            return Some(List::EMPTY);
+        }
+        let payload = cx.payload_str(node);
+        let count = payload.split(',').count();
+        let start = super::table::reserve(&mut cx.tables.codes, count, None);
+        for (i, item) in payload.split(',').enumerate() {
+            let code = if let Some(k) = E::known_index(item, Some(cx.version)) {
+                Code::known(k)
+            } else {
+                let span = cx.sub_span(node, item.trim_matches(' '));
+                cx.unknown_code(span)
+            };
+            if let Some(slot) = cx.tables.codes.get_mut(start as usize + i) {
+                *slot = Some(code);
+            }
+        }
+        Some(List::new(start, u32::try_from(count).unwrap_or(u32::MAX)))
+    }
+
+    fn payload_raw<'s>(raw: &List<Code>, cx: &WriteCx<'s>) -> FlatPayload<'s> {
+        match raw.of(&cx.tables.codes) {
+            [] => FlatPayload::None,
+            [code] if enum_claim_raw::<E>(*code, cx).is_some() => enum_payload_raw::<E>(*code, cx),
+            _ => Self::load_raw(raw, cx.tables).write(cx).into(),
+        }
+    }
+
+    fn claim_raw(raw: &List<Code>, cx: &WriteCx<'_>) -> Option<Kind> {
+        raw.of(&cx.tables.codes)
+            .iter()
+            .all(|c| enum_claim_raw::<E>(*c, cx).is_some())
+            .then_some(Kind::ListEnum)
+    }
+
+    fn load_raw(raw: &List<Code>, t: &Tables) -> Self {
+        Self(
+            raw.of(&t.codes)
+                .iter()
+                .map(|c| enum_from_code(*c, t))
+                .collect(),
+        )
+    }
+
+    fn store_raw(&self, cx: &mut StoreCx<'_>) -> List<Code> {
+        if self.0.is_empty() {
+            return List::EMPTY;
+        }
+        let start = super::table::reserve(&mut cx.tables.codes, self.0.len(), None);
+        for (i, e) in self.0.iter().enumerate() {
+            let code = enum_to_code(e, cx);
+            if let Some(slot) = cx.tables.codes.get_mut(start as usize + i) {
+                *slot = code;
+            }
+        }
+        List::new(start, u32::try_from(self.0.len()).unwrap_or(u32::MAX))
+    }
+
+    fn copy_raw(raw: &List<Code>, cx: &mut CopyCx<'_>) -> List<Code> {
+        if raw.is_empty() {
+            return List::EMPTY;
+        }
+        let start = super::table::reserve(&mut cx.to.codes, raw.len as usize, None);
+        for i in 0..raw.len {
+            let code = cx
+                .from
+                .codes
+                .get((raw.start + i) as usize)
+                .copied()
+                .flatten();
+            let copied = code.map(|c| cx.code(c));
+            if let Some(slot) = cx.to.codes.get_mut((start + i) as usize) {
+                *slot = copied;
+            }
+        }
+        List::new(start, raw.len)
+    }
+
+    fn view_raw(raw: List<Code>, data: &super::Dataset) -> Self {
+        Self::load_raw(&raw, &data.tables)
     }
 }
 
+super::driver::leaf_item!([E: Enumeration] EnumList<E>, List<Code>, EnumList<E>);
+super::driver::leaf_one_same!([E: Enumeration] EnumList<E>);
+
+impl<E> super::table::sealed::Field for EnumList<E> {
+    type View<'a> = Self;
+}
+
 impl<E: Enumeration> super::driver::ToNodes for EnumList<E> {
+    const LEAF: bool = true;
+
     fn to_node(&self, tag: &'static str, cx: &WriteCx<'_>) -> Structure {
         super::driver::write_leaf(self, tag, cx)
     }
@@ -886,14 +1118,6 @@ impl<E: Enumeration> super::driver::Fields for Phrased<E> {
         &PHRASED_LOOKUP
     }
 
-    fn read_xref(&mut self, node: NodeRef<'_>, _cx: &mut ReadCx<'_>) -> bool {
-        !node.has_xref()
-    }
-
-    fn read_tag(&mut self, _node: NodeRef<'_>) -> bool {
-        true
-    }
-
     fn write_xref(&self, _cx: &WriteCx<'_>) -> Option<crate::tree::Xref> {
         None
     }
@@ -910,28 +1134,8 @@ impl<E: Enumeration> super::driver::Fields for Phrased<E> {
         None
     }
 
-    fn read_payload(&mut self, node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> bool {
-        match read_enum(node, cx) {
-            Some(v) => {
-                self.value = v;
-                true
-            }
-            None => false,
-        }
-    }
-
-    fn accept(&mut self, field: usize, node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> bool {
-        field == 0 && super::driver::Slot::accept(&mut self.phrase, node, cx)
-    }
-
-    fn finish(&mut self) {}
-
     fn extra(&self) -> &super::Extra {
         &self.extra
-    }
-
-    fn extra_mut(&mut self) -> &mut super::Extra {
-        &mut self.extra
     }
 
     fn write_payload(&self, cx: &WriteCx<'_>) -> Payload {
@@ -960,12 +1164,6 @@ impl<E: Enumeration> super::driver::Fields for Phrased<E> {
     }
 }
 
-impl<E: Enumeration + Clone + PartialEq + std::fmt::Debug> super::driver::FromNode for Phrased<E> {
-    fn from_node(node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> Option<Self> {
-        super::driver::read(node, cx)
-    }
-}
-
 impl<E: Enumeration> super::driver::ToNodes for Phrased<E> {
     fn to_node(&self, tag: &'static str, cx: &WriteCx<'_>) -> Structure {
         super::driver::write(self, tag, cx)
@@ -981,20 +1179,6 @@ impl<E: Enumeration> super::driver::ToNodes for Phrased<E> {
         f: &mut dyn FnMut(&'static str, &dyn super::driver::Fields),
     ) {
         f(tag, self);
-    }
-}
-
-impl<E: super::relocate::Relocate> super::relocate::Relocate for EnumList<E> {
-    fn relocate(&mut self, r: &mut super::relocate::Relocation<'_>) {
-        self.0.relocate(r);
-    }
-}
-
-impl<E: super::relocate::Relocate> super::relocate::Relocate for Phrased<E> {
-    fn relocate(&mut self, r: &mut super::relocate::Relocation<'_>) {
-        self.value.relocate(r);
-        self.phrase.relocate(r);
-        self.extra.relocate(r);
     }
 }
 
@@ -1108,7 +1292,7 @@ impl<E> Phrased<E> {
 gedcom_struct! {
     /// The status of a Latter-day Saint ordinance (`STAT`) and the date it
     /// was set (5.5.1 `LDS_*.STAT`, 7.x `ord-STAT`).
-    pub struct LdsStatus {
+    pub struct LdsStatus => LdsStatusRow {
         @payload
         /// The status.
         value: OrdinanceStatus;
@@ -1126,3 +1310,298 @@ gedcom_struct! {
         v71: ["ord-STAT"],
     }
 }
+
+// ---- Values with their phrases in a dataset's tables --------------------
+
+impl<E> super::table::sealed::Stored for Phrased<E> {
+    type Row = PhrasedRow;
+
+    fn empty() -> &'static PhrasedRow {
+        static EMPTY: PhrasedRow = PhrasedRow {
+            value: None,
+            phrase: None,
+        };
+        &EMPTY
+    }
+}
+
+impl<E> super::table::HasTable for Phrased<E> {
+    fn table(t: &Tables) -> &super::table::Table<PhrasedRow> {
+        &t.phrased
+    }
+    fn table_mut(t: &mut Tables) -> &mut super::table::Table<PhrasedRow> {
+        &mut t.phrased
+    }
+}
+
+/// A value with its phrase being read into a row.
+struct PhrasedBuilding<E> {
+    row: PhrasedRow,
+    value: std::marker::PhantomData<fn() -> E>,
+}
+
+impl<E: Enumeration> super::driver::RowFields for PhrasedBuilding<E> {
+    fn fields(&self) -> &'static [super::driver::FieldDesc] {
+        PHRASED_FIELDS
+    }
+
+    fn lookup(&self) -> &'static super::driver::Lookup {
+        &PHRASED_LOOKUP
+    }
+
+    fn read_tag(&mut self, _node: NodeRef<'_>) -> bool {
+        true
+    }
+
+    fn read_xref(&mut self, node: NodeRef<'_>, _cx: &mut ReadCx<'_>) -> bool {
+        !node.has_xref()
+    }
+
+    fn read_payload(&mut self, node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> bool {
+        match cx.enum_code(node, E::known_index) {
+            Some(code) => {
+                self.row.value = Some(code);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn reserve(&mut self, _field: usize, _count: u32, _cx: &mut ReadCx<'_>) {}
+
+    fn accept(
+        &mut self,
+        field: usize,
+        node: NodeRef<'_>,
+        reserved: u32,
+        cx: &mut ReadCx<'_>,
+    ) -> bool {
+        field == 0
+            && <Option<Text> as super::table::RowSlot>::accept(
+                &mut self.row.phrase,
+                node,
+                reserved,
+                cx,
+            )
+    }
+
+    fn finish(&mut self, _field: usize, _reserved: u32, _cx: &mut ReadCx<'_>) {}
+}
+
+/// What writing a value with its phrase needs: the row and its type.
+struct PhrasedWrite<'s, E> {
+    row: &'s PhrasedRow,
+    value: std::marker::PhantomData<fn() -> E>,
+}
+
+impl<E: Enumeration> super::driver::RowWrite for PhrasedWrite<'_, E> {
+    fn as_dyn(&self) -> &dyn super::driver::RowWrite {
+        self
+    }
+
+    fn write_xref<'s>(&self, _cx: &WriteCx<'s>) -> Option<std::borrow::Cow<'s, str>> {
+        None
+    }
+
+    fn write_payload<'s>(&self, cx: &WriteCx<'s>) -> FlatPayload<'s> {
+        enum_payload_raw::<E>(self.row.value, cx)
+    }
+
+    fn payload_claim(&self, cx: &WriteCx<'_>) -> Option<Kind> {
+        enum_claim_raw::<E>(self.row.value, cx)
+    }
+
+    fn write_fields<'s>(&self, cx: &WriteCx<'s>, out: &mut Flat<'s>) {
+        <Option<Text> as super::table::RowSlot>::write(
+            &self.row.phrase,
+            const { super::driver::StdTag::new("PHRASE") },
+            cx,
+            out,
+        );
+    }
+
+    fn lookup(&self) -> &'static super::driver::Lookup {
+        &PHRASED_LOOKUP
+    }
+
+    fn write_extra(
+        &self,
+        _field: usize,
+        _node: &super::table::NodeRow,
+        _tag: &'static str,
+        _cx: &WriteCx<'_>,
+    ) -> Option<Structure> {
+        None
+    }
+}
+
+super::table::listed!([E: Enumeration + 'static] Phrased<E>, PhrasedRow, super::table::View<'a, Phrased<E>>);
+
+impl<E: Enumeration + 'static> super::table::Item for Phrased<E> {
+    type One = super::table::Idx<Phrased<E>>;
+
+    fn elems(t: &Tables) -> &[PhrasedRow] {
+        &t.phrased.rows
+    }
+
+    fn elems_mut(t: &mut Tables) -> &mut Vec<PhrasedRow> {
+        &mut t.phrased.rows
+    }
+
+    fn fill() -> PhrasedRow {
+        PhrasedRow::default()
+    }
+
+    fn read_elem(node: NodeRef<'_>, at: u32, cx: &mut ReadCx<'_>) -> Option<PhrasedRow> {
+        let mut b = PhrasedBuilding::<E> {
+            row: PhrasedRow::default(),
+            value: std::marker::PhantomData,
+        };
+        let extra = super::driver::read_row_into(&mut b, node, cx)?;
+        if !extra.is_empty() {
+            cx.tables.phrased.set_extra(at, extra);
+        }
+        Some(b.row)
+    }
+
+    fn read_one(node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> Option<Self::One> {
+        super::table::read_one_row::<Self>(node, cx)
+    }
+
+    fn write_elem<'s>(
+        e: &PhrasedRow,
+        at: u32,
+        tag: super::driver::StdTag,
+        cx: &WriteCx<'s>,
+        out: &mut Flat<'s>,
+    ) {
+        let w = PhrasedWrite::<E> {
+            row: e,
+            value: std::marker::PhantomData,
+        };
+        let extra = cx.tables.phrased.extra(at);
+        super::driver::write_row_flat(&w, extra, tag, cx, out, None);
+    }
+
+    fn write_one<'s>(
+        o: &Self::One,
+        tag: super::driver::StdTag,
+        cx: &WriteCx<'s>,
+        out: &mut Flat<'s>,
+    ) {
+        if let Some(e) = cx.tables.phrased.rows.get(o.get() as usize) {
+            Self::write_elem(e, o.get(), tag, cx, out);
+        }
+    }
+
+    fn load_elem(e: &PhrasedRow, at: u32, t: &Tables) -> Self {
+        Self {
+            value: enum_from_code(e.value, t),
+            phrase: e.phrase.map(Text::from_span),
+            extra: super::node::load_extra(t.phrased.extra(at), t),
+        }
+    }
+
+    fn load_one(o: Self::One, t: &Tables) -> Self {
+        t.phrased.rows.get(o.get() as usize).map_or_else(
+            || Phrased::new(E::default()),
+            |e| Self::load_elem(e, o.get(), t),
+        )
+    }
+
+    fn store_elem(&self, at: u32, cx: &mut StoreCx<'_>) -> PhrasedRow {
+        let row = PhrasedRow {
+            value: enum_to_code(&self.value, cx),
+            phrase: self.phrase.as_ref().map(|p| p.to_span(cx.store)),
+        };
+        let extra = super::node::store_extra(&self.extra, cx);
+        if !extra.is_empty() {
+            cx.tables.phrased.set_extra(at, extra);
+        }
+        row
+    }
+
+    fn store_one(&self, cx: &mut StoreCx<'_>) -> Self::One {
+        super::table::store_one_row(self, cx)
+    }
+
+    fn each_elem(_e: &PhrasedRow, at: u32, t: &Tables, f: &mut dyn FnMut(super::XrefId)) {
+        super::node::each_extra(t.phrased.extra(at), t, f);
+    }
+
+    fn each_one(o: Self::One, t: &Tables, f: &mut dyn FnMut(super::XrefId)) {
+        super::node::each_extra(t.phrased.extra(o.get()), t, f);
+    }
+
+    fn copy_elem(e: &PhrasedRow, at: u32, cx: &mut CopyCx<'_>, to: u32) -> PhrasedRow {
+        let row = PhrasedRow {
+            value: e.value.map(|c| cx.code(c)),
+            phrase: cx.opt_span(e.phrase),
+        };
+        let extra = cx.from.phrased.extra(at);
+        if !extra.is_empty() {
+            let copied = super::node::copy_extra(extra, cx);
+            cx.to.phrased.set_extra(to, copied);
+        }
+        row
+    }
+
+    fn copy_one(o: Self::One, cx: &mut CopyCx<'_>) -> Self::One {
+        super::table::copy_one_row::<Self>(o, cx)
+    }
+
+    fn view_elem<'a>(e: &'a PhrasedRow, at: u32, data: &'a super::Dataset) -> Self::View<'a> {
+        super::table::View::new(data, e, at)
+    }
+
+    fn view_one(o: Self::One, data: &super::Dataset) -> Self::View<'_> {
+        super::table::view_one_row::<Self>(o, data)
+    }
+}
+
+/// The views of a value with its phrase, for each enumeration.
+macro_rules! phrased_view {
+    ($($e:ty),* $(,)?) => {$(
+        impl<'a> super::table::View<'a, Phrased<$e>> {
+            /// The value.
+            #[must_use]
+            pub fn value(self) -> $e {
+                enum_from_code(self.row.value, self.tables())
+            }
+
+            /// The value in words (7.x).
+            #[must_use]
+            pub fn phrase(self) -> Option<super::TextRef<'a>> {
+                self.row
+                    .phrase
+                    .map(|p| super::TextRef::new(self.store(), p))
+            }
+
+            /// The substructures it keeps untyped.
+            #[must_use]
+            pub fn extra(self) -> super::Items<'a, super::Node> {
+                let list = self.tables().phrased.extra(self.at);
+                super::Items::new(self.dataset(), list.of(&self.tables().nodes), list.start)
+            }
+        }
+
+        impl std::fmt::Debug for super::table::View<'_, Phrased<$e>> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct("Phrased")
+                    .field("value", &self.value())
+                    .field("phrase", &self.phrase())
+                    .finish()
+            }
+        }
+    )*};
+}
+
+phrased_view!(
+    Pedigree,
+    ChildStatus,
+    Adoption,
+    Role,
+    NameType,
+    Medium,
+    NoteKind
+);

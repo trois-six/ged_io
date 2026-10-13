@@ -17,13 +17,13 @@ gedcom_struct! {
     /// wife (`HUSB`, `WIFE`) or child (`CHIL`), an individual's alias
     /// (`ALIA`). 7.x points to `@VOID@` and says who in the `PHRASE` when
     /// the individual has no record.
-    pub struct IndividualRef {
+    pub struct IndividualRef => IndividualRefRow {
         @payload
         /// The individual.
         individual: Option<XrefId>;
         @detail
         /// What few pointers to an individual have: a phrase.
-        IndividualRefDetail {
+        IndividualRefDetail => IndividualRefDetailRow {
             /// The individual in words (7.x `PHRASE`).
             "PHRASE" => phrase: Option<Text>,
         }
@@ -54,13 +54,13 @@ impl IndividualRef {
 gedcom_struct! {
     /// The family an individual is a child of (`FAMC`): how (`PEDI`), how
     /// sure the link is (`STAT`), with notes.
-    pub struct ChildLink {
+    pub struct ChildLink => ChildLinkRow {
         @payload
         /// The family (7.x: `@VOID@` when unknown).
         family: Option<XrefId>;
         @detail
         /// What fewer links have: a pedigree, a status and notes.
-        ChildLinkDetail {
+        ChildLinkDetail => ChildLinkDetailRow {
             /// How the child belongs to the family (`PEDI`), with a phrase
             /// in 7.x.
             "PEDI" => pedigree: Option<Phrased<Pedigree>>,
@@ -91,7 +91,7 @@ impl ChildLink {
 gedcom_struct! {
     /// A family an individual is a spouse or partner in (`FAMS`), with
     /// notes.
-    pub struct SpouseLink {
+    pub struct SpouseLink => SpouseLinkRow {
         @payload
         /// The family (7.x: `@VOID@` when unknown).
         family: Option<XrefId>;
@@ -119,7 +119,7 @@ impl SpouseLink {
 gedcom_struct! {
     /// An association with another individual (`ASSO`): who, how they are
     /// related (7.x `ROLE`, 5.5.1 `RELA`), with notes and sources.
-    pub struct Association {
+    pub struct Association => AssociationRow {
         @payload
         /// The individual associated (7.x: `@VOID@` when not recorded).
         individual: Option<XrefId>;

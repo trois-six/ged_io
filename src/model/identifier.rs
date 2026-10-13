@@ -6,7 +6,7 @@ use super::text::Text;
 gedcom_struct! {
     /// A user reference number (`REFN`) and its kind (`TYPE`). A record
     /// may have any number of them.
-    pub struct Refn {
+    pub struct Refn => RefnRow {
         @payload
         /// The number.
         value: Text;
@@ -30,7 +30,7 @@ gedcom_struct! {
 gedcom_struct! {
     /// An identifier in an external system (7.x `EXID`) and the URI of the
     /// system that issued it (`TYPE`).
-    pub struct Exid {
+    pub struct Exid => ExidRow {
         @payload
         /// The identifier.
         value: Text;

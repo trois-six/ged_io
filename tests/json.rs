@@ -52,7 +52,7 @@ fn the_snapshot_reads_back() {
     assert_eq!(back.to_structures(), data.to_structures());
     assert_eq!(back.version(), data.version());
     assert_eq!(back.declared_version(), Some("7.0"));
-    let ann = back.find_individual("@I1@").unwrap();
+    let ann = back.find_individual("@I1@").unwrap().into_owned();
     assert_eq!(ann.full_name(&back).as_deref(), Some("Ann Marie Example"));
     assert_eq!(back.families_as_spouse(ann.xref).count(), 1);
     assert!(back.dangling_references().is_empty());
@@ -148,7 +148,8 @@ fn deep_structures_read_back_within_the_nesting_limit() {
     assert!(nesting(&json) < 16, "{}", nesting(&json));
     let back: Dataset = serde_json::from_str(&json).unwrap();
     assert!(back.to_structures() == data.to_structures());
-    let note = &back.find_individual("@I1@").unwrap().notes[0];
+    let note_record = back.find_individual("@I1@").unwrap().into_owned();
+    let note = &note_record.notes[0];
     assert_eq!(note.detail().citations.len(), 1);
     // A list jumping a depth or a level is refused.
     for json in [

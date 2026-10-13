@@ -77,7 +77,7 @@ fn bench_lookups(c: &mut Criterion) {
         .individuals()
         .iter()
         .step_by(400)
-        .filter_map(|i| i.xref)
+        .filter_map(|i| i.xref())
         .map(|x| data.store().xref(x).to_string())
         .collect();
     group.bench_function("linear-50", |b| {

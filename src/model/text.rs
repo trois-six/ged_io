@@ -1,6 +1,6 @@
 //! The shared text store of a dataset and the compact handles the model
-//! keeps into it: [`Text`] for payloads, [`XrefId`] for identifiers and
-//! pointers, [`TagId`] for the tags of [`Node`](super::Node)s.
+//! keeps into it: [`Text`] and [`TextRef`] for payloads, [`XrefId`] for
+//! identifiers and pointers, [`TagId`] for the tags of [`Node`](super::Node)s.
 
 use std::borrow::Cow;
 use std::fmt;
@@ -12,28 +12,29 @@ use crate::writer::{special_bytes, LINE_FEED};
 
 /// Text of the model: a payload, a value, a phrase.
 ///
-/// Read from a file, a text points into the decoded input that the
-/// dataset's [`Store`] keeps, and costs 16 bytes and no allocation: a span
-/// (32-bit offset and length) of the input, or, when reading rewrote it
+/// Read from a file, a text points into the text that the dataset's
+/// [`Store`] keeps, and costs 16 bytes and no allocation: a span (32-bit
+/// offset and length) of the store's text, or, when reading rewrote it
 /// (continuation lines joined, `@@` unescaped), a run of the store's
-/// pieces — spans of the input, each after a newline or not — so that
+/// pieces — spans of its text, each after a newline or not — so that
 /// nothing is copied. Made by a program ([`Text::new`], `From<&str>`,
-/// `From<String>`), it owns its characters, and [`Text::make_owned`] turns
-/// a text read into an owned copy before an edit.
+/// `From<String>`), it owns its characters until it is stored in a
+/// dataset, which copies them into its store.
 ///
 /// A text read means nothing without its store: [`Text::to_str`] takes the
 /// [`Store`] (or anything that holds one, such as a
 /// [`Dataset`](super::Dataset)), and borrows its characters unless they
 /// are joined from several pieces; [`Text::chunks`] gives them without a
-/// copy. Equality compares the representations: two texts of different
-/// stores with the same characters differ. An empty text stands for an
-/// absent payload.
+/// copy. The texts of a dataset's views are [`TextRef`]s, which carry
+/// their store. Equality compares the representations: two texts of
+/// different stores with the same characters differ. An empty text stands
+/// for an absent payload.
 ///
 /// ```rust
 /// use ged_io::model::{Dataset, Text};
 ///
 /// let data = Dataset::parse("0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @N1@ SNOTE Shared\n1 CONT text\n0 TRLR\n");
-/// let text = &data.notes()[0].text;
+/// let text = data.notes().first().unwrap().text().to_text();
 /// assert_eq!(text.to_str(&data), "Shared\ntext");
 /// assert_eq!(text.chunks(&data).collect::<Vec<_>>(), ["Shared", "\n", "text"]);
 /// assert_eq!(Text::from("Shared").to_str(&data), "Shared");
@@ -44,12 +45,14 @@ pub struct Text(Repr);
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum Repr {
-    /// A span of the decoded input, with the [`special_bytes`] of its
+    /// A span of the store's text, with the [`special_bytes`] of its
     /// characters.
     Input { start: u32, len: u32, special: u8 },
     /// `count` pieces of the store, from `start`, with the
     /// [`special_bytes`] of the characters they join.
     Pieces { start: u32, count: u32, special: u8 },
+    /// A text the store keeps whole, past what 32-bit offsets reach.
+    Big { index: u32, special: u8 },
     /// Characters of its own. Boxed twice so that a text stays two words
     /// with a spare niche: `Option<Text>` is 16 bytes too.
     Owned(Box<Owned>),
@@ -90,110 +93,41 @@ impl Text {
         }
     }
 
-    /// A span of the decoded input, or an owned copy when the offsets do
-    /// not fit in 32 bits.
-    pub(crate) fn input(input: &str, start: usize, len: usize) -> Self {
-        match (u32::try_from(start), u32::try_from(len)) {
-            (Ok(start), Ok(len)) if len > 0 => Self(Repr::Input {
-                start,
-                len,
-                special: special_bytes(span(input, start, len)),
-            }),
-            _ if len == 0 => Self::default(),
-            _ => Self::new(input.get(start..start + len).unwrap_or_default()),
-        }
-    }
-
-    /// The text made of `pieces[at..]`, which the caller just pushed: a
-    /// plain span when there is one piece without a newline (it is then
-    /// taken back), nothing when there is none.
-    pub(crate) fn from_pieces(input: &str, pieces: &mut Vec<TextPiece>, at: usize) -> Self {
-        match pieces.get(at..) {
-            None | Some([]) => Self::default(),
-            Some(&[piece]) if !piece.newline() => {
-                pieces.truncate(at);
-                Self::input(input, piece.start() as usize, piece.len() as usize)
-            }
-            Some(run) => {
-                if let (Ok(start), Ok(count)) = (u32::try_from(at), u32::try_from(run.len())) {
-                    let special = run.iter().fold(0, |f, p| {
-                        let newline = if p.newline() { LINE_FEED } else { 0 };
-                        f | newline | special_bytes(span(input, p.start(), p.len()))
-                    });
-                    Self(Repr::Pieces {
-                        start,
-                        count,
-                        special,
-                    })
-                } else {
-                    let text = join(input, run);
-                    pieces.truncate(at);
-                    Self::new(text)
-                }
-            }
-        }
-    }
-
     /// The characters, read from `store` when this text points into it:
     /// borrowed, unless they are joined from several pieces.
     #[must_use]
     pub fn to_str<'a, S: AsRef<Store> + ?Sized>(&'a self, store: &'a S) -> Cow<'a, str> {
         let store = store.as_ref();
-        match &self.0 {
-            Repr::Input { start, len, .. } => Cow::Borrowed(span(&store.input, *start, *len)),
-            Repr::Owned(owned) => Cow::Borrowed(&owned.0),
-            Repr::Pieces { .. } => Cow::Owned(join(&store.input, self.pieces(store))),
+        match (&self.0, self.raw()) {
+            (Repr::Owned(owned), _) => Cow::Borrowed(&owned.0),
+            (_, Some((kind, at, len))) => store.raw_str(kind, at, len),
+            (_, None) => Cow::Borrowed(""),
         }
     }
 
-    /// The characters in order, without a copy: the spans of the input and
-    /// the newlines between them (a text of one span is one chunk).
+    /// The characters in order, without a copy: the spans of the store's
+    /// text and the newlines between them (a text of one span is one
+    /// chunk).
     pub fn chunks<'a, S: AsRef<Store> + ?Sized>(
         &'a self,
         store: &'a S,
     ) -> impl Iterator<Item = &'a str> + 'a {
         let store = store.as_ref();
-        let (single, pieces): (Option<&str>, &[TextPiece]) = match &self.0 {
-            Repr::Input { start, len, .. } => (Some(span(&store.input, *start, *len)), &[]),
-            Repr::Owned(owned) => (Some(&owned.0), &[]),
-            Repr::Pieces { .. } => (None, self.pieces(store)),
+        let owned = match &self.0 {
+            Repr::Owned(owned) => Some(&*owned.0),
+            _ => None,
         };
-        single
-            .filter(|s| !s.is_empty())
-            .into_iter()
-            .chain(pieces.iter().flat_map(move |p| {
-                let text = span(&store.input, p.start(), p.len());
-                p.newline()
-                    .then_some("\n")
-                    .into_iter()
-                    .chain(Some(text).filter(|t| !t.is_empty()))
-            }))
+        let raw = self.raw();
+        owned.filter(|s| !s.is_empty()).into_iter().chain(
+            raw.into_iter()
+                .flat_map(move |(kind, at, len)| store.raw_chunks(kind, at, len)),
+        )
     }
 
     /// Whether the characters are `other`, without a copy.
     #[must_use]
     pub fn eq_str<S: AsRef<Store> + ?Sized>(&self, store: &S, other: &str) -> bool {
-        let mut rest = other;
-        for chunk in self.chunks(store) {
-            match rest.strip_prefix(chunk) {
-                Some(r) => rest = r,
-                None => return false,
-            }
-        }
-        rest.is_empty()
-    }
-
-    fn pieces<'a>(&self, store: &'a Store) -> &'a [TextPiece] {
-        match &self.0 {
-            Repr::Pieces { start, count, .. } => {
-                let start = *start as usize;
-                store
-                    .pieces
-                    .get(start..start.saturating_add(*count as usize))
-                    .unwrap_or_default()
-            }
-            _ => &[],
-        }
+        eq_chunks(self.chunks(store), other)
     }
 
     /// The characters when this text owns them; `None` for a text read.
@@ -211,7 +145,9 @@ impl Text {
     #[inline]
     pub(crate) fn special(&self) -> u8 {
         let bits = match &self.0 {
-            Repr::Input { special, .. } | Repr::Pieces { special, .. } => *special,
+            Repr::Input { special, .. }
+            | Repr::Pieces { special, .. }
+            | Repr::Big { special, .. } => *special,
             Repr::Owned(owned) => owned.1,
         };
         bits & !(SIMPLE_DATE | EXACT_DATE)
@@ -223,25 +159,8 @@ impl Text {
     pub(crate) fn valid_as(&self) -> u8 {
         match &self.0 {
             Repr::Input { special, .. } => *special & (SIMPLE_DATE | EXACT_DATE),
-            Repr::Pieces { .. } | Repr::Owned(_) => 0,
+            _ => 0,
         }
-    }
-
-    /// A text of the input read as a date payload (of a `DATE`
-    /// structure): its [`Text::valid_as`] found.
-    pub(crate) fn input_date(input: &str, start: usize, len: usize) -> Self {
-        let mut text = Self::input(input, start, len);
-        if let Repr::Input { special, .. } = &mut text.0 {
-            let date = input
-                .get(start..start.saturating_add(len))
-                .unwrap_or_default();
-            if crate::spec::is_simple_date(date, true, false) {
-                *special |= SIMPLE_DATE | EXACT_DATE;
-            } else if crate::spec::is_simple_date(date, false, false) {
-                *special |= SIMPLE_DATE;
-            }
-        }
-        text
     }
 
     /// Whether the text is empty (an absent payload).
@@ -249,8 +168,8 @@ impl Text {
     pub fn is_empty(&self) -> bool {
         match &self.0 {
             Repr::Input { len, .. } => *len == 0,
-            // Pieces are only made of a non-empty text.
-            Repr::Pieces { .. } => false,
+            // Pieces and big texts are only made of a non-empty text.
+            Repr::Pieces { .. } | Repr::Big { .. } => false,
             Repr::Owned(owned) => owned.0.is_empty(),
         }
     }
@@ -268,6 +187,101 @@ impl Text {
             *self = Self::new(self.to_str(store));
         }
     }
+
+    /// The span of a text that points into a store; `None` for an owned
+    /// text.
+    pub(crate) fn as_span(&self) -> Option<Span> {
+        match &self.0 {
+            Repr::Input {
+                start,
+                len,
+                special,
+            } if *len <= Span::MAX_LEN => Some(Span::new(Span::INPUT, *start, *len, *special)),
+            Repr::Pieces {
+                start,
+                count,
+                special,
+            } if *count <= Span::MAX_LEN => Some(Span::new(Span::PIECES, *start, *count, *special)),
+            Repr::Big { index, special } => Some(Span::new(Span::BIG, *index, 0, *special)),
+            _ => None,
+        }
+    }
+
+    /// The text of a span of a store: no copy.
+    #[inline]
+    pub(crate) fn from_span(span: Span) -> Self {
+        let special = span.special_all();
+        Self(match span.kind() {
+            Span::PIECES => Repr::Pieces {
+                start: span.at,
+                count: span.len_field(),
+                special,
+            },
+            Span::BIG => Repr::Big {
+                index: span.at,
+                special,
+            },
+            // A pointer is no text: an empty one stands for it.
+            Span::POINTER => Repr::default(),
+            _ => Repr::Input {
+                start: span.at,
+                len: span.len_field(),
+                special,
+            },
+        })
+    }
+
+    /// What a text that points into a store points to: the kind of span,
+    /// where and how long; `None` for an owned text.
+    fn raw(&self) -> Option<(u32, u32, u32)> {
+        match &self.0 {
+            Repr::Input { start, len, .. } => Some((Span::INPUT, *start, *len)),
+            Repr::Pieces { start, count, .. } => Some((Span::PIECES, *start, *count)),
+            Repr::Big { index, .. } => Some((Span::BIG, *index, 0)),
+            Repr::Owned(_) => None,
+        }
+    }
+
+    /// The text as a span of `store`: its own when it points into the
+    /// store; an owned text's characters are copied into the store.
+    pub(crate) fn to_span(&self, store: &mut Store) -> Span {
+        match &self.0 {
+            Repr::Owned(owned) => store.push_text(&owned.0, owned.1),
+            Repr::Input {
+                start,
+                len,
+                special,
+            } if *len > Span::MAX_LEN => store.long_span(*start, *len, *special),
+            Repr::Input {
+                start,
+                len,
+                special,
+            } => Span::new(Span::INPUT, *start, *len, *special),
+            Repr::Pieces { count, .. } if *count > Span::MAX_LEN => {
+                let text = self.to_str(store).into_owned();
+                let special = self.special();
+                store.push_big(text.into(), special)
+            }
+            Repr::Pieces {
+                start,
+                count,
+                special,
+            } => Span::new(Span::PIECES, *start, *count, *special),
+            Repr::Big { index, special } => Span::new(Span::BIG, *index, 0, *special),
+        }
+    }
+}
+
+/// Whether `chunks` joined are `other`, without a copy.
+fn eq_chunks<'a>(chunks: impl Iterator<Item = &'a str>, other: &str) -> bool {
+    let mut rest = other;
+    for chunk in chunks {
+        match rest.strip_prefix(chunk) {
+            Some(r) => rest = r,
+            None => return false,
+        }
+    }
+    rest.is_empty()
 }
 
 fn span(buffer: &str, start: u32, len: u32) -> &str {
@@ -289,24 +303,12 @@ fn join(input: &str, pieces: &[TextPiece]) -> String {
     out
 }
 
-impl super::relocate::Relocate for Text {
-    fn relocate(&mut self, r: &mut super::relocate::Relocation<'_>) {
-        match (&mut self.0, r.bases) {
-            (Repr::Owned(_) | Repr::Input { len: 0, .. }, _) => {}
-            (Repr::Input { start, .. }, Some((input, _))) => *start += input,
-            (Repr::Pieces { start, .. }, Some((_, pieces))) => *start += pieces,
-            (Repr::Input { .. } | Repr::Pieces { .. }, None) => {
-                *self = Self::new(self.to_str(r.from));
-            }
-        }
-    }
-}
-
 impl fmt::Debug for Text {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.0 {
             Repr::Input { start, len, .. } => write!(f, "Text(input {start}+{len})"),
             Repr::Pieces { start, count, .. } => write!(f, "Text(pieces {start}+{count})"),
+            Repr::Big { index, .. } => write!(f, "Text(big {index})"),
             Repr::Owned(owned) => write!(f, "Text({:?})", owned.0),
         }
     }
@@ -336,6 +338,302 @@ impl From<Cow<'_, str>> for Text {
     }
 }
 
+impl From<TextRef<'_>> for Text {
+    fn from(text: TextRef<'_>) -> Self {
+        text.to_text()
+    }
+}
+
+/// A text of a dataset's tables: 8 bytes, which a [`Store`] resolves.
+///
+/// The first word is an offset into the store's text, the index of the
+/// first of its pieces, the index of a big text, or a pointer's id (for
+/// a payload that is a pointer or a text). The second holds the kind (3
+/// bits, never zero, so that an `Option<Span>` is 8 bytes too), the
+/// [`special_bytes`] and date bits (8 bits) and the length or the number
+/// of pieces (21 bits): a longer span is one piece.
+#[doc(hidden)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Span {
+    at: u32,
+    meta: NonZeroU32,
+}
+
+impl Default for Span {
+    fn default() -> Self {
+        Self::EMPTY
+    }
+}
+
+impl Span {
+    pub(crate) const INPUT: u32 = 1;
+    pub(crate) const PIECES: u32 = 2;
+    pub(crate) const BIG: u32 = 3;
+    pub(crate) const POINTER: u32 = 4;
+    const KIND_SHIFT: u32 = 29;
+    const SPECIAL_SHIFT: u32 = 21;
+    /// The longest span, and the most pieces, a span holds.
+    pub(crate) const MAX_LEN: u32 = (1 << 21) - 1;
+
+    /// An empty text.
+    pub(crate) const EMPTY: Span = Span {
+        at: 0,
+        meta: match NonZeroU32::new(Self::INPUT << Self::KIND_SHIFT) {
+            Some(m) => m,
+            None => NonZeroU32::MIN,
+        },
+    };
+
+    #[inline]
+    fn new(kind: u32, at: u32, len: u32, special: u8) -> Self {
+        let meta = (kind << Self::KIND_SHIFT)
+            | (u32::from(special) << Self::SPECIAL_SHIFT)
+            | (len & Self::MAX_LEN);
+        Self {
+            at,
+            meta: NonZeroU32::new(meta).unwrap_or(NonZeroU32::MIN),
+        }
+    }
+
+    /// A span of `input`, which the caller knows to be at most
+    /// [`Span::MAX_LEN`] long and within 32 bits, with its special bytes.
+    #[inline]
+    pub(crate) fn of_input(input: &str, start: u32, len: u32) -> Self {
+        if len == 0 {
+            return Self::EMPTY;
+        }
+        Self::new(
+            Self::INPUT,
+            start,
+            len,
+            special_bytes(span(input, start, len)),
+        )
+    }
+
+    /// A span of `count` pieces from `start`, which the caller knows to be
+    /// at most [`Span::MAX_LEN`].
+    #[inline]
+    pub(crate) fn of_pieces(start: u32, count: u32, special: u8) -> Self {
+        Self::new(Self::PIECES, start, count, special)
+    }
+
+    /// A big text, kept whole by the store at `index`.
+    #[inline]
+    pub(crate) fn big(index: u32, special: u8) -> Self {
+        Self::new(Self::BIG, index, 0, special)
+    }
+
+    /// A pointer held where a text may be (a citation's source, a note's
+    /// content).
+    #[inline]
+    pub(crate) fn pointer(id: XrefId) -> Self {
+        Self::new(Self::POINTER, id.0.get(), 0, 0)
+    }
+
+    /// The pointer, when the span holds one.
+    #[inline]
+    pub(crate) fn as_pointer(self) -> Option<XrefId> {
+        (self.kind() == Self::POINTER)
+            .then(|| NonZeroU32::new(self.at).map(XrefId))
+            .flatten()
+    }
+
+    #[inline]
+    pub(crate) fn kind(self) -> u32 {
+        self.meta.get() >> Self::KIND_SHIFT
+    }
+
+    #[inline]
+    fn len_field(self) -> u32 {
+        self.meta.get() & Self::MAX_LEN
+    }
+
+    /// The special bytes and the date bits.
+    #[inline]
+    fn special_all(self) -> u8 {
+        #[allow(clippy::cast_possible_truncation)] // Eight bits, by construction.
+        let bits = (self.meta.get() >> Self::SPECIAL_SHIFT) as u8;
+        bits
+    }
+
+    /// The [`special_bytes`] of the characters.
+    #[inline]
+    pub(crate) fn special(self) -> u8 {
+        self.special_all() & !(SIMPLE_DATE | EXACT_DATE)
+    }
+
+    /// The span with `bits` added to its date bits.
+    pub(crate) fn with_valid(self, bits: u8) -> Self {
+        Self {
+            meta: NonZeroU32::new(self.meta.get() | (u32::from(bits) << Self::SPECIAL_SHIFT))
+                .unwrap_or(self.meta),
+            ..self
+        }
+    }
+
+    /// Whether the text is empty.
+    #[inline]
+    pub(crate) fn is_empty(self) -> bool {
+        self.kind() == Self::INPUT && self.len_field() == 0
+    }
+
+    /// The span moved by `text` bytes of text and `pieces` pieces, and its
+    /// big text found at `big` on.
+    pub(crate) fn shifted(self, text: u32, pieces: u32, big: u32) -> Self {
+        match self.kind() {
+            Self::INPUT if !self.is_empty() => Self {
+                at: self.at.saturating_add(text),
+                ..self
+            },
+            Self::PIECES => Self {
+                at: self.at.saturating_add(pieces),
+                ..self
+            },
+            Self::BIG => Self {
+                at: self.at.saturating_add(big),
+                ..self
+            },
+            _ => self,
+        }
+    }
+}
+
+impl fmt::Debug for Span {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.kind() {
+            Self::PIECES => write!(f, "Span(pieces {}+{})", self.at, self.len_field()),
+            Self::BIG => write!(f, "Span(big {})", self.at),
+            Self::POINTER => write!(f, "Span(pointer {})", self.at),
+            _ => write!(f, "Span({}+{})", self.at, self.len_field()),
+        }
+    }
+}
+
+/// A text of a dataset, with the store it reads from: what the views of
+/// a [`Dataset`](super::Dataset) give for a text.
+///
+/// It reads its characters without being given the store
+/// ([`TextRef::to_str`], [`TextRef::chunks`]), compares with a `&str`
+/// without a copy, and prints them (`Display`).
+///
+/// ```rust
+/// use ged_io::Dataset;
+///
+/// let data = Dataset::parse("0 HEAD\n0 @I1@ INDI\n1 NAME Ann /Example/\n1 NOTE a\n2 CONT b\n0 TRLR\n");
+/// let ann = data.individuals().first().unwrap();
+/// let name = ann.names().first().unwrap().value();
+/// assert_eq!(name, "Ann /Example/");
+/// assert_eq!(name.to_string(), "Ann /Example/");
+/// let note = ann.notes().first().unwrap().text().unwrap();
+/// assert_eq!(note.to_str(), "a\nb");
+/// ```
+#[derive(Clone, Copy)]
+pub struct TextRef<'a> {
+    store: &'a Store,
+    span: Span,
+}
+
+impl<'a> TextRef<'a> {
+    pub(crate) fn new(store: &'a Store, span: Span) -> Self {
+        Self { store, span }
+    }
+
+    /// The characters: borrowed, unless they are joined from several
+    /// pieces.
+    #[must_use]
+    pub fn to_str(self) -> Cow<'a, str> {
+        self.store.span_str(self.span)
+    }
+
+    /// The characters in order, without a copy (see [`Text::chunks`]).
+    pub fn chunks(self) -> impl Iterator<Item = &'a str> + 'a {
+        self.store.span_chunks(self.span)
+    }
+
+    /// Whether the text is empty (an absent payload).
+    #[must_use]
+    pub fn is_empty(self) -> bool {
+        self.span.is_empty()
+    }
+
+    /// The length in bytes.
+    #[must_use]
+    pub fn len(self) -> usize {
+        self.chunks().map(str::len).sum()
+    }
+
+    /// The text, as a [`Text`] of the same store (no copy).
+    #[must_use]
+    pub fn to_text(self) -> Text {
+        Text::from_span(self.span)
+    }
+
+    /// The store the text reads from.
+    #[must_use]
+    pub fn store(self) -> &'a Store {
+        self.store
+    }
+}
+
+impl fmt::Display for TextRef<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for chunk in self.chunks() {
+            f.write_str(chunk)?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for TextRef<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&*self.to_str(), f)
+    }
+}
+
+impl PartialEq<str> for TextRef<'_> {
+    fn eq(&self, other: &str) -> bool {
+        eq_chunks(self.chunks(), other)
+    }
+}
+
+impl PartialEq<&str> for TextRef<'_> {
+    fn eq(&self, other: &&str) -> bool {
+        eq_chunks(self.chunks(), other)
+    }
+}
+
+impl PartialEq<String> for TextRef<'_> {
+    fn eq(&self, other: &String) -> bool {
+        eq_chunks(self.chunks(), other)
+    }
+}
+
+impl PartialEq<TextRef<'_>> for str {
+    fn eq(&self, other: &TextRef<'_>) -> bool {
+        other == self
+    }
+}
+
+impl PartialEq<TextRef<'_>> for &str {
+    fn eq(&self, other: &TextRef<'_>) -> bool {
+        other == *self
+    }
+}
+
+impl PartialEq for TextRef<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.to_str() == other.to_str()
+    }
+}
+
+impl Eq for TextRef<'_> {}
+
+impl AsRef<Store> for TextRef<'_> {
+    fn as_ref(&self) -> &Store {
+        self.store
+    }
+}
+
 /// A cross-reference identifier of a dataset (`@I1@`), interned: the
 /// identifier of a record and every pointer to it share one 32-bit id.
 ///
@@ -346,6 +644,10 @@ impl From<Cow<'_, str>> for Text {
 pub struct XrefId(NonZeroU32);
 
 impl XrefId {
+    /// An id no identifier has: what a pointer of a table reads as when
+    /// it holds none (never, but for a row no reader made).
+    pub(crate) const DANGLING: Self = Self(NonZeroU32::MAX);
+
     /// The position in the table of identifiers.
     pub(crate) fn index(self) -> usize {
         self.0.get() as usize - 1
@@ -403,7 +705,8 @@ impl TagId {
 /// The texts are copied together into one buffer, ended by a 32-bit offset
 /// each: a writer resolving every pointer reads them there, not across the
 /// whole input. The index has 8 bytes a slot (the id and 32 bits of its
-/// text's hash) and is kept at most three quarters full.
+/// text's hash) and is kept at most three quarters full; a table of a few
+/// identifiers has none.
 #[derive(Clone, Default)]
 pub(crate) struct XrefTable {
     /// The texts, one after the other.
@@ -418,6 +721,10 @@ pub(crate) struct XrefTable {
     slots: Vec<u64>,
     /// The identifiers renamed ([`XrefTable::rename`]), when any is.
     renamed: Option<Box<Renamed>>,
+    /// Up to how many identifiers the table has no index, and is searched
+    /// in order: a few for a record of a stream ([`Store::of_record`]),
+    /// none for a file.
+    unindexed: u8,
 }
 
 /// The texts [`XrefTable::rename`] gave identifiers.
@@ -455,6 +762,10 @@ fn hash(text: &str) -> u32 {
     let h = h.finish() as u32;
     h
 }
+
+/// Up to this many identifiers, the table of a record of a stream has no
+/// index ([`XrefTable::unindexed`]): a record has a few.
+const UNINDEXED: u8 = 4;
 
 impl XrefTable {
     /// The text of the identifier at `index`.
@@ -512,15 +823,27 @@ impl XrefTable {
 
     fn find(&self, text: &str) -> Option<XrefId> {
         if self.slots.is_empty() {
-            return None;
+            return self.find_in_order(text);
         }
         self.slot(text, hash(text)).1
+    }
+
+    /// The id of `text`, searched in order: a table without an index.
+    fn find_in_order(&self, text: &str) -> Option<XrefId> {
+        (0..self.ends.len())
+            .find(|&i| self.read_name(i) == Some(text))
+            .and_then(XrefId::from_index)
     }
 
     /// The id of `text`; a new one when it has none. `None` when four
     /// billion identifiers, or 4 GiB of them, are taken.
     pub(crate) fn intern(&mut self, text: &str) -> Option<XrefId> {
-        if (self.ends.len() + 1) * 4 > self.slots.len() * 3 {
+        if self.slots.is_empty() {
+            if self.ends.len() < usize::from(self.unindexed) {
+                return self.find_in_order(text).or_else(|| self.push(text));
+            }
+            self.index();
+        } else if (self.ends.len() + 1) * 4 > self.slots.len() * 3 {
             self.grow();
         }
         let hash = hash(text);
@@ -528,15 +851,44 @@ impl XrefTable {
         if found.is_some() {
             return found;
         }
+        let id = self.push(text)?;
+        if let Some(slot) = self.slots.get_mut(at) {
+            *slot = (u64::from(hash) << 32) | u64::from(id.0.get());
+        }
+        Some(id)
+    }
+
+    /// Gives `text` a new id, not indexed.
+    fn push(&mut self, text: &str) -> Option<XrefId> {
         let id = XrefId::from_index(self.ends.len())?;
         let end = u32::try_from(self.names.len() + text.len()).ok()?;
         self.names.push_str(text);
         self.ends.push(end);
         self.valid.push(validity(text));
-        if let Some(slot) = self.slots.get_mut(at) {
-            *slot = (u64::from(hash) << 32) | u64::from(id.0.get());
-        }
         Some(id)
+    }
+
+    /// Indexes the ids of a table that has no index yet.
+    fn index(&mut self) {
+        let mut len = 64;
+        while (self.ends.len() + 1) * 4 > len * 3 {
+            len *= 2;
+        }
+        self.slots = vec![0; len];
+        let mask = len - 1;
+        for index in 0..self.ends.len() {
+            let (Some(name), Some(id)) = (self.read_name(index), XrefId::from_index(index)) else {
+                continue;
+            };
+            let hash = hash(name);
+            let mut i = hash as usize & mask;
+            while self.slots.get(i).is_some_and(|&t| t != 0) {
+                i = (i + 1) & mask;
+            }
+            if let Some(slot) = self.slots.get_mut(i) {
+                *slot = (u64::from(hash) << 32) | u64::from(id.0.get());
+            }
+        }
     }
 
     /// Gives id `id` the text `text`, which must differ from its own: the
@@ -548,6 +900,9 @@ impl XrefTable {
         let Some(old) = self.name(id.index()).map(str::to_owned) else {
             return false;
         };
+        if self.slots.is_empty() {
+            self.index();
+        }
         let renamed = self.renamed.get_or_insert_with(Box::default);
         let (Ok(start), Ok(end)) = (
             u32::try_from(renamed.names.len()),
@@ -656,41 +1011,150 @@ impl XrefTable {
 
 /// The text a dataset was read from, and the tables its model points into.
 ///
-/// It holds the decoded input, the pieces of the texts reading rewrote
-/// (8 bytes each, instead of a copy of their characters), the identifiers
-/// ([`XrefId`]) and the tags that are not standard ([`TagId`]). Every
-/// [`Text`] and id of a dataset resolves against its store.
+/// It holds the decoded input, followed by the texts stored since (owned
+/// texts a program set, the texts of records moved in from other stores),
+/// the pieces of the texts reading rewrote (8 bytes each, instead of a
+/// copy of their characters), the identifiers ([`XrefId`]) and the tags
+/// that are not standard ([`TagId`]). Every text and id of a dataset
+/// resolves against its store.
 #[derive(Clone, Default)]
 pub struct Store {
-    input: String,
+    /// The decoded input, then the texts appended.
+    text: String,
     pieces: Vec<TextPiece>,
     xrefs: XrefTable,
     tags: Vec<Box<str>>,
+    /// Texts past what 32-bit offsets reach, whole.
+    big: Vec<Box<str>>,
+}
+
+/// The parts of a [`Store`] that reading fills: the text read (borrowed),
+/// the pieces, the identifiers and the big texts.
+pub(crate) struct StoreParts<'s> {
+    pub(crate) text: &'s str,
+    pub(crate) pieces: &'s mut Vec<TextPiece>,
+    pub(crate) xrefs: &'s mut XrefTable,
+    pub(crate) big: &'s mut Vec<Box<str>>,
+}
+
+impl StoreParts<'_> {
+    /// A span of the text from `start` (an offset that may not fit in 32
+    /// bits), `len` long: a span, one piece when it is long, or a big text
+    /// past 32 bits.
+    pub(crate) fn span(&mut self, start: usize, len: usize) -> Span {
+        if len == 0 {
+            return Span::EMPTY;
+        }
+        match (u32::try_from(start), u32::try_from(len)) {
+            (Ok(s), Ok(l)) if s.checked_add(l).is_some() => {
+                if l <= Span::MAX_LEN {
+                    Span::of_input(self.text, s, l)
+                } else {
+                    let special = special_bytes(span(self.text, s, l));
+                    long_piece(self.pieces, self.big, self.text, s, l, special)
+                }
+            }
+            _ => {
+                let text = self
+                    .text
+                    .get(start..start.saturating_add(len))
+                    .unwrap_or_default();
+                push_big(self.big, text.into(), special_bytes(text))
+            }
+        }
+    }
+
+    /// The text made of `pieces[at..]`, which the caller just pushed: a
+    /// plain span when there is one piece without a newline (it is then
+    /// taken back), nothing when there is none; a big text when they are
+    /// too many.
+    pub(crate) fn pieces_from(&mut self, at: usize) -> Span {
+        match self.pieces.get(at..) {
+            None | Some([]) => Span::EMPTY,
+            Some(&[piece]) if !piece.newline() => {
+                self.pieces.truncate(at);
+                self.span(piece.start() as usize, piece.len() as usize)
+            }
+            Some(run) => {
+                let special = run.iter().fold(0, |f, p| {
+                    let newline = if p.newline() { LINE_FEED } else { 0 };
+                    f | newline | special_bytes(span(self.text, p.start(), p.len()))
+                });
+                match (u32::try_from(at), u32::try_from(run.len())) {
+                    (Ok(start), Ok(count)) if count <= Span::MAX_LEN => {
+                        Span::of_pieces(start, count, special)
+                    }
+                    _ => {
+                        let text = join(self.text, run);
+                        self.pieces.truncate(at);
+                        push_big(self.big, text.into(), special)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A span longer than [`Span::MAX_LEN`]: one piece.
+fn long_piece(
+    pieces: &mut Vec<TextPiece>,
+    big: &mut Vec<Box<str>>,
+    text: &str,
+    start: u32,
+    len: u32,
+    special: u8,
+) -> Span {
+    match u32::try_from(pieces.len()) {
+        Ok(at) if len < (1 << 31) => {
+            pieces.push(TextPiece::new(start, len, false));
+            Span::of_pieces(at, 1, special)
+        }
+        _ => push_big(big, span(text, start, len).into(), special),
+    }
+}
+
+/// A big text, kept whole.
+fn push_big(big: &mut Vec<Box<str>>, text: Box<str>, special: u8) -> Span {
+    let at = u32::try_from(big.len()).unwrap_or(u32::MAX);
+    big.push(text);
+    Span::new(Span::BIG, at, 0, special)
 }
 
 impl Store {
-    pub(crate) fn new(input: String) -> Self {
+    pub(crate) fn new(text: String) -> Self {
         Self {
-            input,
+            text,
             ..Self::default()
         }
     }
 
-    /// The decoded input, which texts point into.
+    /// [`Store::new`] for the text of one record: its few identifiers are
+    /// searched in order, without an index.
+    pub(crate) fn of_record(text: String) -> Self {
+        let mut store = Self::new(text);
+        store.xrefs.unindexed = UNINDEXED;
+        store
+    }
+
+    /// The text, which spans point into.
     #[cfg(test)]
     pub(crate) fn input(&self) -> &str {
-        &self.input
+        &self.text
     }
 
-    /// The size of the decoded input, in bytes.
+    /// The size of the text, in bytes.
     pub(crate) fn input_len(&self) -> usize {
-        self.input.len()
+        self.text.len()
     }
 
-    /// The tables being filled while reading: the input, the pieces and
-    /// the identifiers.
-    pub(crate) fn parts_mut(&mut self) -> (&str, &mut Vec<TextPiece>, &mut XrefTable) {
-        (&self.input, &mut self.pieces, &mut self.xrefs)
+    /// The tables being filled while reading.
+    pub(crate) fn parts_mut(&mut self) -> StoreParts<'_> {
+        StoreParts {
+            text: &self.text,
+            pieces: &mut self.pieces,
+            xrefs: &mut self.xrefs,
+            big: &mut self.big,
+        }
     }
 
     pub(crate) fn set_tags(&mut self, tags: Vec<Box<str>>) {
@@ -702,23 +1166,132 @@ impl Store {
         self.xrefs.shrink();
     }
 
-    /// Appends the input and pieces of `from`, for its texts to move here
-    /// ([`Relocation`](super::relocate::Relocation)): where they start in
-    /// this store's, or `None` when the offsets would pass the 32 bits
-    /// texts hold (nothing is appended then).
-    pub(crate) fn append(&mut self, from: &Store) -> Option<(u32, u32)> {
-        let input = u32::try_from(self.input.len()).ok()?;
+    /// Copies `text`, whose special bytes are `special`, into the store.
+    pub(crate) fn push_text(&mut self, text: &str, special: u8) -> Span {
+        if text.is_empty() {
+            return Span::EMPTY;
+        }
+        let start = self.text.len();
+        match (u32::try_from(start), u32::try_from(text.len())) {
+            (Ok(s), Ok(l)) if s.checked_add(l).is_some() => {
+                self.text.push_str(text);
+                if l <= Span::MAX_LEN {
+                    Span::new(Span::INPUT, s, l, special)
+                } else {
+                    long_piece(&mut self.pieces, &mut self.big, &self.text, s, l, special)
+                }
+            }
+            _ => push_big(&mut self.big, text.into(), special),
+        }
+    }
+
+    /// A span of the store's text longer than [`Span::MAX_LEN`].
+    fn long_span(&mut self, start: u32, len: u32, special: u8) -> Span {
+        long_piece(
+            &mut self.pieces,
+            &mut self.big,
+            &self.text,
+            start,
+            len,
+            special,
+        )
+    }
+
+    /// A big text, kept whole.
+    fn push_big(&mut self, text: Box<str>, special: u8) -> Span {
+        push_big(&mut self.big, text, special)
+    }
+
+    /// The characters of a span: borrowed, unless they are joined from
+    /// several pieces.
+    #[inline]
+    pub(crate) fn span_str(&self, s: Span) -> Cow<'_, str> {
+        // Most spans are of the input, which is borrowed.
+        if s.kind() == Span::INPUT {
+            return Cow::Borrowed(span(&self.text, s.at, s.len_field()));
+        }
+        self.raw_str(s.kind(), s.at, s.len_field())
+    }
+
+    /// The characters of a span of `kind` at `at`, `len` long (the number
+    /// of pieces for pieces).
+    fn raw_str(&self, kind: u32, at: u32, len: u32) -> Cow<'_, str> {
+        match kind {
+            Span::PIECES => {
+                let pieces = self.pieces_at(at, len);
+                match pieces {
+                    [p] if !p.newline() => Cow::Borrowed(span(&self.text, p.start(), p.len())),
+                    _ => Cow::Owned(join(&self.text, pieces)),
+                }
+            }
+            Span::BIG => Cow::Borrowed(self.big.get(at as usize).map_or("", |b| b)),
+            Span::POINTER => Cow::Borrowed(""),
+            _ => Cow::Borrowed(span(&self.text, at, len)),
+        }
+    }
+
+    fn pieces_at(&self, at: u32, count: u32) -> &[TextPiece] {
+        let start = at as usize;
+        self.pieces
+            .get(start..start.saturating_add(count as usize))
+            .unwrap_or_default()
+    }
+
+    /// The characters of a span in order, without a copy.
+    pub(crate) fn span_chunks(&self, s: Span) -> impl Iterator<Item = &str> + '_ {
+        self.raw_chunks(s.kind(), s.at, s.len_field())
+    }
+
+    /// [`Store::span_chunks`] of a span's parts.
+    fn raw_chunks(&self, kind: u32, at: u32, len: u32) -> impl Iterator<Item = &str> + '_ {
+        let (single, pieces): (Option<&str>, &[TextPiece]) = match kind {
+            Span::PIECES => (None, self.pieces_at(at, len)),
+            Span::BIG => (self.big.get(at as usize).map(|b| &**b), &[]),
+            Span::POINTER => (None, &[]),
+            _ => (Some(span(&self.text, at, len)), &[]),
+        };
+        single
+            .filter(|s| !s.is_empty())
+            .into_iter()
+            .chain(pieces.iter().flat_map(move |p| {
+                let text = span(&self.text, p.start(), p.len());
+                p.newline()
+                    .then_some("\n")
+                    .into_iter()
+                    .chain(Some(text).filter(|t| !t.is_empty()))
+            }))
+    }
+
+    /// Appends the text, pieces and big texts of `from`, for its spans to
+    /// move here: how far each starts in this store's (text, pieces, big
+    /// texts), or `None` when the offsets would pass the 32 bits spans
+    /// hold (nothing is appended then).
+    pub(crate) fn append(&mut self, from: &Store) -> Option<(u32, u32, u32)> {
+        let text = u32::try_from(self.text.len()).ok()?;
         let pieces = u32::try_from(self.pieces.len()).ok()?;
-        let end = self.input.len().checked_add(from.input.len())?;
-        if end > (u32::MAX / 2) as usize
+        let big = u32::try_from(self.big.len()).ok()?;
+        let end = self.text.len().checked_add(from.text.len())?;
+        if u32::try_from(end).is_err()
             || u32::try_from(pieces as usize + from.pieces.len()).is_err()
+            || u32::try_from(big as usize + from.big.len()).is_err()
         {
             return None;
         }
-        self.input.push_str(&from.input);
+        self.text.push_str(&from.text);
         self.pieces
-            .extend(from.pieces.iter().map(|p| p.shifted(input)));
-        Some((input, pieces))
+            .extend(from.pieces.iter().map(|p| p.shifted(text)));
+        self.big.extend(from.big.iter().cloned());
+        Some((text, pieces, big))
+    }
+
+    /// A span of `from` copied into this store (when [`Store::append`]
+    /// could not take `from` whole).
+    pub(crate) fn copy_span(&mut self, from: &Store, s: Span) -> Span {
+        if s.kind() == Span::POINTER || s.is_empty() {
+            return s;
+        }
+        let text = from.span_str(s);
+        self.push_text(&text, s.special_all())
     }
 
     /// The text of an identifier, delimiters included: `@I1@`.
@@ -810,17 +1383,18 @@ impl Store {
         TagId(u32::try_from(STANDARD_TAGS.len() + at).unwrap_or(u32::MAX))
     }
 
-    /// Bytes held: the input, the pieces and the tables.
+    /// Bytes held: the text, the pieces and the tables.
     #[must_use]
     pub fn heap_size(&self) -> usize {
-        self.input.capacity()
+        self.text.capacity()
             + self.pieces.capacity() * std::mem::size_of::<TextPiece>()
             + self.xrefs.heap_size()
             + self.tags.iter().map(|t| t.len() + 16).sum::<usize>()
+            + self.big.iter().map(|t| t.len() + 16).sum::<usize>()
     }
 }
 
-/// Equal stores hold the same input, pieces, identifiers (in the same
+/// Equal stores hold the same text, pieces, identifiers (in the same
 /// order) and tags: what their texts and ids resolve to.
 impl PartialEq for Store {
     fn eq(&self, other: &Self) -> bool {
@@ -830,10 +1404,11 @@ impl PartialEq for Store {
             self.xrefs.len() == other.xrefs.len()
                 && (0..self.xrefs.len()).all(|i| self.xrefs.name(i) == other.xrefs.name(i))
         };
-        self.input == other.input
+        self.text == other.text
             && self.pieces == other.pieces
             && same_xrefs
             && self.tags == other.tags
+            && self.big == other.big
     }
 }
 
@@ -846,10 +1421,11 @@ impl AsRef<Store> for Store {
 impl fmt::Debug for Store {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Store")
-            .field("input", &self.input.len())
+            .field("text", &self.text.len())
             .field("pieces", &self.pieces.len())
             .field("xrefs", &self.xrefs.len())
             .field("tags", &self.tags)
+            .field("big", &self.big.len())
             .finish()
     }
 }
@@ -861,48 +1437,96 @@ mod tests {
     #[test]
     fn spans_pieces_owned_and_empty() {
         let mut store = Store::new("0 @I1@ INDI\nab@@cd".into());
-        let t = Text::input(store.input(), 2, 4);
+        let t = Text::from_span(Span::of_input(store.input(), 2, 4));
         assert_eq!(t.to_str(&store), "@I1@");
-        let (_, pieces, _) = store.parts_mut();
-        pieces.extend([
+        let parts = store.parts_mut();
+        parts.pieces.extend([
             TextPiece::new(12, 3, false),
             TextPiece::new(16, 2, false),
             TextPiece::new(7, 4, true),
         ]);
-        let joined = Text(Repr::Pieces {
-            start: 0,
-            count: 3,
-            special: LINE_FEED,
-        });
+        let joined = Text::from_span(Span::of_pieces(0, 3, LINE_FEED));
         assert_eq!(joined.to_str(&store), "ab@cd\nINDI");
         assert_eq!(joined.len(&store), 10);
         assert!(joined.eq_str(&store, "ab@cd\nINDI"));
         assert!(!joined.eq_str(&store, "ab@cd\nIND"));
         assert!(!joined.eq_str(&store, "ab@cd\nINDIX"));
+        let r = TextRef::new(&store, Span::of_pieces(0, 3, LINE_FEED));
+        assert_eq!(r, "ab@cd\nINDI");
+        assert_eq!(r.to_string(), "ab@cd\nINDI");
         let mut copy = joined.clone();
         copy.make_owned(&store);
         assert_eq!(copy.as_owned(), Some("ab@cd\nINDI"));
         assert_eq!(Text::from(""), Text::default());
-        assert!(Text::input("", 0, 0).is_empty());
+        assert!(Text::from_span(Span::EMPTY).is_empty());
         assert_eq!(Text::default().chunks(&store).count(), 0);
+        // An owned text stored is copied into the store's text.
+        let owned = Text::from("new");
+        let span = owned.to_span(&mut store);
+        assert_eq!(store.span_str(span), "new");
+        assert_eq!(Text::from_span(span).to_str(&store), "new");
+    }
+
+    /// A few identifiers are searched in order; more are indexed; both
+    /// find the same ids, before and after a rename.
+    #[test]
+    fn identifiers_found_in_order_then_indexed() {
+        let mut store = Store::of_record(String::new());
+        let names: Vec<String> = (0..40).map(|i| format!("@I{i}@")).collect();
+        let ids: Vec<XrefId> = names
+            .iter()
+            .map(|n| store.intern_xref(n).unwrap())
+            .collect();
+        for (n, id) in names.iter().zip(&ids) {
+            assert_eq!(store.intern_xref(n), Some(*id));
+            assert_eq!(store.find_xref(n), Some(*id));
+            assert_eq!(store.xref(*id), n);
+        }
+        assert_eq!(store.find_xref("@X@"), None);
+        // A rename while the table has no index yet.
+        let mut small = Store::of_record(String::new());
+        let a = small.intern_xref("@A@").unwrap();
+        let b = small.intern_xref("@B@").unwrap();
+        assert!(small.rename_xref(a, "@C@"));
+        assert_eq!(small.find_xref("@C@"), Some(a));
+        assert_eq!(small.find_xref("@A@"), None);
+        assert_eq!(small.find_xref("@B@"), Some(b));
+        assert_eq!(small.intern_xref("@D@").map(XrefId::index), Some(2));
     }
 
     #[test]
     fn a_single_piece_is_a_span() {
         let mut store = Store::new("abcdef".into());
-        let (input, pieces, _) = store.parts_mut();
-        pieces.push(TextPiece::new(1, 3, false));
-        let t = Text::from_pieces(input, pieces, 0);
-        assert!(pieces.is_empty());
-        assert_eq!(
-            t,
-            Text(Repr::Input {
-                start: 1,
-                len: 3,
-                special: 0
-            })
-        );
-        assert_eq!(Text::from_pieces(input, pieces, 0), Text::default());
+        let mut parts = store.parts_mut();
+        parts.pieces.push(TextPiece::new(1, 3, false));
+        let s = parts.pieces_from(0);
+        assert!(parts.pieces.is_empty());
+        assert_eq!(s, Span::of_input("abcdef", 1, 3));
+        assert_eq!(parts.pieces_from(0), Span::EMPTY);
+    }
+
+    #[test]
+    fn long_and_big_texts() {
+        let long = "x".repeat(Span::MAX_LEN as usize + 10);
+        let mut store = Store::new(long.clone());
+        let s = store.parts_mut().span(0, long.len());
+        assert_eq!(s.kind(), Span::PIECES);
+        assert_eq!(store.span_str(s), long);
+        let copied = Text::from(long.as_str()).to_span(&mut store);
+        assert_eq!(store.span_str(copied), long);
+        let big = push_big(&mut store.big, "big".into(), 0);
+        assert_eq!(Text::from_span(big).to_str(&store), "big");
+        assert_eq!(store.span_chunks(big).collect::<Vec<_>>(), ["big"]);
+    }
+
+    #[test]
+    fn pointers_in_spans() {
+        let mut store = Store::default();
+        let id = store.intern_xref("@S1@").unwrap();
+        let s = Span::pointer(id);
+        assert_eq!(s.as_pointer(), Some(id));
+        assert_eq!(Span::EMPTY.as_pointer(), None);
+        assert_eq!(std::mem::size_of::<Option<Span>>(), 8);
     }
 
     #[test]
@@ -923,11 +1547,11 @@ mod tests {
     fn many_identifiers() {
         let text: String = (0..5000).map(|i| format!("@I{i}@")).collect();
         let mut store = Store::new(text.clone());
-        let (_, _, xrefs) = store.parts_mut();
+        let parts = store.parts_mut();
         let mut ids = Vec::new();
         for i in 0..5000 {
             let x = format!("@I{i}@");
-            ids.push(xrefs.intern(&x).unwrap());
+            ids.push(parts.xrefs.intern(&x).unwrap());
         }
         assert_eq!(store.xref_count(), 5000);
         for (i, id) in ids.iter().enumerate() {

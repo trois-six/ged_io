@@ -137,7 +137,8 @@ fn names() {
     let data = Dataset::parse(v7(
         "0 @I1@ INDI\n1 NAME Ann Marie /Example/\n2 TYPE OTHER\n3 PHRASE Stage name\n2 GIVN Ann\n2 GIVN Marie\n2 NICK Annie\n2 TRAN Анна /Пример/\n3 LANG ru\n3 GIVN Анна\n1 NAME /Sample/\n",
     ));
-    let names = &data.find_individual("@I1@").unwrap().names;
+    let names_record = data.find_individual("@I1@").unwrap().into_owned();
+    let names = &names_record.names;
     assert_eq!(names.len(), 2);
     let name = &names[0];
     assert_eq!(name.givens().count(), 2);
@@ -157,7 +158,8 @@ fn names() {
     let data = Dataset::parse(v551(
         "0 @I1@ INDI\n1 NAME Taro /Yamada/\n2 TYPE birth\n2 FONE Taro /Yamada/\n3 TYPE kana\n3 GIVN Taro\n2 ROMN Taro /Yamada/\n3 TYPE romaji\n2 NOTE A name note\n",
     ));
-    let name = &data.find_individual("@I1@").unwrap().names[0];
+    let name_record = data.find_individual("@I1@").unwrap().into_owned();
+    let name = &name_record.names[0];
     assert_eq!(name.detail().kind.as_ref().unwrap().value, NameType::Birth);
     assert_eq!(name.detail().phonetic[0].pieces.len(), 1);
     let out = write(&data);
@@ -174,7 +176,7 @@ fn events_and_attributes() {
     let data = Dataset::parse(v7(
         "0 @I1@ INDI\n1 BIRT\n2 DATE 1 JAN 1900\n2 PLAC Sampleton\n2 AGE 0y\n2 FAMC @F1@\n2 SOUR @S1@\n1 ADOP Y\n2 FAMC @F2@\n3 ADOP BOTH\n4 PHRASE Both guardians\n1 DSCR Brown hair,\n2 CONT green eyes\n2 TYPE Appearance\n1 EVEN\n2 TYPE Apprenticeship\n2 AGNC Sample Guild\n2 CAUS Training\n2 RELI None\n2 ADDR 1 Sample Road\n2 PHON 555-0100\n2 EMAIL a@example.com\n2 RESN CONFIDENTIAL, LOCKED\n2 NOTE An event note\n2 UID 0b0f2b0a-0000-4000-8000-000000000003\n2 SDATE 1910\n1 NO MARR\n2 DATE FROM 1900 TO 1950\n1 OCCU Miller\n0 @F1@ FAM\n0 @F2@ FAM\n0 @S1@ SOUR\n1 TITL Register\n",
     ));
-    let indi = data.find_individual("@I1@").unwrap();
+    let indi = data.find_individual("@I1@").unwrap().into_owned();
     let events = &indi.events;
     assert_eq!(
         events.iter().map(|e| e.kind.clone()).collect::<Vec<_>>(),
@@ -238,7 +240,8 @@ fn events_and_attributes() {
     let data = Dataset::parse(
         "0 HEAD\n1 GEDC\n2 VERS 7.1\n0 @I1@ INDI\n1 BIRT\n2 KIND BORN_LIVE\n0 TRLR\n",
     );
-    let birth = &data.find_individual("@I1@").unwrap().events[0];
+    let birth_record = data.find_individual("@I1@").unwrap().into_owned();
+    let birth = &birth_record.events[0];
     assert_eq!(birth.detail().birth_kinds, [BirthKind::BornLive]);
 }
 
@@ -251,7 +254,7 @@ fn families() {
     let data = Dataset::parse(v7(
         "0 @F1@ FAM\n1 HUSB @VOID@\n2 PHRASE Unknown father\n1 HUSB @I3@\n1 WIFE @I2@\n1 CHIL @I1@\n2 PHRASE Eldest\n2 _FREL Natural\n1 CHIL @VOID@\n2 PHRASE Stillborn child\n1 MARR\n2 DATE 1 JAN 1890\n2 HUSB\n3 AGE 25y\n2 WIFE\n3 AGE 22y\n1 NCHI 2\n2 HUSB\n3 AGE 40y\n2 NOTE Two children\n1 FACT Shared farm\n2 TYPE Property\n1 SLGS\n2 STAT COMPLETED\n3 DATE 2 FEB 2000\n0 @I1@ INDI\n0 @I2@ INDI\n0 @I3@ INDI\n",
     ));
-    let fam = data.find_family("@F1@").unwrap();
+    let fam = data.find_family("@F1@").unwrap().into_owned();
     let husband = fam.husband.as_ref().unwrap();
     assert_eq!(data.store().xref(husband.individual.unwrap()), "@VOID@");
     assert_eq!(
@@ -301,7 +304,7 @@ fn families() {
     let data = Dataset::parse(v551(
         "0 @F1@ FAM\n1 HUSB @I1@\n1 CHIL @I2@\n2 SLGC\n3 DATE 1 JAN 1960\n3 TEMP SLAKE\n1 NCHI 3\n0 @I1@ INDI\n0 @I2@ INDI\n",
     ));
-    let fam = data.find_family("@F1@").unwrap();
+    let fam = data.find_family("@F1@").unwrap().into_owned();
     assert_eq!(fam.children[0].extra.len(), 1, "SLGC under CHIL");
     assert_eq!(fam.events[0].kind, EventKind::ChildrenCount);
     let out = write(&data);
@@ -319,7 +322,7 @@ fn family_links() {
     let data = Dataset::parse(v7(
         "0 @I1@ INDI\n1 FAMC @F1@\n2 PEDI BIRTH\n1 FAMC @F1@\n2 PEDI ADOPTED\n2 STAT CHALLENGED\n3 PHRASE Doubtful\n1 FAMC @VOID@\n2 PEDI OTHER\n3 PHRASE Raised by a neighbour\n1 FAMS @F2@\n2 NOTE A spouse note\n1 FAMS @F2@\n0 @F1@ FAM\n0 @F2@ FAM\n",
     ));
-    let indi = data.find_individual("@I1@").unwrap();
+    let indi = data.find_individual("@I1@").unwrap().into_owned();
     assert_eq!(indi.child_of.len(), 3);
     assert_eq!(indi.spouse_of.len(), 2);
     assert_eq!(
@@ -344,7 +347,8 @@ fn ordinances() {
     let data = Dataset::parse(v551(
         "0 @I1@ INDI\n1 BAPL\n2 DATE 1 JAN 1900\n2 TEMP SLAKE\n2 PLAC Sample Temple\n2 STAT COMPLETED\n3 DATE 2 FEB 1990\n2 NOTE A note\n1 CONL\n2 STAT DNS/CAN\n3 DATE 3 MAR 1991\n1 ENDL\n2 STAT PRE-1970\n3 DATE 4 APR 1992\n1 SLGC\n2 FAMC @F1@\n2 STAT BIC\n3 DATE 5 MAY 1993\n0 @F1@ FAM\n",
     ));
-    let ords = &data.find_individual("@I1@").unwrap().detail().ordinances;
+    let ords_record = data.find_individual("@I1@").unwrap().into_owned();
+    let ords = &ords_record.detail().ordinances;
     assert_eq!(
         ords.iter().map(|o| o.kind).collect::<Vec<_>>(),
         [
@@ -376,7 +380,7 @@ fn individual_detail() {
     let data = Dataset::parse(v551(
         "0 @I1@ INDI\n1 RESN locked\n1 REFN A-1\n2 TYPE user\n1 REFN A-2\n1 ANCI @U1@\n1 ANCI @U2@\n1 DESI @U1@\n1 SUBM @U1@\n1 ALIA @I2@\n1 RFN 42\n1 AFN 43\n1 RIN 44\n1 OBJE @O1@\n1 ASSO @I2@\n2 RELA Godfather\n1 CHAN\n2 DATE 1 JAN 2000\n2 NOTE Checked\n0 @I2@ INDI\n0 @U2@ SUBM\n1 NAME Other Submitter\n0 @O1@ OBJE\n1 FILE a.jpg\n2 FORM jpg\n",
     ));
-    let indi = data.find_individual("@I1@").unwrap();
+    let indi = data.find_individual("@I1@").unwrap().into_owned();
     let detail = indi.detail();
     assert_eq!(detail.refns.len(), 2);
     assert_eq!(detail.refns[1].kind, None, "the type stays with its number");
@@ -402,11 +406,19 @@ fn sources() {
     let data = Dataset::parse(v7(
         "0 @S1@ SOUR\n1 TITL Parish register\n1 AUTH Sample parish\n1 ABBR Register\n1 PUBL Unpublished\n1 DATA\n2 EVEN BIRT, DEAT\n3 DATE FROM 1800 TO 1850\n3 PLAC Sampleton\n4 FORM City\n4 MAP\n5 LATI N1.5\n5 LONG E2.5\n2 AGNC Sample parish\n2 NOTE Some pages missing\n1 TEXT Transcribed\n2 MIME text/plain\n1 REPO @R1@\n2 CALN 12\n1 OBJE @O1@\n1 CREA\n2 DATE 1 JAN 2020\n0 @R1@ REPO\n1 NAME Sample archive\n1 PHON 555-0100\n1 PHON 555-0101\n0 @O1@ OBJE\n1 FILE a.jpg\n2 FORM image/jpeg\n",
     ));
-    let source = &data.sources()[0];
+    let source = &data.sources().get(0).unwrap().into_owned();
     let recorded = &source.data.as_ref().unwrap().events[0];
     // 5.5.1 may name no event (found by the `model` fuzz target).
     let empty = Dataset::parse(v551("0 @S1@ SOUR\n1 DATA\n2 EVEN\n"));
-    assert!(empty.sources()[0].data.as_ref().unwrap().events[0]
+    assert!(empty
+        .sources()
+        .get(0)
+        .unwrap()
+        .into_owned()
+        .data
+        .as_ref()
+        .unwrap()
+        .events[0]
         .kinds
         .0
         .is_empty());
@@ -414,7 +426,15 @@ fn sources() {
     assert_eq!(recorded.kinds.0, [EventKind::Birth, EventKind::Death]);
     let place = recorded.place.as_ref().unwrap();
     assert!(place.detail().map.is_some());
-    assert_eq!(data.repositories()[0].phones.len(), 2);
+    assert_eq!(
+        data.repositories()
+            .get(0)
+            .unwrap()
+            .into_owned()
+            .phones
+            .len(),
+        2
+    );
     let out = write(&data);
     assert_has(&out, "1 DATA\n2 EVEN BIRT, DEAT\n3 DATE FROM 1800 TO 1850\n3 PLAC Sampleton\n4 FORM City\n4 MAP\n5 LATI N1.5\n5 LONG E2.5\n2 AGNC Sample parish\n2 NOTE Some pages missing\n");
     assert_has(&out, "1 TEXT Transcribed\n2 MIME text/plain\n");
@@ -430,7 +450,7 @@ fn multimedia_records() {
     let data = Dataset::parse(v551(
         "0 @O1@ OBJE\n1 FILE a.jpg\n2 FORM jpg\n3 TYPE photo\n2 TITL First\n1 FILE b.tif\n2 FORM tif\n1 SOUR @S1@\n2 PAGE 1\n1 SOUR @S1@\n2 PAGE 2\n1 REFN M-1\n0 @I1@ INDI\n1 OBJE\n2 FILE c.jpg\n3 FORM jpg\n4 MEDI photo\n0 @S1@ SOUR\n1 TITL Album\n",
     ));
-    let obje = &data.multimedia()[0];
+    let obje = &data.multimedia().get(0).unwrap().into_owned();
     assert_eq!(obje.files.len(), 2);
     assert_eq!(obje.citations.len(), 2);
     assert!(obje.files[0].form.as_ref().unwrap().medium_type.is_some());
@@ -447,8 +467,16 @@ fn submitters_and_submissions() {
     let data = Dataset::parse(
         "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n2 FORM LINEAGE-LINKED\n1 CHAR UTF-8\n1 SOUR EXAMPLE\n1 SUBM @U1@\n1 SUBN @B1@\n0 @U1@ SUBM\n1 NAME Example Submitter\n1 LANG English\n1 LANG French\n1 LANG German\n1 EMAIL a@@example.com\n1 RFN 7\n0 @B1@ SUBN\n1 SUBM @U1@\n1 FAMF family.ged\n1 TEMP SLAKE\n1 ANCE 2\n1 DESC 3\n1 ORDI yes\n1 NOTE A submission note\n1 RIN 9\n1 CHAN\n2 DATE 1 JAN 2000\n0 TRLR\n",
     );
-    assert_eq!(data.submitters()[0].languages.len(), 3);
-    let subn = &data.submissions()[0];
+    assert_eq!(
+        data.submitters()
+            .get(0)
+            .unwrap()
+            .into_owned()
+            .languages
+            .len(),
+        3
+    );
+    let subn = &data.submissions().get(0).unwrap().into_owned();
     assert!(subn.ordinance_process.is_some());
     let out = write(&data);
     assert_has(&out, "1 LANG English\n1 LANG French\n1 LANG German\n");
@@ -463,7 +491,7 @@ fn shared_notes() {
     let data = Dataset::parse(v7(
         "0 @N1@ SNOTE A shared note\n2 CONT continued\n1 MIME text/plain\n1 LANG en\n1 TRAN Une note\n2 LANG fr\n1 SOUR @S1@\n1 CHAN\n2 DATE 1 JAN 2000\n1 CREA\n2 DATE 1 JAN 1999\n0 @S1@ SOUR\n1 TITL Register\n",
     ));
-    let note = &data.notes()[0];
+    let note = &data.notes().get(0).unwrap().into_owned();
     assert!(note.text.eq_str(&data, "A shared note\ncontinued"));
     assert!(note.change.is_some() && note.creation.is_some());
     let out = write(&data);
@@ -474,7 +502,7 @@ fn shared_notes() {
     let data = Dataset::parse(v551(
         "0 @N1@ NOTE Shared\n1 REFN 7\n1 CHAN\n2 DATE 1 JAN 2000\n",
     ));
-    assert_eq!(data.notes()[0].refns.len(), 1);
+    assert_eq!(data.notes().get(0).unwrap().into_owned().refns.len(), 1);
     assert_has(
         &write(&data),
         "0 @N1@ NOTE Shared\n1 REFN 7\n1 CHAN\n2 DATE 1 JAN 2000\n",
@@ -493,11 +521,7 @@ fn other_records() {
     // aside.
     assert_eq!(data.individuals().len(), 2);
     assert_eq!(data.extra().len(), 3);
-    let tags: Vec<&str> = data
-        .extra()
-        .iter()
-        .map(|n| data.store().tag(n.tag))
-        .collect();
+    let tags: Vec<&str> = data.extra().iter().map(|n| n.tag()).collect();
     assert_eq!(tags, ["_LOC", "FOO", "TRLR"]);
     assert!(matches!(data.find("@L1@"), Some(RecordRef::Other(_))));
     let out = write(&data);
@@ -511,13 +535,21 @@ fn other_records() {
 #[test]
 fn sex() {
     let data = Dataset::parse(v551("0 @I1@ INDI\n1 SEX f\n0 @I2@ INDI\n1 SEX N\n"));
-    assert_eq!(data.individuals()[0].sex, Some(Sex::Female));
-    assert!(matches!(&data.individuals()[1].sex, Some(Sex::Unknown(t)) if t.to_str(&data) == "N"));
+    assert_eq!(
+        data.individuals().get(0).unwrap().into_owned().sex,
+        Some(Sex::Female)
+    );
+    assert!(
+        matches!(&data.individuals().get(1).unwrap().into_owned().sex, Some(Sex::Unknown(t)) if t.to_str(&data) == "N")
+    );
     let out = write(&data);
     assert_has(&out, "1 SEX F\n");
     assert!(!out.contains("FACT"), "{out}");
     let data = Dataset::parse(v7("0 @I1@ INDI\n1 SEX X\n"));
-    assert_eq!(data.individuals()[0].sex, Some(Sex::Nonbinary));
+    assert_eq!(
+        data.individuals().get(0).unwrap().into_owned().sex,
+        Some(Sex::Nonbinary)
+    );
 }
 
 /// Records are built by programs with struct literals and constructors
@@ -553,7 +585,7 @@ fn same_tag_order_is_kept() {
     let data = Dataset::parse(v551(
         "0 @U2@ SUBM\n1 NAME Second Submitter\n1 LANG English\n2 _SCRIPT Latin\n1 LANG French\n1 LANG German\n0 @I1@ INDI\n1 SOUR @S1@\n2 PAGE 1\n2 PAGE 2\n2 PAGE 3\n0 @S1@ SOUR\n1 TITL Register\n",
     ));
-    let subm = &data.submitters()[0];
+    let subm = &data.submitters().get(0).unwrap().into_owned();
     assert!(subm.languages.is_empty());
     assert_eq!(subm.extra.len(), 3);
     // A leaf with an extension stays whole; a repeated singleton is
@@ -626,7 +658,9 @@ fn lds_status_outside_the_enumeration_round_trips_in_5_5_1() {
 0 TRLR";
     let data = Dataset::parse(source);
 
-    let ordinances = &data.find_individual("@I1@").unwrap().detail().ordinances;
+    let ordinances_record = data.find_individual("@I1@").unwrap().into_owned();
+
+    let ordinances = &ordinances_record.detail().ordinances;
     assert_eq!(ordinances[0].kind, OrdinanceKind::Baptism);
     assert_eq!(ordinances[1].kind, OrdinanceKind::Endowment);
     let excluded = ordinances[0].status.as_ref().unwrap();
@@ -647,10 +681,8 @@ fn lds_status_outside_the_enumeration_round_trips_in_5_5_1() {
     // keeps it as an extension structure, value included.
     assert!(written.contains("1 ENDL\n2 _STAT COMPLETED\n"), "{written}");
     let read = Dataset::parse(&written);
-    let back = read.find_individual("@I1@").unwrap().detail().ordinances[0]
-        .status
-        .as_ref()
-        .unwrap();
+    let back_record = read.find_individual("@I1@").unwrap().into_owned();
+    let back = back_record.detail().ordinances[0].status.as_ref().unwrap();
     assert_eq!(back.value, excluded.value);
 }
 
@@ -667,7 +699,9 @@ fn lds_extension_status_round_trips_in_7_0() {
 0 TRLR";
     let data = Dataset::parse(source);
 
-    let slgs = &data.find_family("@F1@").unwrap().detail().ordinances[0];
+    let slgs_record = data.find_family("@F1@").unwrap().into_owned();
+
+    let slgs = &slgs_record.detail().ordinances[0];
     assert_eq!(slgs.kind, OrdinanceKind::SpouseSealing);
     let sealing = slgs.status.as_ref().unwrap();
     assert!(matches!(&sealing.value, OrdinanceStatus::Unknown(t) if t.to_str(&data) == "_PENDING"));
@@ -678,10 +712,8 @@ fn lds_extension_status_round_trips_in_7_0() {
         "{written}"
     );
     let read = Dataset::parse(&written);
-    let back = read.find_family("@F1@").unwrap().detail().ordinances[0]
-        .status
-        .as_ref()
-        .unwrap();
+    let back_record = read.find_family("@F1@").unwrap().into_owned();
+    let back = back_record.detail().ordinances[0].status.as_ref().unwrap();
     assert!(matches!(&back.value, OrdinanceStatus::Unknown(t) if t.to_str(&read) == "_PENDING"));
 }
 

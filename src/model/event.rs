@@ -28,14 +28,17 @@ gedcom_struct! {
     /// use ged_io::model::{Dataset, EventKind};
     ///
     /// let data = Dataset::parse("0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 BIRT\n2 DATE 1 JAN 1900\n2 AGE 0y\n1 OCCU Miller\n0 TRLR\n");
-    /// let indi = &data.individuals()[0];
-    /// let birth = &indi.events[0];
-    /// assert_eq!(birth.kind, EventKind::Birth);
-    /// assert_eq!(birth.date.as_ref().unwrap().value.to_str(&data), "1 JAN 1900");
+    /// let indi = data.individuals().first().unwrap();
+    /// let birth = indi.events().first().unwrap();
+    /// assert_eq!(birth.kind(), EventKind::Birth);
+    /// assert_eq!(birth.date().unwrap().value(), "1 JAN 1900");
+    /// assert_eq!(birth.age().unwrap().value(), "0y"); // a field of the detail
+    /// assert_eq!(indi.events().get(1).unwrap().value(), "Miller");
+    /// // As an owned value, the detail is a box of its own.
+    /// let birth = birth.into_owned();
     /// assert_eq!(birth.detail().age.as_ref().unwrap().value.to_str(&data), "0y");
-    /// assert_eq!(indi.events[1].value.to_str(&data), "Miller");
     /// ```
-    pub struct Event {
+    pub struct Event => EventRow {
         @tag
         /// What happened: the event's or attribute's tag.
         kind: EventKind;
@@ -55,7 +58,7 @@ gedcom_struct! {
         /// the responsible agency, religion and cause, a restriction, a
         /// sort date, associations, notes, media, identifiers, the family
         /// of a birth or adoption, the kind of a birth.
-        EventDetail {
+        EventDetail => EventDetailRow {
             /// What kind of event or fact it is, in words (`TYPE`); `EVEN`
             /// and `FACT` require it.
             "TYPE" => classification: Option<Text>,
@@ -190,7 +193,7 @@ gedcom_struct! {
     /// A partner at a family event (`HUSB` or `WIFE` under it: the one the
     /// family's `HUSB` or `WIFE` names) and their age then (7.0.17:
     /// `MARR` / `HUSB` / `AGE 32y`).
-    pub struct EventSpouse {
+    pub struct EventSpouse => EventSpouseRow {
         /// The age (`AGE`).
         "AGE" => age: Option<Age>,
     }
@@ -204,7 +207,7 @@ gedcom_struct! {
 gedcom_struct! {
     /// The family of a birth, christening or adoption (`FAMC` under the
     /// event) and, for an adoption, who adopted (`ADOP`).
-    pub struct EventFamily {
+    pub struct EventFamily => EventFamilyRow {
         @payload
         /// The family (7.x: `@VOID@` when unknown).
         family: Option<XrefId>;
@@ -224,7 +227,7 @@ gedcom_struct! {
 gedcom_struct! {
     /// An event an individual or a family is known not to have had (7.x
     /// `NO`), possibly within a period.
-    pub struct NonEvent {
+    pub struct NonEvent => NonEventRow {
         @payload
         /// The event that did not happen.
         kind: EventKind;

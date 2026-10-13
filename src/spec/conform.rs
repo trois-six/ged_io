@@ -1630,7 +1630,7 @@ impl<'n> Conformer<'n> {
     /// substructure of that tag went aside before it, it has an identifier,
     /// it has substructures and the field holds a value without any, or the
     /// field holds one structure and has it; anything else goes aside
-    /// (`model::driver::read_into`, [`ModelRead`]). `s` is repaired: every
+    /// (`model::driver::read_row_into`, [`ModelRead`]). `s` is repaired: every
     /// payload fits its field. Substructures already in that order, as
     /// nearly all are, stay where they are.
     fn model_order(&self, s: &mut Structure, ty: StructId) {

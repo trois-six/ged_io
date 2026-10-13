@@ -3,28 +3,30 @@
 //! [`gedcom_struct!`](super::gedcom_struct) declares a structure: its
 //! identifier, tag and payload when it has them, its substructures by tag
 //! and its field types. The field types give the cardinality through
-//! [`Slot`]: an `Option` holds one occurrence (a second one goes to
-//! `extra`), a `Vec` or a [`ThinVec`](super::ThinVec) any number. The macro
-//! generates the struct, its field table and a few short methods
-//! ([`Fields`]); everything else is done here, once for all structures —
-//! the loops below have one copy, which every type calls through
-//! `dyn Fields`:
+//! [`Slot`] and [`RowSlot`](super::table::RowSlot): an `Option` holds one occurrence (a second one
+//! goes to `extra`), a `Vec` or a [`ThinVec`](super::ThinVec) any number.
+//! The macro generates the owned struct, its row, its field table and a
+//! few short methods ([`RowFields`], [`RowWrite`], [`Fields`]); everything
+//! else is done here, once for all structures — the loops below have one
+//! copy, which every type calls through a trait object:
 //!
-//! - [`read`] fills a structure from a node of the record arena: the
-//!   identifier, the tag and the payload, then each substructure through
-//!   the field its tag selects (a table of the standard tags, computed at
-//!   compile time), and whatever no field takes — an unknown or extension
-//!   tag, a repeated singleton, a substructure whose shape its field cannot
-//!   hold — into `extra`, in order. Reading never fails: a node that does
-//!   not fit a type is refused ([`FromNode`] returns `None`) and its
-//!   superstructure keeps it whole in its own `extra`.
-//! - [`write`] turns a structure back into a [`Structure`]: identifier,
-//!   payload, fields in declaration order, then `extra`.
+//! - [`read_row_into`] reads a structure from a node of the record arena
+//!   into its row of a dataset's tables: the identifier, the tag and the
+//!   payload, then each substructure through the field its tag selects (a
+//!   table of the standard tags, computed at compile time), and whatever no
+//!   field takes — an unknown or extension tag, a repeated singleton, a
+//!   substructure whose shape its field cannot hold — into `extra`, in
+//!   order. Reading never fails: a node that does not fit a type is refused
+//!   (its row reads `None`) and its superstructure keeps it whole in its own
+//!   `extra`.
+//! - [`write_row_flat`] writes a row into the writer's flat arena, and
+//!   [`write`] and [`write_flat`] an owned structure: identifier, payload,
+//!   fields in declaration order, then `extra`.
 //!
 //! A structure may keep the fields that few of its occurrences use in a
-//! boxed *detail* (`@detail`): one word when none is used, allocated with
-//! the first. Its fields read, write and are checked by the coverage
-//! ledger like the others.
+//! *detail* (`@detail`): a row of its own, which the structure's row holds
+//! by index when one of them is set (a box on the owned type). Its fields
+//! read, write and are checked by the coverage ledger like the others.
 
 use std::borrow::Cow;
 
@@ -36,8 +38,11 @@ use crate::tree::{
 use crate::version::GedcomVersion;
 
 use super::list::ThinVec;
-use super::node::{Extra, Node, Value};
-use super::text::{Store, TagId, Text, XrefId, XrefTable};
+use super::node::{Extra, Node};
+use super::table::{
+    push_span, reserve, Code, CopyCx, List, NodeRow, StoreCx, Tables, EMPTY_TABLES,
+};
+use super::text::{Span, Store, StoreParts, TagId, Text, TextRef, XrefId, EXACT_DATE, SIMPLE_DATE};
 
 /// The arena of the record being read: the builder's nodes, identifiers
 /// and joined pieces, with offsets relative to `text`, which starts at
@@ -67,7 +72,7 @@ impl<'a> NodeRef<'a> {
         Self::at(arena, 0)
     }
 
-    fn at(arena: &'a Arena<'a>, index: u32) -> Option<Self> {
+    pub(crate) fn at(arena: &'a Arena<'a>, index: u32) -> Option<Self> {
         let raw = *arena.nodes.get(index as usize)?;
         Some(Self { arena, raw, index })
     }
@@ -188,12 +193,42 @@ impl<'a> Iterator for Children<'a> {
     }
 }
 
-/// What reading needs besides the node: the store's tables, being filled,
-/// how the file escapes `@` and the version it declares.
+/// What reading into the tables keeps aside while a structure is read: its
+/// substructures that go untyped, and the items its lists reserve. Stacks,
+/// so that nested structures share them.
+#[derive(Default)]
+pub(crate) struct Scratch {
+    pending: Vec<Pending>,
+    /// By field of each structure being read, the substructures of its
+    /// list fields.
+    counts: Vec<u32>,
+    /// The list fields of each structure being read that have some.
+    lists: Vec<u16>,
+}
+
+/// A substructure of the structure being read that goes untyped, by its
+/// index in the record's arena.
+#[derive(Clone, Copy)]
+enum Pending {
+    /// A substructure no field takes.
+    Node(u32),
+    /// What the structure itself has no place for (its payload, its
+    /// identifier), kept aside ([`TagId::ASIDE`]).
+    Aside {
+        node: u32,
+        xref: bool,
+        payload: bool,
+    },
+}
+
+/// What reading needs besides the node: the store's tables and the
+/// dataset's, being filled, how the file escapes `@` and the version it
+/// declares.
 pub(crate) struct ReadCx<'s> {
-    input: &'s str,
-    pieces: &'s mut Vec<TextPiece>,
-    xrefs: &'s mut XrefTable,
+    parts: StoreParts<'s>,
+    /// The tables the structures read go into.
+    pub(crate) tables: &'s mut Tables,
+    scratch: &'s mut Scratch,
     escaping: Escaping,
     /// The version of the file.
     pub(crate) version: GedcomVersion,
@@ -201,15 +236,15 @@ pub(crate) struct ReadCx<'s> {
 
 impl<'s> ReadCx<'s> {
     pub(crate) fn new(
-        input: &'s str,
-        pieces: &'s mut Vec<TextPiece>,
-        xrefs: &'s mut XrefTable,
+        parts: StoreParts<'s>,
+        tables: &'s mut Tables,
+        scratch: &'s mut Scratch,
         version: GedcomVersion,
     ) -> Self {
         Self {
-            input,
-            pieces,
-            xrefs,
+            parts,
+            tables,
+            scratch,
             escaping: if version.is_v7() {
                 Escaping::V70
             } else {
@@ -224,35 +259,44 @@ impl<'s> ReadCx<'s> {
         node.payload_str(self.escaping)
     }
 
-    /// The text payload of a node (empty when it has none); `None` for a
-    /// pointer. A payload reading rewrote is pieces of the input, not a
-    /// copy.
-    pub(crate) fn text(&mut self, node: NodeRef<'_>) -> Option<Text> {
+    /// The text payload of a node, as a span of the store (empty when it
+    /// has none); `None` for a pointer. A payload reading rewrote is pieces
+    /// of the input, not a copy.
+    pub(crate) fn span(&mut self, node: NodeRef<'_>) -> Option<Span> {
         let raw = node.raw();
         let base = node.arena.base;
+        let start = base + raw.payload.start as usize;
         match raw.kind {
-            RawKind::None => Some(Text::default()),
+            RawKind::None => Some(Span::EMPTY),
             RawKind::Pointer => None,
             // A date's validity is found once, as it is read.
-            RawKind::Text if raw.tag == const { DATE_TAG } => Some(Text::input_date(
-                self.input,
-                base + raw.payload.start as usize,
-                raw.payload.len as usize,
-            )),
-            RawKind::Text => Some(Text::input(
-                self.input,
-                base + raw.payload.start as usize,
-                raw.payload.len as usize,
-            )),
+            RawKind::Text if raw.tag == const { DATE_TAG } => {
+                let span = self.parts.span(start, raw.payload.len as usize);
+                let date = raw.payload.get(node.arena.text);
+                let bits = if crate::spec::is_simple_date(date, true, false) {
+                    SIMPLE_DATE | EXACT_DATE
+                } else if crate::spec::is_simple_date(date, false, false) {
+                    SIMPLE_DATE
+                } else {
+                    0
+                };
+                Some(if bits != 0 && span.kind() == Span::INPUT {
+                    span.with_valid(bits)
+                } else {
+                    span
+                })
+            }
+            RawKind::Text => Some(self.parts.span(start, raw.payload.len as usize)),
             RawKind::Escaped => {
-                let at = self.pieces.len();
-                let start = base + raw.payload.start as usize;
+                let at = self.parts.pieces.len();
                 let mut fits = true;
-                let pieces = &mut *self.pieces;
+                let pieces = &mut *self.parts.pieces;
                 unescape_spans(raw.payload.get(node.arena.text), self.escaping, |s, len| {
                     if len > 0 {
                         match (u32::try_from(start + s), u32::try_from(len)) {
-                            (Ok(s), Ok(len)) => pieces.push(TextPiece::new(s, len, false)),
+                            (Ok(s), Ok(len)) if s.checked_add(len).is_some() => {
+                                pieces.push(TextPiece::new(s, len, false));
+                            }
                             _ => fits = false,
                         }
                     }
@@ -260,30 +304,43 @@ impl<'s> ReadCx<'s> {
                 Some(self.finish_pieces(at, fits, node))
             }
             RawKind::Joined => {
-                let at = self.pieces.len();
+                let at = self.parts.pieces.len();
                 let shift = u32::try_from(base).ok();
                 let mut fits = shift.is_some();
                 for piece in node.joined(raw) {
                     let end = shift.and_then(|b| b.checked_add(piece.start() + piece.len()));
                     fits &= end.is_some();
-                    self.pieces.push(piece.shifted(shift.unwrap_or(0)));
+                    self.parts.pieces.push(piece.shifted(shift.unwrap_or(0)));
                 }
                 Some(self.finish_pieces(at, fits, node))
             }
             // Only a builder outside span mode makes these.
-            RawKind::Side => Some(Text::new(&*self.payload_str(node))),
+            RawKind::Side => {
+                let text = self.payload_str(node);
+                let special = crate::writer::special_bytes(&text);
+                Some(self.big(text.into_owned().into(), special))
+            }
         }
     }
 
-    /// The text of the pieces pushed from `at`; an owned copy when their
-    /// offsets do not fit in 32 bits.
-    fn finish_pieces(&mut self, at: usize, fits: bool, node: NodeRef<'_>) -> Text {
+    /// The span of the pieces pushed from `at`; a copy when their offsets
+    /// do not fit in 32 bits.
+    fn finish_pieces(&mut self, at: usize, fits: bool, node: NodeRef<'_>) -> Span {
         if fits {
-            Text::from_pieces(self.input, self.pieces, at)
+            self.parts.pieces_from(at)
         } else {
-            self.pieces.truncate(at);
-            Text::new(&*self.payload_str(node))
+            self.parts.pieces.truncate(at);
+            let text = self.payload_str(node);
+            let special = crate::writer::special_bytes(&text);
+            self.big(text.into_owned().into(), special)
         }
+    }
+
+    /// A text kept whole by the store.
+    fn big(&mut self, text: Box<str>, special: u8) -> Span {
+        let at = u32::try_from(self.parts.big.len()).unwrap_or(u32::MAX);
+        self.parts.big.push(text);
+        Span::big(at, special)
     }
 
     /// The pointer payload of a node, interned; `None` when the payload is
@@ -302,58 +359,286 @@ impl<'s> ReadCx<'s> {
     }
 
     fn intern(&mut self, arena: &Arena<'_>, span: RawSpan) -> Option<XrefId> {
-        self.xrefs.intern(span.get(arena.text))
+        self.parts.xrefs.intern(span.get(arena.text))
     }
 
-    /// A node without its substructures, untyped.
-    pub(crate) fn node_shallow(&mut self, node: NodeRef<'_>) -> Node {
-        let payload = match self.pointer(node) {
-            Some(id) => Value::Pointer(id),
-            None if node.is_pointer() => Value::Text(self.text_of_pointer(node)),
-            None => match self.text(node) {
-                Some(t) if !t.is_empty() => Value::Text(t),
-                _ => Value::None,
-            },
-        };
-        Node {
-            tag: TagId::raw(node.tag_id()),
-            xref: self.xref(node),
-            payload,
-            children: Vec::new(),
+    /// The payload of a node, as an untyped node keeps it: a pointer, a
+    /// text when it is not empty, or none.
+    fn node_payload(&mut self, node: NodeRef<'_>) -> Option<Span> {
+        match self.pointer(node) {
+            Some(id) => Some(Span::pointer(id)),
+            None if node.is_pointer() => Some(self.span_of_pointer(node)),
+            None => self.span(node).filter(|s| !s.is_empty()),
         }
     }
 
-    /// A node and its substructures, untyped.
-    pub(crate) fn node(&mut self, node: NodeRef<'_>) -> Node {
-        let mut n = self.node_shallow(node);
+    /// A node and its substructures, untyped, as rows of the table of
+    /// nodes.
+    pub(crate) fn node_row(&mut self, node: NodeRef<'_>) -> NodeRow {
+        let payload = self.node_payload(node);
+        let xref = self.xref(node);
         let count = node.children().count();
-        if count > 0 {
-            n.children = Vec::with_capacity(count);
-            for child in node.children() {
-                let c = self.node(child);
-                n.children.push(c);
+        let children = if count == 0 {
+            List::EMPTY
+        } else {
+            let start = reserve(&mut self.tables.nodes, count, NodeRow::default());
+            for (i, child) in node.children().enumerate() {
+                let row = self.node_row(child);
+                if let Some(slot) = self.tables.nodes.get_mut(start as usize + i) {
+                    *slot = row;
+                }
             }
+            List::new(start, u32::try_from(count).unwrap_or(u32::MAX))
+        };
+        NodeRow {
+            tag: TagId::raw(node.tag_id()),
+            xref,
+            payload,
+            children,
         }
-        n
     }
 
-    /// A pointer that could not be interned (four billion identifiers), as
-    /// text.
-    fn text_of_pointer(&mut self, node: NodeRef<'_>) -> Text {
+    fn span_of_pointer(&mut self, node: NodeRef<'_>) -> Span {
         let raw = node.raw();
-        Text::input(
-            self.input,
+        self.parts.span(
             node.arena.base + raw.payload.start as usize,
             raw.payload.len as usize,
         )
     }
+
+    /// The untyped substructures kept aside from `mark` on, as rows of the
+    /// table of nodes, in order.
+    fn flush_pending(&mut self, arena: &Arena<'_>, mark: usize) -> List<Node> {
+        let n = self.scratch.pending.len().saturating_sub(mark);
+        if n == 0 {
+            return List::EMPTY;
+        }
+        let start = reserve(&mut self.tables.nodes, n, NodeRow::default());
+        for i in 0..n {
+            let Some(&p) = self.scratch.pending.get(mark + i) else {
+                continue;
+            };
+            let row = match p {
+                Pending::Node(at) => match NodeRef::at(arena, at) {
+                    Some(node) => self.node_row(node),
+                    None => NodeRow::default(),
+                },
+                Pending::Aside {
+                    node,
+                    xref,
+                    payload,
+                } => match NodeRef::at(arena, node) {
+                    Some(node) => NodeRow {
+                        tag: TagId::ASIDE,
+                        xref: if xref { self.xref(node) } else { None },
+                        payload: if payload {
+                            self.node_payload(node)
+                        } else {
+                            None
+                        },
+                        children: List::EMPTY,
+                    },
+                    None => NodeRow::default(),
+                },
+            };
+            if let Some(slot) = self.tables.nodes.get_mut(start as usize + i) {
+                *slot = row;
+            }
+        }
+        self.scratch.pending.truncate(mark);
+        List::new(start, u32::try_from(n).unwrap_or(u32::MAX))
+    }
+
+    /// Reads an enumeration value: a variant `known` finds (its index), or
+    /// the text as written. No payload, or a pointer, does not fit.
+    pub(crate) fn enum_code(
+        &mut self,
+        node: NodeRef<'_>,
+        known: fn(&str, Option<GedcomVersion>) -> Option<usize>,
+    ) -> Option<Code> {
+        if node.is_pointer() || node.has_no_payload() {
+            return None;
+        }
+        if let Some(i) = known(&self.payload_str(node), Some(self.version)) {
+            return Some(Code::known(i));
+        }
+        let span = self.span(node)?;
+        Some(push_span(&mut self.tables.spans, span))
+    }
+
+    /// An unknown enumeration value's text, kept: its code.
+    pub(crate) fn unknown_code(&mut self, span: Span) -> Code {
+        push_span(&mut self.tables.spans, span)
+    }
+
+    /// A part of the payload of `node` as a span: of the input when the
+    /// payload is the input's characters as they are, a copy otherwise.
+    pub(crate) fn sub_span(&mut self, node: NodeRef<'_>, part: &str) -> Span {
+        let text = node.arena.text;
+        let (start, end) = (text.as_ptr() as usize, text.as_ptr() as usize + text.len());
+        let at = part.as_ptr() as usize;
+        if node.raw().kind == RawKind::Text && at >= start && at + part.len() <= end {
+            self.parts.span(node.arena.base + (at - start), part.len())
+        } else {
+            self.owned_span(part)
+        }
+    }
+
+    /// A string copied into the store, while it is read: a big text.
+    pub(crate) fn owned_span(&mut self, text: &str) -> Span {
+        if text.is_empty() {
+            return Span::EMPTY;
+        }
+        self.big(text.into(), crate::writer::special_bytes(text))
+    }
 }
 
-/// What writing needs: the store the model points into and the target
-/// version.
+/// What reading a structure into a row needs of its type: its fields, and
+/// how each takes a substructure. It is dyn-compatible, so that
+/// [`read_row_into`] has one copy for every type.
+pub(crate) trait RowFields {
+    /// The type's fields.
+    fn fields(&self) -> &'static [FieldDesc];
+    /// The field of each standard tag.
+    fn lookup(&self) -> &'static Lookup;
+    /// Reads the tag of a type that keeps it; `false` when the type does
+    /// not name it.
+    fn read_tag(&mut self, node: NodeRef<'_>) -> bool;
+    /// Reads the identifier; `false` when the node has one and the type
+    /// has none.
+    fn read_xref(&mut self, node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> bool;
+    /// Reads the payload; `false` when the node's payload does not fit.
+    fn read_payload(&mut self, node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> bool;
+    /// Reserves the items of list field `field`.
+    fn reserve(&mut self, field: usize, count: u32, cx: &mut ReadCx<'_>);
+    /// Gives a substructure to field `field`; `false` when it does not
+    /// take it.
+    fn accept(
+        &mut self,
+        field: usize,
+        node: NodeRef<'_>,
+        reserved: u32,
+        cx: &mut ReadCx<'_>,
+    ) -> bool;
+    /// Gives back the items of list field `field` reserved and not taken.
+    fn finish(&mut self, field: usize, reserved: u32, cx: &mut ReadCx<'_>);
+}
+
+/// Reads a structure into its row ([`RowFields`]): its identifier, tag and
+/// payload, then each substructure into the field its tag selects, or
+/// aside: the substructures kept untyped, as rows of the table of nodes;
+/// `None` when the node does not fit.
+///
+/// Substructures of one tag keep their order (the first is the preferred
+/// one): once one does not fit its field (its shape, or a field already
+/// full), the later ones of its tag go to `extra` after it, so that the
+/// field's, written first, all came before it.
+///
+/// A payload or an identifier the type has no place for (text where its
+/// pointer belongs, a payload on a record, an identifier on a
+/// substructure) does not make the structure untyped: it is kept aside, as
+/// the first node of `extra`, tagged [`TagId::ASIDE`], and written back in
+/// its place.
+///
+/// The items of each list are reserved before any is read, so that they
+/// are contiguous whatever the substructures they hold put in the same
+/// table: the substructures of each tag are counted first.
+pub(crate) fn read_row_into(
+    s: &mut dyn RowFields,
+    node: NodeRef<'_>,
+    cx: &mut ReadCx<'_>,
+) -> Option<List<Node>> {
+    if !s.read_tag(node) {
+        return None;
+    }
+    let xref_fits = s.read_xref(node, cx);
+    // No payload where one is expected leaves the type's empty value.
+    let payload_fits = s.read_payload(node, cx) || node.has_no_payload();
+    let mark = cx.scratch.pending.len();
+    if !xref_fits || !payload_fits {
+        cx.scratch.pending.push(Pending::Aside {
+            node: node.index,
+            xref: !xref_fits,
+            payload: !payload_fits,
+        });
+    }
+    let fields = s.fields();
+    let lookup = s.lookup();
+    let counts = cx.scratch.counts.len();
+    let lists = cx.scratch.lists.len();
+    if node.has_children() {
+        cx.scratch.counts.resize(counts + fields.len(), 0);
+        for child in node.children() {
+            let field = usize::from(lookup.get(child.tag_id() as usize).copied().unwrap_or(0));
+            if field > 0 && fields.get(field - 1).is_some_and(|f| f.many) {
+                if let Some(c) = cx.scratch.counts.get_mut(counts + field - 1) {
+                    if *c == 0 {
+                        cx.scratch
+                            .lists
+                            .push(u16::try_from(field - 1).unwrap_or(u16::MAX));
+                    }
+                    *c += 1;
+                }
+            }
+        }
+        for i in lists..cx.scratch.lists.len() {
+            let field = usize::from(cx.scratch.lists.get(i).copied().unwrap_or(u16::MAX));
+            let count = cx.scratch.counts.get(counts + field).copied().unwrap_or(0);
+            s.reserve(field, count, cx);
+        }
+    }
+    let many = cx.scratch.lists.len() > lists;
+    // The standard tags already sent aside, as a bit set.
+    let mut sent = [0_u64; STANDARD_TAGS.len().div_ceil(64)];
+    for child in node.children() {
+        let tag = child.tag_id() as usize;
+        let field = usize::from(lookup.get(tag).copied().unwrap_or(0));
+        let (word, bit) = (tag / 64, 1_u64 << (tag % 64));
+        let blocked = sent.get(word).is_some_and(|w| w & bit != 0);
+        let reserved = if many && field > 0 {
+            cx.scratch
+                .counts
+                .get(counts + field - 1)
+                .copied()
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        if field == 0 || blocked || !s.accept(field - 1, child, reserved, cx) {
+            if let Some(w) = sent.get_mut(word).filter(|_| field != 0) {
+                *w |= bit;
+            }
+            cx.scratch.pending.push(Pending::Node(child.index));
+        }
+    }
+    // Last reserved first: what was not taken at the end of a table is
+    // given back.
+    for i in (lists..cx.scratch.lists.len()).rev() {
+        let field = usize::from(cx.scratch.lists.get(i).copied().unwrap_or(u16::MAX));
+        let count = cx.scratch.counts.get(counts + field).copied().unwrap_or(0);
+        s.finish(field, count, cx);
+    }
+    cx.scratch.lists.truncate(lists);
+    cx.scratch.counts.truncate(counts);
+    Some(cx.flush_pending(node.arena, mark))
+}
+
+/// A structure being read into a row: its row, and its detail's row when
+/// a field of the detail is read. What the generated [`RowFields`] work
+/// on.
+pub(crate) struct Building<R, D> {
+    pub(crate) row: R,
+    pub(crate) detail: Option<D>,
+}
+
+/// What writing needs: the store and the tables the model points into
+/// and the target version.
 #[derive(Clone, Copy)]
 pub(crate) struct WriteCx<'s> {
     pub(crate) store: &'s Store,
+    /// The tables of the dataset the structures written are of (empty for
+    /// owned structures).
+    pub(crate) tables: &'s Tables,
     pub(crate) version: GedcomVersion,
     /// Whether values are converted to `version`'s grammars (dates, ages,
     /// times), as for writing a file, or given as the model holds them.
@@ -401,6 +686,37 @@ impl<'a> WriteCx<'a> {
         }
     }
 
+    /// A span's payload, borrowed: none when empty, a pointer when it
+    /// holds one.
+    #[inline]
+    pub(crate) fn span_flat(&self, s: Span) -> FlatPayload<'a> {
+        match s.as_pointer() {
+            Some(id) => self.pointer_flat(id),
+            None if s.is_empty() => FlatPayload::None,
+            None => FlatPayload::Text(self.store.span_str(s), s.special()),
+        }
+    }
+
+    /// A context for the structures of `data`.
+    pub(crate) fn of(data: &'a super::Dataset, version: GedcomVersion, convert: bool) -> Self {
+        Self {
+            store: &data.store,
+            tables: &data.tables,
+            version,
+            convert,
+        }
+    }
+
+    /// A context for owned structures whose texts point into `store`.
+    pub(crate) fn owned(store: &'a Store, version: GedcomVersion, convert: bool) -> Self {
+        Self {
+            store,
+            tables: &EMPTY_TABLES,
+            version,
+            convert,
+        }
+    }
+
     /// A text payload from static or computed characters.
     pub(crate) fn str(s: &str) -> Payload {
         if s.is_empty() {
@@ -431,18 +747,12 @@ impl<T> Converted<T> {
     }
 }
 
-/// A type read from a node and its substructures.
-pub(crate) trait FromNode: Sized {
+/// A type written as one structure.
+pub(crate) trait ToNodes {
     /// Whether the type is a leaf: a payload without substructures (and
     /// without `extra`, so that a node with substructures does not fit).
     const LEAF: bool = false;
-    /// Reads `node`; `None` when its shape does not fit the type (its
-    /// superstructure then keeps it whole in `extra`).
-    fn from_node(node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> Option<Self>;
-}
 
-/// A type written as one structure.
-pub(crate) trait ToNodes {
     /// The structure, tagged `tag` unless the type chooses its own tag.
     fn to_node(&self, tag: &'static str, cx: &WriteCx<'_>) -> Structure;
 
@@ -459,6 +769,9 @@ pub(crate) trait ToNodes {
         let _ = (tag, f);
     }
 
+    /// Whether [`ToNodes::write_extra`] may convert an untyped node.
+    const CONVERTS: bool = false;
+
     /// An untyped node of this type's tag, kept in `extra` (a repeated
     /// singleton, or one after it), written as this type converts its
     /// values for the target version; `None`: as it is.
@@ -473,8 +786,6 @@ pub(crate) trait ToNodes {
 
 /// The payload of a structure.
 pub(crate) trait PayloadField: Sized {
-    /// Reads the payload of `node`; `None` when it does not fit.
-    fn read(node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> Option<Self>;
     /// The payload to write.
     fn write(&self, cx: &WriteCx<'_>) -> Payload;
 
@@ -492,13 +803,86 @@ pub(crate) trait PayloadField: Sized {
         let _ = cx;
         None
     }
+
+    /// How a row keeps the payload.
+    type Raw: Copy + Default + PartialEq + 'static;
+    /// What a view gives of it.
+    type View<'a>;
+    /// Reads the payload into a row; `None` when it does not fit.
+    fn read_raw(node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> Option<Self::Raw>;
+    /// The payload of a row, to write, borrowed where it can be.
+    fn payload_raw<'s>(raw: &Self::Raw, cx: &WriteCx<'s>) -> FlatPayload<'s>;
+    /// [`PayloadField::claim`] of a row's payload.
+    fn claim_raw(raw: &Self::Raw, cx: &WriteCx<'_>) -> Option<Kind> {
+        let _ = (raw, cx);
+        None
+    }
+    /// A row's payload, owned.
+    fn load_raw(raw: &Self::Raw, t: &Tables) -> Self;
+    /// The owned payload, for a row.
+    fn store_raw(&self, cx: &mut StoreCx<'_>) -> Self::Raw;
+    /// Calls `f` with the payload's pointer.
+    fn each_raw(raw: &Self::Raw, f: &mut dyn FnMut(XrefId)) {
+        let _ = (raw, f);
+    }
+    /// The payload, copied between tables.
+    fn copy_raw(raw: &Self::Raw, cx: &mut CopyCx<'_>) -> Self::Raw;
+    /// The view of the payload.
+    fn view_raw(raw: Self::Raw, data: &super::Dataset) -> Self::View<'_>;
+}
+
+/// A table of leaf values of one kind: where lists of them are kept.
+pub(crate) trait RawTable: Copy + Default + 'static {
+    fn table(t: &Tables) -> &Vec<Self>;
+    fn table_mut(t: &mut Tables) -> &mut Vec<Self>;
+}
+
+impl RawTable for Span {
+    fn table(t: &Tables) -> &Vec<Self> {
+        &t.spans
+    }
+    fn table_mut(t: &mut Tables) -> &mut Vec<Self> {
+        &mut t.spans
+    }
+}
+
+impl RawTable for Option<XrefId> {
+    fn table(t: &Tables) -> &Vec<Self> {
+        &t.xrefs
+    }
+    fn table_mut(t: &mut Tables) -> &mut Vec<Self> {
+        &mut t.xrefs
+    }
+}
+
+impl RawTable for Option<Code> {
+    fn table(t: &Tables) -> &Vec<Self> {
+        &t.codes
+    }
+    fn table_mut(t: &mut Tables) -> &mut Vec<Self> {
+        &mut t.codes
+    }
+}
+
+impl RawTable for u32 {
+    fn table(t: &Tables) -> &Vec<Self> {
+        &t.numbers
+    }
+    fn table_mut(t: &mut Tables) -> &mut Vec<Self> {
+        &mut t.numbers
+    }
+}
+
+impl RawTable for List<Code> {
+    fn table(t: &Tables) -> &Vec<Self> {
+        &t.code_lists
+    }
+    fn table_mut(t: &mut Tables) -> &mut Vec<Self> {
+        &mut t.code_lists
+    }
 }
 
 impl PayloadField for Text {
-    fn read(node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> Option<Self> {
-        cx.text(node)
-    }
-
     fn write(&self, cx: &WriteCx<'_>) -> Payload {
         cx.text(self)
     }
@@ -506,10 +890,52 @@ impl PayloadField for Text {
     fn payload<'s>(&'s self, cx: &WriteCx<'s>) -> FlatPayload<'s> {
         cx.text_flat(self)
     }
+
+    type Raw = Span;
+    type View<'a> = TextRef<'a>;
+
+    #[inline]
+    fn read_raw(node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> Option<Span> {
+        cx.span(node)
+    }
+
+    #[inline]
+    fn payload_raw<'s>(raw: &Span, cx: &WriteCx<'s>) -> FlatPayload<'s> {
+        cx.span_flat(*raw)
+    }
+
+    fn load_raw(raw: &Span, _t: &Tables) -> Self {
+        Text::from_span(*raw)
+    }
+
+    fn store_raw(&self, cx: &mut StoreCx<'_>) -> Span {
+        self.to_span(cx.store)
+    }
+
+    fn copy_raw(raw: &Span, cx: &mut CopyCx<'_>) -> Span {
+        cx.span(*raw)
+    }
+
+    #[inline]
+    fn view_raw(raw: Span, data: &super::Dataset) -> TextRef<'_> {
+        TextRef::new(&data.store, raw)
+    }
 }
 
 impl PayloadField for Option<XrefId> {
-    fn read(node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> Option<Self> {
+    fn write(&self, cx: &WriteCx<'_>) -> Payload {
+        self.map_or(Payload::None, |id| cx.pointer(id))
+    }
+
+    fn payload<'s>(&'s self, cx: &WriteCx<'s>) -> FlatPayload<'s> {
+        self.map_or(FlatPayload::None, |id| cx.pointer_flat(id))
+    }
+
+    type Raw = Option<XrefId>;
+    type View<'a> = Option<XrefId>;
+
+    #[inline]
+    fn read_raw(node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> Option<Self::Raw> {
         if node.has_no_payload() {
             Some(None)
         } else {
@@ -517,12 +943,31 @@ impl PayloadField for Option<XrefId> {
         }
     }
 
-    fn write(&self, cx: &WriteCx<'_>) -> Payload {
-        self.map_or(Payload::None, |id| cx.pointer(id))
+    #[inline]
+    fn payload_raw<'s>(raw: &Self::Raw, cx: &WriteCx<'s>) -> FlatPayload<'s> {
+        raw.map_or(FlatPayload::None, |id| cx.pointer_flat(id))
     }
 
-    fn payload<'s>(&'s self, cx: &WriteCx<'s>) -> FlatPayload<'s> {
-        self.map_or(FlatPayload::None, |id| cx.pointer_flat(id))
+    fn load_raw(raw: &Self::Raw, _t: &Tables) -> Self {
+        *raw
+    }
+
+    fn store_raw(&self, _cx: &mut StoreCx<'_>) -> Self::Raw {
+        *self
+    }
+
+    fn each_raw(raw: &Self::Raw, f: &mut dyn FnMut(XrefId)) {
+        if let Some(id) = raw {
+            f(*id);
+        }
+    }
+
+    fn copy_raw(raw: &Self::Raw, cx: &mut CopyCx<'_>) -> Self::Raw {
+        raw.map(|id| cx.xref(id))
+    }
+
+    fn view_raw(raw: Self::Raw, _data: &super::Dataset) -> Self::View<'_> {
+        raw
     }
 }
 
@@ -545,6 +990,20 @@ pub(crate) trait TagField: Sized {
     fn std_tag(&self) -> StdTag {
         StdTag::of(self.tag())
     }
+
+    /// How a row keeps the tag.
+    type Raw: Copy + Default + PartialEq + 'static;
+    /// The row's value of a standard tag; `None` for a tag the type does
+    /// not name.
+    fn raw_of_tag(tag: &'static str) -> Option<Self::Raw>;
+    /// The tag a row writes.
+    fn std_tag_raw(raw: &Self::Raw, t: &Tables) -> StdTag;
+    /// A row's tag, owned.
+    fn load_raw(raw: &Self::Raw, t: &Tables) -> Self;
+    /// The owned tag, for a row.
+    fn store_raw(&self, cx: &mut StoreCx<'_>) -> Self::Raw;
+    /// The tag, copied between tables.
+    fn copy_raw(raw: &Self::Raw, cx: &mut CopyCx<'_>) -> Self::Raw;
 }
 
 /// A standard tag a typed structure is written with, and its index among
@@ -607,7 +1066,7 @@ macro_rules! tag_enum {
             }
         }
 
-        $crate::model::relocate::relocate_nothing!($name);
+        $crate::model::relocate::no_pointers!($name);
 
         #[cfg(feature = "serde")]
         impl $crate::model::serde::SerializeIn for $name {
@@ -658,6 +1117,28 @@ macro_rules! tag_enum {
                     $(Self::$variant => const { $crate::model::driver::StdTag::new($tag) },)*
                 }
             }
+
+            type Raw = Self;
+
+            fn raw_of_tag(tag: &'static str) -> Option<Self> {
+                <Self as $crate::model::driver::TagField>::from_tag(tag)
+            }
+
+            fn std_tag_raw(raw: &Self, _t: &$crate::model::table::Tables) -> $crate::model::driver::StdTag {
+                $crate::model::driver::TagField::std_tag(raw)
+            }
+
+            fn load_raw(raw: &Self, _t: &$crate::model::table::Tables) -> Self {
+                *raw
+            }
+
+            fn store_raw(&self, _cx: &mut $crate::model::table::StoreCx<'_>) -> Self {
+                *self
+            }
+
+            fn copy_raw(raw: &Self, _cx: &mut $crate::model::table::CopyCx<'_>) -> Self {
+                *raw
+            }
         }
     };
 }
@@ -667,11 +1148,8 @@ pub(crate) use tag_enum;
 pub(crate) trait Slot {
     /// Whether the field holds any number of occurrences.
     const MANY: bool;
-    /// Whether its substructure is a leaf ([`FromNode::LEAF`]).
+    /// Whether its substructure is a leaf ([`ToNodes::LEAF`]).
     const LEAF: bool;
-    /// Takes an occurrence; `false` when the field is full or the node does
-    /// not fit (the node then goes to `extra`).
-    fn accept(&mut self, node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> bool;
     /// Writes the occurrences.
     fn write(&self, tag: &'static str, cx: &WriteCx<'_>, out: &mut Vec<Structure>);
     /// Writes the occurrences into a flat arena ([`ToNodes::to_flat`]).
@@ -684,24 +1162,26 @@ pub(crate) trait Slot {
     }
     /// Calls `f` with each occurrence that is a typed structure.
     fn visit(&self, tag: &'static str, f: &mut dyn FnMut(&'static str, &dyn Fields));
-    /// Releases spare capacity once the structure is read.
-    fn finish(&mut self) {}
     /// An untyped node of the field's tag, as its type writes it
     /// ([`ToNodes::write_extra`]).
     fn write_extra(node: &Node, tag: &'static str, cx: &WriteCx<'_>) -> Option<Structure>;
+    /// Whether [`Slot::write_extra`] may convert an untyped node.
+    const CONVERTS: bool;
+    /// [`Slot::write_extra`] of an untyped node of a dataset's tables:
+    /// copied out only for a type that converts.
+    fn write_extra_row(node: &NodeRow, tag: &'static str, cx: &WriteCx<'_>) -> Option<Structure> {
+        if Self::CONVERTS {
+            Self::write_extra(&super::node::load_node(node, cx.tables), tag, cx)
+        } else {
+            None
+        }
+    }
 }
 
-impl<T: FromNode + ToNodes> Slot for Option<T> {
+impl<T: ToNodes> Slot for Option<T> {
     const MANY: bool = false;
     const LEAF: bool = T::LEAF;
-
-    fn accept(&mut self, node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> bool {
-        if self.is_some() {
-            return false;
-        }
-        *self = T::from_node(node, cx);
-        self.is_some()
-    }
+    const CONVERTS: bool = T::CONVERTS;
 
     fn write(&self, tag: &'static str, cx: &WriteCx<'_>, out: &mut Vec<Structure>) {
         if let Some(v) = self {
@@ -726,33 +1206,10 @@ impl<T: FromNode + ToNodes> Slot for Option<T> {
     }
 }
 
-/// Pushes onto a list that is usually short and is kept: short lists grow
-/// one item at a time, so that they need no shrinking (a reallocation)
-/// once read; longer ones double.
-pub(crate) fn push_exact<T>(list: &mut Vec<T>, item: T) {
-    if list.len() == list.capacity() {
-        if list.len() < 8 {
-            list.reserve_exact(1);
-        } else {
-            list.reserve(list.len());
-        }
-    }
-    list.push(item);
-}
-
-impl<T: FromNode + ToNodes> Slot for Vec<T> {
+impl<T: ToNodes> Slot for Vec<T> {
     const MANY: bool = true;
     const LEAF: bool = T::LEAF;
-
-    fn accept(&mut self, node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> bool {
-        match T::from_node(node, cx) {
-            Some(v) => {
-                push_exact(self, v);
-                true
-            }
-            None => false,
-        }
-    }
+    const CONVERTS: bool = T::CONVERTS;
 
     fn write(&self, tag: &'static str, cx: &WriteCx<'_>, out: &mut Vec<Structure>) {
         for v in self {
@@ -776,27 +1233,12 @@ impl<T: FromNode + ToNodes> Slot for Vec<T> {
             v.visit(tag, f);
         }
     }
-
-    fn finish(&mut self) {
-        if self.capacity() > self.len() {
-            self.shrink_to_fit();
-        }
-    }
 }
 
-impl<T: FromNode + ToNodes> Slot for ThinVec<T> {
+impl<T: ToNodes> Slot for ThinVec<T> {
     const MANY: bool = true;
     const LEAF: bool = T::LEAF;
-
-    fn accept(&mut self, node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> bool {
-        match T::from_node(node, cx) {
-            Some(v) => {
-                self.push(v);
-                true
-            }
-            None => false,
-        }
-    }
+    const CONVERTS: bool = T::CONVERTS;
 
     fn write(&self, tag: &'static str, cx: &WriteCx<'_>, out: &mut Vec<Structure>) {
         for v in self {
@@ -819,22 +1261,13 @@ impl<T: FromNode + ToNodes> Slot for ThinVec<T> {
         for v in self {
             v.visit(tag, f);
         }
-    }
-
-    fn finish(&mut self) {
-        self.shrink();
-    }
-}
-
-impl<T: FromNode> FromNode for Box<T> {
-    const LEAF: bool = T::LEAF;
-
-    fn from_node(node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> Option<Self> {
-        T::from_node(node, cx).map(Box::new)
     }
 }
 
 impl<T: ToNodes> ToNodes for Box<T> {
+    const LEAF: bool = T::LEAF;
+    const CONVERTS: bool = T::CONVERTS;
+
     fn to_node(&self, tag: &'static str, cx: &WriteCx<'_>) -> Structure {
         (**self).to_node(tag, cx)
     }
@@ -871,32 +1304,6 @@ impl<T> ConstDefault for ThinVec<T> {
     const EMPTY: Self = ThinVec::new();
 }
 
-/// Gives a substructure to a field of a structure's detail, allocating the
-/// detail for it; a detail allocated for a node that does not fit is
-/// released.
-pub(crate) fn accept_detail<D: Default, S: Slot>(
-    detail: &mut Option<Box<D>>,
-    field: impl FnOnce(&mut D) -> &mut S,
-    node: NodeRef<'_>,
-    cx: &mut ReadCx<'_>,
-) -> bool {
-    let fresh = detail.is_none();
-    let accepted = field(detail.get_or_insert_with(Box::default)).accept(node, cx);
-    if !accepted && fresh {
-        *detail = None;
-    }
-    accepted
-}
-
-/// A leaf: a payload without substructures. A node with substructures does
-/// not fit a leaf, and goes to `extra` whole.
-pub(crate) fn read_leaf<T: PayloadField>(node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> Option<T> {
-    if node.has_children() || node.has_xref() {
-        return None;
-    }
-    T::read(node, cx)
-}
-
 /// A leaf's structure.
 pub(crate) fn write_leaf<T: PayloadField>(
     value: &T,
@@ -913,7 +1320,19 @@ pub(crate) fn write_leaf_flat<'s, T: PayloadField>(
     cx: &WriteCx<'s>,
     out: &mut Flat<'s>,
 ) {
-    out.leaf_typed(tag.name, tag.index, value.payload(cx), value.claim(cx));
+    leaf_flat(out, tag, value.payload(cx), value.claim(cx));
+}
+
+/// A leaf, into a flat arena: one copy of [`Flat::leaf_typed`] for the
+/// leaves of every type, so that the writer's hot code stays small.
+#[inline(never)]
+pub(crate) fn leaf_flat<'s>(
+    out: &mut Flat<'s>,
+    tag: StdTag,
+    payload: FlatPayload<'s>,
+    claim: Option<Kind>,
+) {
+    out.leaf_typed(tag.name, tag.index, payload, claim);
 }
 
 /// A structure with a tag and a payload.
@@ -925,21 +1344,12 @@ pub(crate) fn leaf_structure(tag: &'static str, payload: Payload) -> Structure {
     }
 }
 
-/// Implements [`FromNode`] and [`ToNodes`] for leaves.
+/// Implements [`ToNodes`] for leaves.
 macro_rules! leaf {
     ($($ty:ty),* $(,)?) => {$(
-        impl $crate::model::driver::FromNode for $ty {
+        impl $crate::model::driver::ToNodes for $ty {
             const LEAF: bool = true;
 
-            fn from_node(
-                node: $crate::model::driver::NodeRef<'_>,
-                cx: &mut $crate::model::driver::ReadCx<'_>,
-            ) -> Option<Self> {
-                $crate::model::driver::read_leaf(node, cx)
-            }
-        }
-
-        impl $crate::model::driver::ToNodes for $ty {
             fn to_node(
                 &self,
                 tag: &'static str,
@@ -957,17 +1367,212 @@ macro_rules! leaf {
                 $crate::model::driver::write_leaf_flat(self, tag, cx, out);
             }
         }
+
     )*};
 }
 pub(crate) use leaf;
 
+/// Implements [`Item`] for a leaf, from its [`PayloadField`]: a list of it
+/// is a run of the table of its rows' values ([`RawTable`]).
+macro_rules! leaf_item {
+    ([$($gen:tt)*] $ty:ty, $elem:ty, $view:ty) => {
+        $crate::model::table::listed!([$($gen)*] $ty, $elem, $view);
+
+        impl<$($gen)*> $crate::model::table::Item for $ty {
+            type One = <$ty as $crate::model::driver::LeafOne>::One;
+
+            fn elems(t: &$crate::model::table::Tables) -> &[Self::Elem] {
+                <Self::Elem as $crate::model::driver::RawTable>::table(t)
+            }
+
+            fn elems_mut(t: &mut $crate::model::table::Tables) -> &mut Vec<Self::Elem> {
+                <Self::Elem as $crate::model::driver::RawTable>::table_mut(t)
+            }
+
+            fn fill() -> Self::Elem {
+                Self::Elem::default()
+            }
+
+            #[inline]
+            fn read_elem(
+                node: $crate::model::driver::NodeRef<'_>,
+                _at: u32,
+                cx: &mut $crate::model::driver::ReadCx<'_>,
+            ) -> Option<Self::Elem> {
+                if node.has_children() || node.has_xref() {
+                    return None;
+                }
+                <$ty as $crate::model::driver::PayloadField>::read_raw(node, cx)
+            }
+
+            #[inline]
+            fn write_elem<'s>(
+                e: &Self::Elem,
+                _at: u32,
+                tag: $crate::model::driver::StdTag,
+                cx: &$crate::model::driver::WriteCx<'s>,
+                out: &mut $crate::tree::Flat<'s>,
+            ) {
+                $crate::model::driver::leaf_flat(
+                    out,
+                    tag,
+                    <$ty as $crate::model::driver::PayloadField>::payload_raw(e, cx),
+                    <$ty as $crate::model::driver::PayloadField>::claim_raw(e, cx),
+                );
+            }
+
+            fn load_elem(e: &Self::Elem, _at: u32, t: &$crate::model::table::Tables) -> Self {
+                <$ty as $crate::model::driver::PayloadField>::load_raw(e, t)
+            }
+
+            fn store_elem(
+                &self,
+                _at: u32,
+                cx: &mut $crate::model::table::StoreCx<'_>,
+            ) -> Self::Elem {
+                <$ty as $crate::model::driver::PayloadField>::store_raw(self, cx)
+            }
+
+            fn each_elem(
+                e: &Self::Elem,
+                _at: u32,
+                _t: &$crate::model::table::Tables,
+                f: &mut dyn FnMut($crate::model::XrefId),
+            ) {
+                <$ty as $crate::model::driver::PayloadField>::each_raw(e, f);
+            }
+
+            fn copy_elem(
+                e: &Self::Elem,
+                _at: u32,
+                cx: &mut $crate::model::table::CopyCx<'_>,
+                _to: u32,
+            ) -> Self::Elem {
+                <$ty as $crate::model::driver::PayloadField>::copy_raw(e, cx)
+            }
+
+            #[inline]
+            fn view_elem<'a>(
+                e: &'a Self::Elem,
+                _at: u32,
+                data: &'a $crate::model::Dataset,
+            ) -> Self::View<'a> {
+                <$ty as $crate::model::driver::PayloadField>::view_raw(*e, data)
+            }
+
+            fn read_one(
+                node: $crate::model::driver::NodeRef<'_>,
+                cx: &mut $crate::model::driver::ReadCx<'_>,
+            ) -> Option<Self::One> {
+                Self::read_elem(node, 0, cx).and_then(<$ty as $crate::model::driver::LeafOne>::one)
+            }
+
+            fn write_one<'s>(
+                o: &Self::One,
+                tag: $crate::model::driver::StdTag,
+                cx: &$crate::model::driver::WriteCx<'s>,
+                out: &mut $crate::tree::Flat<'s>,
+            ) {
+                let raw = <$ty as $crate::model::driver::LeafOne>::raw(*o);
+                Self::write_elem(&raw, 0, tag, cx, out);
+            }
+
+            fn load_one(o: Self::One, t: &$crate::model::table::Tables) -> Self {
+                Self::load_elem(&<$ty as $crate::model::driver::LeafOne>::raw(o), 0, t)
+            }
+
+            fn store_one(&self, cx: &mut $crate::model::table::StoreCx<'_>) -> Self::One {
+                <$ty as $crate::model::driver::LeafOne>::store_one(self, cx)
+            }
+
+            fn each_one(
+                o: Self::One,
+                t: &$crate::model::table::Tables,
+                f: &mut dyn FnMut($crate::model::XrefId),
+            ) {
+                Self::each_elem(&<$ty as $crate::model::driver::LeafOne>::raw(o), 0, t, f);
+            }
+
+            fn copy_one(o: Self::One, cx: &mut $crate::model::table::CopyCx<'_>) -> Self::One {
+                let raw = <$ty as $crate::model::driver::LeafOne>::raw(o);
+                <$ty as $crate::model::driver::LeafOne>::one(Self::copy_elem(&raw, 0, cx, 0))
+                    .unwrap_or(o)
+            }
+
+            #[inline]
+            fn view_one(o: Self::One, data: &$crate::model::Dataset) -> Self::View<'_> {
+                let raw = <$ty as $crate::model::driver::LeafOne>::raw(o);
+                <$ty as $crate::model::driver::PayloadField>::view_raw(raw, data)
+            }
+        }
+    };
+}
+pub(crate) use leaf_item;
+
+/// How a field holds one occurrence of a leaf ([`Item::One`](super::table::Item::One)):
+/// as the leaf's row value, or, when that value has an empty state that an
+/// `Option` around it cannot share, as what remains of it (an enumeration
+/// value's code, a pointer's id), so that an optional leaf is no larger
+/// than the leaf.
+pub(crate) trait LeafOne: PayloadField {
+    /// What a field holding one occurrence keeps.
+    type One: Copy + PartialEq + std::fmt::Debug + 'static;
+    /// The occurrence of a row value; `None` for the empty one.
+    fn one(raw: Self::Raw) -> Option<Self::One>;
+    /// The row value of an occurrence.
+    fn raw(one: Self::One) -> Self::Raw;
+    /// An owned value, stored as an occurrence.
+    fn store_one(&self, cx: &mut StoreCx<'_>) -> Self::One;
+}
+
+/// [`LeafOne`] of a leaf kept as its row value.
+macro_rules! leaf_one_same {
+    ([$($gen:tt)*] $ty:ty) => {
+        impl<$($gen)*> $crate::model::driver::LeafOne for $ty {
+            type One = <$ty as $crate::model::driver::PayloadField>::Raw;
+
+            #[inline]
+            fn one(raw: Self::Raw) -> Option<Self::One> {
+                Some(raw)
+            }
+
+            #[inline]
+            fn raw(one: Self::One) -> Self::Raw {
+                one
+            }
+
+            fn store_one(&self, cx: &mut $crate::model::table::StoreCx<'_>) -> Self::One {
+                <$ty as $crate::model::driver::PayloadField>::store_raw(self, cx)
+            }
+        }
+    };
+}
+pub(crate) use leaf_one_same;
+
+leaf_one_same!([] Text);
+leaf_one_same!([] u32);
+
+impl LeafOne for XrefId {
+    type One = XrefId;
+
+    #[inline]
+    fn one(raw: Option<XrefId>) -> Option<XrefId> {
+        raw
+    }
+
+    #[inline]
+    fn raw(one: XrefId) -> Option<XrefId> {
+        Some(one)
+    }
+
+    fn store_one(&self, _cx: &mut StoreCx<'_>) -> XrefId {
+        *self
+    }
+}
+
 /// A pointer leaf (`ANCI @U1@`, `SUBM @U1@`): text in its place does not
 /// fit.
 impl PayloadField for XrefId {
-    fn read(node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> Option<Self> {
-        cx.pointer(node)
-    }
-
     fn write(&self, cx: &WriteCx<'_>) -> Payload {
         cx.pointer(*self)
     }
@@ -975,19 +1580,47 @@ impl PayloadField for XrefId {
     fn payload<'s>(&'s self, cx: &WriteCx<'s>) -> FlatPayload<'s> {
         cx.pointer_flat(*self)
     }
+
+    type Raw = Option<XrefId>;
+    type View<'a> = XrefId;
+
+    #[inline]
+    fn read_raw(node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> Option<Self::Raw> {
+        cx.pointer(node).map(Some)
+    }
+
+    #[inline]
+    fn payload_raw<'s>(raw: &Self::Raw, cx: &WriteCx<'s>) -> FlatPayload<'s> {
+        raw.map_or(FlatPayload::None, |id| cx.pointer_flat(id))
+    }
+
+    fn load_raw(raw: &Self::Raw, _t: &Tables) -> Self {
+        // Every row's pointer was read or stored as one.
+        raw.unwrap_or(XrefId::DANGLING)
+    }
+
+    fn store_raw(&self, _cx: &mut StoreCx<'_>) -> Self::Raw {
+        Some(*self)
+    }
+
+    fn each_raw(raw: &Self::Raw, f: &mut dyn FnMut(XrefId)) {
+        if let Some(id) = raw {
+            f(*id);
+        }
+    }
+
+    fn copy_raw(raw: &Self::Raw, cx: &mut CopyCx<'_>) -> Self::Raw {
+        raw.map(|id| cx.xref(id))
+    }
+
+    fn view_raw(raw: Self::Raw, _data: &super::Dataset) -> Self::View<'_> {
+        raw.unwrap_or(XrefId::DANGLING)
+    }
 }
 
 /// An integer (`HEIGHT 100`): digits only, at most `u32::MAX`; anything
 /// else does not fit and is kept as it is, in `extra`.
 impl PayloadField for u32 {
-    fn read(node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> Option<Self> {
-        let s = cx.payload_str(node);
-        if node.is_pointer() || s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        s.parse().ok()
-    }
-
     fn write(&self, _cx: &WriteCx<'_>) -> Payload {
         Payload::Text(self.to_string().into())
     }
@@ -995,9 +1628,47 @@ impl PayloadField for u32 {
     fn claim(&self, _cx: &WriteCx<'_>) -> Option<Kind> {
         Some(Kind::Int)
     }
+
+    type Raw = u32;
+    type View<'a> = u32;
+
+    fn read_raw(node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> Option<u32> {
+        let s = cx.payload_str(node);
+        if node.is_pointer() || s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        s.parse().ok()
+    }
+
+    fn payload_raw<'s>(raw: &u32, _cx: &WriteCx<'s>) -> FlatPayload<'s> {
+        FlatPayload::Text(Cow::Owned(raw.to_string()), 0)
+    }
+
+    fn claim_raw(_raw: &u32, _cx: &WriteCx<'_>) -> Option<Kind> {
+        Some(Kind::Int)
+    }
+
+    fn load_raw(raw: &u32, _t: &Tables) -> Self {
+        *raw
+    }
+
+    fn store_raw(&self, _cx: &mut StoreCx<'_>) -> u32 {
+        *self
+    }
+
+    fn copy_raw(raw: &u32, _cx: &mut CopyCx<'_>) -> u32 {
+        *raw
+    }
+
+    fn view_raw(raw: u32, _data: &super::Dataset) -> u32 {
+        raw
+    }
 }
 
 leaf!(Text, XrefId, u32);
+leaf_item!([] Text, Span, TextRef<'a>);
+leaf_item!([] XrefId, Option<XrefId>, XrefId);
+leaf_item!([] u32, u32, u32);
 
 /// The names of the structure types of the specifications a type stands
 /// for, per version (7.x: the URI without its prefix; 5.5.1: the context
@@ -1060,23 +1731,8 @@ pub(crate) trait Fields {
     fn fields(&self) -> &'static [FieldDesc];
     /// The field of each standard tag.
     fn lookup(&self) -> &'static Lookup;
-    /// Reads the identifier; `false` when the node has one and the type
-    /// has none (a substructure).
-    fn read_xref(&mut self, node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> bool;
-    /// Reads the tag of a type that keeps it; `false` when the type does
-    /// not name it.
-    fn read_tag(&mut self, node: NodeRef<'_>) -> bool;
-    /// Reads the payload; `false` when the node's payload does not fit.
-    fn read_payload(&mut self, node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> bool;
-    /// Gives a substructure to field `field`; `false` when it does not
-    /// take it.
-    fn accept(&mut self, field: usize, node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> bool;
-    /// Releases spare capacity.
-    fn finish(&mut self);
     /// The substructures no field holds.
     fn extra(&self) -> &Extra;
-    /// The same, to fill.
-    fn extra_mut(&mut self) -> &mut Extra;
     /// The identifier to write.
     fn write_xref(&self, cx: &WriteCx<'_>) -> Option<Xref>;
     /// The payload to write.
@@ -1130,64 +1786,6 @@ pub(crate) trait Struct: Fields + Default {
     const SPEC: SpecNames;
 }
 
-/// Reads a typed structure from `node`.
-pub(crate) fn read<T: Struct>(node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> Option<T> {
-    let mut s = T::default();
-    read_into(&mut s, node, cx).then_some(s)
-}
-
-/// Fills a structure from `node`: its identifier, tag and payload, then
-/// each substructure into the field its tag selects, or into `extra`.
-/// `false` when the node does not fit.
-///
-/// Substructures of one tag keep their order (the first is the preferred
-/// one): once one does not fit its field (its shape, or a field already
-/// full), the later ones of its tag go to `extra` after it, so that the
-/// field's, written first, all came before it.
-///
-/// A payload or an identifier the type has no place for (text where its
-/// pointer belongs, a payload on a record, an identifier on a
-/// substructure) does not make the structure untyped: it is kept aside, as
-/// the first node of `extra`, tagged [`TagId::ASIDE`], and written back in
-/// its place.
-pub(crate) fn read_into(s: &mut dyn Fields, node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> bool {
-    if !s.read_tag(node) {
-        return false;
-    }
-    let xref_fits = s.read_xref(node, cx);
-    // No payload where one is expected leaves the type's empty value.
-    let payload_fits = s.read_payload(node, cx) || node.has_no_payload();
-    if !xref_fits || !payload_fits {
-        let mut aside = cx.node_shallow(node);
-        aside.tag = TagId::ASIDE;
-        if xref_fits {
-            aside.xref = None;
-        }
-        if payload_fits {
-            aside.payload = Value::None;
-        }
-        s.extra_mut().push(aside);
-    }
-    let lookup = s.lookup();
-    // The standard tags already sent to `extra`, as a bit set.
-    let mut sent = [0_u64; STANDARD_TAGS.len().div_ceil(64)];
-    for child in node.children() {
-        let tag = child.tag_id() as usize;
-        let field = lookup.get(tag).copied().unwrap_or(0);
-        let (word, bit) = (tag / 64, 1_u64 << (tag % 64));
-        let blocked = sent.get(word).is_some_and(|w| w & bit != 0);
-        if field == 0 || blocked || !s.accept(usize::from(field - 1), child, cx) {
-            if let Some(w) = sent.get_mut(word).filter(|_| field != 0) {
-                *w |= bit;
-            }
-            let n = cx.node(child);
-            s.extra_mut().push(n);
-        }
-    }
-    s.finish();
-    true
-}
-
 /// [`write`] into a flat arena, the texts borrowed where they can be:
 /// typed ([`Flat::open_typed`]), the payload trusted as `claim` (or the
 /// type's [`Fields::payload_claim`]) says.
@@ -1234,6 +1832,102 @@ pub(crate) fn write_flat<'s, F: Fields + ?Sized>(
     out.close(at);
 }
 
+/// What writing a row needs of its type. It is dyn-compatible, so that
+/// [`write_row_flat`] has one copy for every type.
+pub(crate) trait RowWrite {
+    /// The row, as a trait object.
+    fn as_dyn(&self) -> &dyn RowWrite;
+    /// The identifier to write.
+    fn write_xref<'s>(&self, cx: &WriteCx<'s>) -> Option<Cow<'s, str>>;
+    /// The payload to write.
+    fn write_payload<'s>(&self, cx: &WriteCx<'s>) -> FlatPayload<'s>;
+    /// [`PayloadField::claim`] of the payload.
+    fn payload_claim(&self, cx: &WriteCx<'_>) -> Option<Kind>;
+    /// The fields' structures, in order.
+    fn write_fields<'s>(&self, cx: &WriteCx<'s>, out: &mut Flat<'s>);
+    /// The field of each standard tag.
+    fn lookup(&self) -> &'static Lookup;
+    /// An untyped node of field `field`'s tag, as the field's type writes
+    /// it ([`Slot::write_extra_row`]).
+    fn write_extra(
+        &self,
+        field: usize,
+        node: &NodeRow,
+        tag: &'static str,
+        cx: &WriteCx<'_>,
+    ) -> Option<Structure>;
+}
+
+/// Writes a row of a dataset's tables into a flat arena, its texts
+/// borrowed from the store, as [`write_flat`] writes an owned structure:
+/// its identifier and payload (or what is kept aside in their place), its
+/// fields in order, then `extra`, its untyped substructures.
+pub(crate) fn write_row_flat<'s, R: RowWrite + ?Sized>(
+    s: &R,
+    extra: List<Node>,
+    tag: StdTag,
+    cx: &WriteCx<'s>,
+    out: &mut Flat<'s>,
+    claim: Option<Kind>,
+) {
+    // Most structures have no untyped substructure.
+    if !extra.is_empty() {
+        write_row_extra(s.as_dyn(), extra, tag, cx, out, claim);
+        return;
+    }
+    let xref = s.write_xref(cx);
+    let payload = s.write_payload(cx);
+    let claim = claim.or_else(|| s.payload_claim(cx));
+    let at = out.open_typed(tag.name, tag.index, xref, payload, claim);
+    s.write_fields(cx, out);
+    out.close(at);
+}
+
+/// [`write_row_flat`] for a structure with untyped substructures: one
+/// copy for every type.
+#[inline(never)]
+fn write_row_extra<'s>(
+    s: &dyn RowWrite,
+    extra: List<Node>,
+    tag: StdTag,
+    cx: &WriteCx<'s>,
+    out: &mut Flat<'s>,
+    claim: Option<Kind>,
+) {
+    let mut xref = s.write_xref(cx);
+    let mut payload = s.write_payload(cx);
+    let mut claim = claim.or_else(|| s.payload_claim(cx));
+    let nodes = extra.of(&cx.tables.nodes);
+    for node in nodes.iter().filter(|n| n.tag == TagId::ASIDE) {
+        // What the type has no place for is no typed value.
+        out.untrusted();
+        claim = None;
+        if xref.is_none() {
+            xref = node.xref.map(|x| Cow::Borrowed(cx.store.xref(x)));
+        }
+        if let Some(p) = node.payload {
+            payload = cx.span_flat(p);
+        }
+    }
+    let at = out.open_typed(tag.name, tag.index, xref, payload, claim);
+    s.write_fields(cx, out);
+    let lookup = s.lookup();
+    for node in nodes.iter().filter(|n| n.tag != TagId::ASIDE) {
+        // A node a field takes is written as its type writes its values.
+        let index = node.tag.get() as usize;
+        let field = lookup.get(index).copied().unwrap_or(0);
+        let written = match (cx.convert, STANDARD_TAGS.get(index)) {
+            (true, Some(std)) if field > 0 => s.write_extra(usize::from(field - 1), node, std, cx),
+            _ => None,
+        };
+        match written {
+            Some(w) => out.push_structure(w),
+            None => super::node::node_row_flat(node, cx, out),
+        }
+    }
+    out.close(at);
+}
+
 /// Writes a typed structure as `tag`: its identifier and payload, its
 /// fields in order, then `extra`.
 pub(crate) fn write(s: &dyn Fields, tag: &'static str, cx: &WriteCx<'_>) -> Structure {
@@ -1271,9 +1965,10 @@ pub(crate) fn write(s: &dyn Fields, tag: &'static str, cx: &WriteCx<'_>) -> Stru
     }
 }
 
-/// Declares a typed structure: the struct, its field table and its
-/// [`FromNode`] and [`ToNodes`] implementations, which call [`read`] and
-/// [`write`].
+/// Declares a typed structure: the owned struct, its row and its detail's,
+/// its field table, how a dataset reads, writes, views, copies and stores
+/// its rows ([`RowFields`], [`RowWrite`], [`Item`](super::table::Item)), and its [`ToNodes`]
+/// implementation, which calls [`write`].
 ///
 /// ```text
 /// gedcom_struct! {
@@ -1316,7 +2011,7 @@ pub(crate) fn write(s: &dyn Fields, tag: &'static str, cx: &WriteCx<'_>) -> Stru
 macro_rules! gedcom_struct {
     (
         $(#[$meta:meta])*
-        pub struct $name:ident $([tag = $tagfn:path])? $([convert = $convfn:path, $untypedfn:path])? $([chain = $link:ident : $other:ty])? {
+        pub struct $name:ident => $row:ident $([tag = $tagfn:path, $rowtagfn:path])? $([convert = $convfn:path, $untypedfn:path, $convrow:path])? $([chain = $link:ident : $other:ty])? {
             $(@xref $(#[$xmeta:meta])* $xfield:ident;)?
             $(@tag $(#[$tmeta:meta])* $tfield:ident : $tty:ty;)?
             $(@payload $(#[$pmeta:meta])* $pfield:ident : $pty:ty;)?
@@ -1325,7 +2020,7 @@ macro_rules! gedcom_struct {
                 $tag:literal $(| $alt:literal)* => $field:ident : $fty:ty,
             )*
             $(
-                @detail $(#[$dmeta:meta])* $dname:ident {
+                @detail $(#[$dmeta:meta])* $dname:ident => $drow:ident {
                     $(
                         $(#[$gmeta:meta])*
                         $gtag:literal $(| $galt:literal)* => $gfield:ident : $gty:ty,
@@ -1420,70 +2115,8 @@ macro_rules! gedcom_struct {
                 &<Self as $crate::model::driver::Struct>::LOOKUP
             }
 
-            fn read_xref(
-                &mut self,
-                node: $crate::model::driver::NodeRef<'_>,
-                cx: &mut $crate::model::driver::ReadCx<'_>,
-            ) -> bool {
-                gedcom_struct!(@read_xref self node cx $($xfield)?)
-            }
-
-            fn read_tag(&mut self, node: $crate::model::driver::NodeRef<'_>) -> bool {
-                gedcom_struct!(@read_tag self node $($tfield $tty)?)
-            }
-
-            fn read_payload(
-                &mut self,
-                node: $crate::model::driver::NodeRef<'_>,
-                cx: &mut $crate::model::driver::ReadCx<'_>,
-            ) -> bool {
-                gedcom_struct!(@read_payload self node cx $($pfield $pty)?)
-            }
-
-            #[allow(unused_assignments, unused_mut, unused_variables)]
-            fn accept(
-                &mut self,
-                field: usize,
-                node: $crate::model::driver::NodeRef<'_>,
-                cx: &mut $crate::model::driver::ReadCx<'_>,
-            ) -> bool {
-                let mut i = 0_usize;
-                $(
-                    if field == i {
-                        return $crate::model::driver::Slot::accept(&mut self.$field, node, cx);
-                    }
-                    i += 1;
-                )*
-                $($(
-                    if field == i {
-                        return $crate::model::driver::accept_detail(
-                            &mut self.detail,
-                            |d: &mut $dname| &mut d.$gfield,
-                            node,
-                            cx,
-                        );
-                    }
-                    i += 1;
-                )*)?
-                false
-            }
-
-            fn finish(&mut self) {
-                $($crate::model::driver::Slot::finish(&mut self.$field);)*
-                $(
-                    if let Some(d) = &mut self.detail {
-                        let d: &mut $dname = d;
-                        $($crate::model::driver::Slot::finish(&mut d.$gfield);)*
-                    }
-                )?
-            }
-
             fn extra(&self) -> &$crate::model::Extra {
                 &self.extra
-            }
-
-            fn extra_mut(&mut self) -> &mut $crate::model::Extra {
-                &mut self.extra
             }
 
             fn write_xref(
@@ -1594,15 +2227,6 @@ macro_rules! gedcom_struct {
             }
         }
 
-        impl $crate::model::driver::FromNode for $name {
-            fn from_node(
-                node: $crate::model::driver::NodeRef<'_>,
-                cx: &mut $crate::model::driver::ReadCx<'_>,
-            ) -> Option<Self> {
-                $crate::model::driver::read(node, cx)
-            }
-        }
-
         impl $crate::model::driver::ToNodes for $name {
             fn to_node(
                 &self,
@@ -1657,6 +2281,11 @@ macro_rules! gedcom_struct {
             }
 
             $(
+                const CONVERTS: bool = {
+                    let _ = $convfn;
+                    true
+                };
+
                 fn write_extra(
                     node: &$crate::model::Node,
                     tag: &'static str,
@@ -1667,23 +2296,6 @@ macro_rules! gedcom_struct {
                     Some($crate::model::driver::write(&converted, tag, cx))
                 }
             )?
-        }
-
-        impl $crate::model::relocate::Relocate for $name {
-            #[allow(unused_variables)]
-            fn relocate(&mut self, r: &mut $crate::model::relocate::Relocation<'_>) {
-                $($crate::model::relocate::Relocate::relocate(&mut self.$xfield, r);)?
-                $($crate::model::relocate::Relocate::relocate(&mut self.$tfield, r);)?
-                $($crate::model::relocate::Relocate::relocate(&mut self.$pfield, r);)?
-                $($crate::model::relocate::Relocate::relocate(&mut self.$field, r);)*
-                $(
-                    if let Some(d) = &mut self.detail {
-                        let d: &mut $dname = d;
-                        $($crate::model::relocate::Relocate::relocate(&mut d.$gfield, r);)*
-                    }
-                )?
-                $crate::model::relocate::Relocate::relocate(&mut self.extra, r);
-            }
         }
 
         // The identifier (`$xfield`) names the structure: it is no pointer.
@@ -1888,42 +2500,729 @@ macro_rules! gedcom_struct {
                 }
             )?
         }
+
+        // ---- The row of the type in a dataset's tables -----------------
+
+        #[doc(hidden)]
+        #[derive(Clone, Copy, Debug, Default, PartialEq)]
+        pub struct $row {
+            $(pub(crate) $xfield: Option<$crate::model::XrefId>,)?
+            $(pub(crate) $tfield: <$tty as $crate::model::driver::TagField>::Raw,)?
+            $(pub(crate) $pfield: <$pty as $crate::model::driver::PayloadField>::Raw,)?
+            $(pub(crate) $field: <$fty as $crate::model::table::RowSlot>::Stored,)*
+            $(pub(crate) detail: Option<$crate::model::table::Idx<$dname>>,)?
+            // A record keeps its untyped substructures in its row: records
+            // often have some (extension tags); other structures, in a side
+            // table of their table.
+            $(pub(crate) extra: gedcom_struct!(@extra_ty $xfield),)?
+        }
+
+        impl $crate::model::table::sealed::Stored for $name {
+            type Row = $row;
+
+            fn empty() -> &'static $row {
+                static EMPTY: std::sync::LazyLock<$row> = std::sync::LazyLock::new(Default::default);
+                &EMPTY
+            }
+        }
+
+        impl $row {
+            /// The untyped substructures of the structure of this row, the
+            /// row `at` of its table.
+            #[inline]
+            #[allow(unused_variables)]
+            pub(crate) fn extra_in(
+                &self,
+                at: u32,
+                t: &$crate::model::table::Tables,
+            ) -> $crate::model::table::List<$crate::model::Node> {
+                gedcom_struct!(@extra_get self at t $name $($xfield)?)
+            }
+
+            /// Gives the structure of this row, the row `at` of its table,
+            /// untyped substructures.
+            #[inline]
+            #[allow(unused_variables)]
+            pub(crate) fn set_extra_in(
+                &mut self,
+                at: u32,
+                t: &mut $crate::model::table::Tables,
+                extra: $crate::model::table::List<$crate::model::Node>,
+            ) {
+                gedcom_struct!(@extra_set self at t extra $name $($xfield)?)
+            }
+        }
+
+        $(
+            #[doc(hidden)]
+            #[derive(Clone, Copy, Debug, Default, PartialEq)]
+            pub struct $drow {
+                $(pub(crate) $gfield: <$gty as $crate::model::table::RowSlot>::Stored,)*
+            }
+
+            impl $crate::model::table::sealed::Stored for $dname {
+                type Row = $drow;
+
+                fn empty() -> &'static $drow {
+                    static EMPTY: std::sync::LazyLock<$drow> =
+                        std::sync::LazyLock::new(Default::default);
+                    &EMPTY
+                }
+            }
+
+            $crate::model::table::listed!([] $dname, $drow, ());
+
+            impl $crate::model::table::Item for $dname {
+                type One = $crate::model::table::Idx<$dname>;
+
+                fn elems(t: &$crate::model::table::Tables) -> &[$drow] {
+                    &<$dname as $crate::model::table::HasTable>::table(t).rows
+                }
+                fn elems_mut(t: &mut $crate::model::table::Tables) -> &mut Vec<$drow> {
+                    &mut <$dname as $crate::model::table::HasTable>::table_mut(t).rows
+                }
+                fn fill() -> $drow {
+                    $drow::default()
+                }
+                fn read_elem(
+                    _node: $crate::model::driver::NodeRef<'_>,
+                    _at: u32,
+                    _cx: &mut $crate::model::driver::ReadCx<'_>,
+                ) -> Option<$drow> {
+                    None
+                }
+                fn read_one(
+                    _node: $crate::model::driver::NodeRef<'_>,
+                    _cx: &mut $crate::model::driver::ReadCx<'_>,
+                ) -> Option<Self::One> {
+                    None
+                }
+                fn write_elem<'s>(
+                    e: &$drow,
+                    _at: u32,
+                    _tag: $crate::model::driver::StdTag,
+                    cx: &$crate::model::driver::WriteCx<'s>,
+                    out: &mut $crate::tree::Flat<'s>,
+                ) {
+                    $(<$gty as $crate::model::table::RowSlot>::write(
+                        &e.$gfield,
+                        const { $crate::model::driver::StdTag::new($gtag) },
+                        cx,
+                        out,
+                    );)*
+                }
+                fn write_one<'s>(
+                    o: &Self::One,
+                    tag: $crate::model::driver::StdTag,
+                    cx: &$crate::model::driver::WriteCx<'s>,
+                    out: &mut $crate::tree::Flat<'s>,
+                ) {
+                    if let Some(e) = Self::elems(cx.tables).get(o.get() as usize) {
+                        Self::write_elem(e, o.get(), tag, cx, out);
+                    }
+                }
+                fn load_elem(e: &$drow, _at: u32, t: &$crate::model::table::Tables) -> Self {
+                    Self {
+                        $($gfield: <$gty as $crate::model::table::RowSlot>::load(&e.$gfield, t),)*
+                    }
+                }
+                fn load_one(o: Self::One, t: &$crate::model::table::Tables) -> Self {
+                    Self::elems(t)
+                        .get(o.get() as usize)
+                        .map(|e| Self::load_elem(e, o.get(), t))
+                        .unwrap_or_default()
+                }
+                fn store_elem(&self, _at: u32, cx: &mut $crate::model::table::StoreCx<'_>) -> $drow {
+                    $drow {
+                        $($gfield: <$gty as $crate::model::table::RowSlot>::store(&self.$gfield, cx),)*
+                    }
+                }
+                fn store_one(&self, cx: &mut $crate::model::table::StoreCx<'_>) -> Self::One {
+                    let e = self.store_elem(0, cx);
+                    $crate::model::table::push_row::<$dname>(cx.tables, e)
+                }
+                fn each_elem(
+                    e: &$drow,
+                    _at: u32,
+                    t: &$crate::model::table::Tables,
+                    f: &mut dyn FnMut($crate::model::XrefId),
+                ) {
+                    $(<$gty as $crate::model::table::RowSlot>::each(&e.$gfield, t, f);)*
+                }
+                fn each_one(
+                    o: Self::One,
+                    t: &$crate::model::table::Tables,
+                    f: &mut dyn FnMut($crate::model::XrefId),
+                ) {
+                    if let Some(e) = Self::elems(t).get(o.get() as usize) {
+                        Self::each_elem(e, o.get(), t, f);
+                    }
+                }
+                fn copy_elem(
+                    e: &$drow,
+                    _at: u32,
+                    cx: &mut $crate::model::table::CopyCx<'_>,
+                    _to: u32,
+                ) -> $drow {
+                    $drow {
+                        $($gfield: <$gty as $crate::model::table::RowSlot>::copy(&e.$gfield, cx),)*
+                    }
+                }
+                fn copy_one(o: Self::One, cx: &mut $crate::model::table::CopyCx<'_>) -> Self::One {
+                    let e = Self::elems(cx.from).get(o.get() as usize).copied().unwrap_or_default();
+                    let c = Self::copy_elem(&e, o.get(), cx, 0);
+                    $crate::model::table::push_row::<$dname>(cx.to, c)
+                }
+                fn view_elem<'a>(_e: &'a $drow, _at: u32, _data: &'a $crate::model::Dataset) {}
+                fn view_one(_o: Self::One, _data: &$crate::model::Dataset) {}
+            }
+        )?
+
+        impl $crate::model::driver::RowFields
+            for $crate::model::driver::Building<$row, gedcom_struct!(@drow $($drow)?)>
+        {
+            fn fields(&self) -> &'static [$crate::model::driver::FieldDesc] {
+                <$name as $crate::model::driver::Struct>::FIELDS
+            }
+
+            fn lookup(&self) -> &'static $crate::model::driver::Lookup {
+                &<$name as $crate::model::driver::Struct>::LOOKUP
+            }
+
+            fn read_tag(&mut self, node: $crate::model::driver::NodeRef<'_>) -> bool {
+                gedcom_struct!(@row_read_tag self node $($tfield $tty)?)
+            }
+
+            fn read_xref(
+                &mut self,
+                node: $crate::model::driver::NodeRef<'_>,
+                cx: &mut $crate::model::driver::ReadCx<'_>,
+            ) -> bool {
+                gedcom_struct!(@row_read_xref self node cx $($xfield)?)
+            }
+
+            fn read_payload(
+                &mut self,
+                node: $crate::model::driver::NodeRef<'_>,
+                cx: &mut $crate::model::driver::ReadCx<'_>,
+            ) -> bool {
+                gedcom_struct!(@row_read_payload self node cx $($pfield $pty)?)
+            }
+
+            #[allow(unused_assignments, unused_mut, unused_variables)]
+            fn reserve(
+                &mut self,
+                field: usize,
+                count: u32,
+                cx: &mut $crate::model::driver::ReadCx<'_>,
+            ) {
+                let mut i = 0_usize;
+                $(
+                    if field == i {
+                        return <$fty as $crate::model::table::RowSlot>::reserve(&mut self.row.$field, count, cx);
+                    }
+                    i += 1;
+                )*
+                $($(
+                    if field == i {
+                        let d = self.detail.get_or_insert_with(Default::default);
+                        return <$gty as $crate::model::table::RowSlot>::reserve(&mut d.$gfield, count, cx);
+                    }
+                    i += 1;
+                )*)?
+            }
+
+            #[allow(unused_assignments, unused_mut, unused_variables)]
+            #[inline]
+            fn accept(
+                &mut self,
+                field: usize,
+                node: $crate::model::driver::NodeRef<'_>,
+                reserved: u32,
+                cx: &mut $crate::model::driver::ReadCx<'_>,
+            ) -> bool {
+                let mut i = 0_usize;
+                $(
+                    if field == i {
+                        return <$fty as $crate::model::table::RowSlot>::accept(&mut self.row.$field, node, reserved, cx);
+                    }
+                    i += 1;
+                )*
+                $($(
+                    if field == i {
+                        let fresh = self.detail.is_none();
+                        let d = self.detail.get_or_insert_with(Default::default);
+                        let taken = <$gty as $crate::model::table::RowSlot>::accept(&mut d.$gfield, node, reserved, cx);
+                        if !taken && fresh {
+                            self.detail = None;
+                        }
+                        return taken;
+                    }
+                    i += 1;
+                )*)?
+                false
+            }
+
+            #[allow(unused_assignments, unused_mut, unused_variables)]
+            fn finish(
+                &mut self,
+                field: usize,
+                reserved: u32,
+                cx: &mut $crate::model::driver::ReadCx<'_>,
+            ) {
+                let mut i = 0_usize;
+                $(
+                    if field == i {
+                        return <$fty as $crate::model::table::RowSlot>::finish(&mut self.row.$field, reserved, cx);
+                    }
+                    i += 1;
+                )*
+                $($(
+                    if field == i {
+                        if let Some(d) = &mut self.detail {
+                            <$gty as $crate::model::table::RowSlot>::finish(&mut d.$gfield, reserved, cx);
+                        }
+                        return;
+                    }
+                    i += 1;
+                )*)?
+            }
+        }
+
+        impl $crate::model::driver::RowWrite for $row {
+            fn as_dyn(&self) -> &dyn $crate::model::driver::RowWrite {
+                self
+            }
+
+            #[inline]
+            fn write_xref<'s>(
+                &self,
+                cx: &$crate::model::driver::WriteCx<'s>,
+            ) -> Option<std::borrow::Cow<'s, str>> {
+                gedcom_struct!(@row_xref self cx $($xfield)?)
+            }
+
+            #[inline]
+            fn write_payload<'s>(
+                &self,
+                cx: &$crate::model::driver::WriteCx<'s>,
+            ) -> $crate::tree::FlatPayload<'s> {
+                gedcom_struct!(@row_payload self cx $($pfield $pty)?)
+            }
+
+            #[inline]
+            fn payload_claim(
+                &self,
+                cx: &$crate::model::driver::WriteCx<'_>,
+            ) -> Option<$crate::spec::schema::Kind> {
+                gedcom_struct!(@row_claim self cx $($pfield $pty)?)
+            }
+
+            #[allow(unused_variables)]
+            fn write_fields<'s>(
+                &self,
+                cx: &$crate::model::driver::WriteCx<'s>,
+                out: &mut $crate::tree::Flat<'s>,
+            ) {
+                $(<$fty as $crate::model::table::RowSlot>::write(
+                    &self.$field,
+                    const { $crate::model::driver::StdTag::new($tag) },
+                    cx,
+                    out,
+                );)*
+                $(
+                    if let Some(d) = &self.detail {
+                        <$dname as $crate::model::table::Item>::write_one(
+                            d,
+                            const { $crate::model::driver::StdTag::new("") },
+                            cx,
+                            out,
+                        );
+                    }
+                )?
+            }
+
+            fn lookup(&self) -> &'static $crate::model::driver::Lookup {
+                &<$name as $crate::model::driver::Struct>::LOOKUP
+            }
+
+            #[allow(unused_assignments, unused_mut, unused_variables)]
+            fn write_extra(
+                &self,
+                field: usize,
+                node: &$crate::model::table::NodeRow,
+                tag: &'static str,
+                cx: &$crate::model::driver::WriteCx<'_>,
+            ) -> Option<$crate::tree::Structure> {
+                let mut i = 0_usize;
+                $(
+                    if field == i {
+                        return <$fty as $crate::model::driver::Slot>::write_extra_row(node, tag, cx);
+                    }
+                    i += 1;
+                )*
+                $($(
+                    if field == i {
+                        return <$gty as $crate::model::driver::Slot>::write_extra_row(node, tag, cx);
+                    }
+                    i += 1;
+                )*)?
+                None
+            }
+        }
+
+        $crate::model::table::listed!([] $name, $row, $crate::model::table::View<'a, $name>);
+
+        impl $crate::model::table::Item for $name {
+            type One = $crate::model::table::Idx<$name>;
+
+            #[inline]
+            fn elems(t: &$crate::model::table::Tables) -> &[$row] {
+                &<$name as $crate::model::table::HasTable>::table(t).rows
+            }
+
+            #[inline]
+            fn elems_mut(t: &mut $crate::model::table::Tables) -> &mut Vec<$row> {
+                &mut <$name as $crate::model::table::HasTable>::table_mut(t).rows
+            }
+
+            fn fill() -> $row {
+                $row::default()
+            }
+
+            fn read_elem(
+                node: $crate::model::driver::NodeRef<'_>,
+                at: u32,
+                cx: &mut $crate::model::driver::ReadCx<'_>,
+            ) -> Option<$row> {
+                let mut b = $crate::model::driver::Building::<$row, gedcom_struct!(@drow $($drow)?)> {
+                    row: $row::default(),
+                    detail: None,
+                };
+                let extra = $crate::model::driver::read_row_into(&mut b, node, cx)?;
+                if !extra.is_empty() {
+                    b.row.set_extra_in(at, cx.tables, extra);
+                }
+                $(
+                    if let Some(d) = b.detail {
+                        if d != $drow::default() {
+                            b.row.detail = Some($crate::model::table::push_row::<$dname>(cx.tables, d));
+                        }
+                    }
+                )?
+                Some(b.row)
+            }
+
+            #[inline]
+            fn read_one(
+                node: $crate::model::driver::NodeRef<'_>,
+                cx: &mut $crate::model::driver::ReadCx<'_>,
+            ) -> Option<Self::One> {
+                $crate::model::table::read_one_row::<$name>(node, cx)
+            }
+
+            fn write_elem<'s>(
+                e: &$row,
+                at: u32,
+                tag: $crate::model::driver::StdTag,
+                cx: &$crate::model::driver::WriteCx<'s>,
+                out: &mut $crate::tree::Flat<'s>,
+            ) {
+                // A structure that keeps its tag writes it.
+                $(let tag = {
+                    let _ = tag;
+                    <$tty as $crate::model::driver::TagField>::std_tag_raw(&e.$tfield, cx.tables)
+                };)?
+                $(let tag = $rowtagfn(e, tag, cx);)?
+                let claim = None;
+                $(
+                    let claim = if cx.convert {
+                        match $convrow(e, at, cx) {
+                            // A converted structure is a temporary: owned.
+                            $crate::model::driver::Converted::Into(converted) => {
+                                out.push_structure($crate::model::driver::write(&converted, tag.name, cx));
+                                return;
+                            }
+                            $crate::model::driver::Converted::AsIs(kind) => kind,
+                        }
+                    } else {
+                        claim
+                    };
+                )?
+                let extra = e.extra_in(at, cx.tables);
+                $crate::model::driver::write_row_flat(e, extra, tag, cx, out, claim);
+            }
+
+            #[inline]
+            fn write_one<'s>(
+                o: &Self::One,
+                tag: $crate::model::driver::StdTag,
+                cx: &$crate::model::driver::WriteCx<'s>,
+                out: &mut $crate::tree::Flat<'s>,
+            ) {
+                if let Some(e) = Self::elems(cx.tables).get(o.get() as usize) {
+                    Self::write_elem(e, o.get(), tag, cx, out);
+                }
+            }
+
+            fn load_elem(e: &$row, at: u32, t: &$crate::model::table::Tables) -> Self {
+                Self {
+                    $($xfield: e.$xfield,)?
+                    $($tfield: <$tty as $crate::model::driver::TagField>::load_raw(&e.$tfield, t),)?
+                    $($pfield: <$pty as $crate::model::driver::PayloadField>::load_raw(&e.$pfield, t),)?
+                    $($field: <$fty as $crate::model::table::RowSlot>::load(&e.$field, t),)*
+                    $(detail: e.detail.map(|d| Box::new(<$dname as $crate::model::table::Item>::load_one(d, t))),)?
+                    extra: $crate::model::node::load_extra(e.extra_in(at, t), t),
+                }
+            }
+
+            fn load_one(o: Self::One, t: &$crate::model::table::Tables) -> Self {
+                Self::elems(t)
+                    .get(o.get() as usize)
+                    .map(|e| Self::load_elem(e, o.get(), t))
+                    .unwrap_or_default()
+            }
+
+            fn store_elem(&self, at: u32, cx: &mut $crate::model::table::StoreCx<'_>) -> $row {
+                #[allow(unused_mut)]
+                let mut row = $row {
+                    $($xfield: self.$xfield,)?
+                    $($tfield: <$tty as $crate::model::driver::TagField>::store_raw(&self.$tfield, cx),)?
+                    $($pfield: <$pty as $crate::model::driver::PayloadField>::store_raw(&self.$pfield, cx),)?
+                    $($field: <$fty as $crate::model::table::RowSlot>::store(&self.$field, cx),)*
+                    $(detail: None::<$crate::model::table::Idx<$dname>>,)?
+                    $(extra: gedcom_struct!(@extra_empty $xfield),)?
+                };
+                $(
+                    if let Some(d) = &self.detail {
+                        let d: &$dname = d;
+                        if *d != $dname::default() {
+                            row.detail = Some(<$dname as $crate::model::table::Item>::store_one(d, cx));
+                        }
+                    }
+                )?
+                let extra = $crate::model::node::store_extra(&self.extra, cx);
+                if !extra.is_empty() {
+                    row.set_extra_in(at, cx.tables, extra);
+                }
+                row
+            }
+
+            fn store_one(&self, cx: &mut $crate::model::table::StoreCx<'_>) -> Self::One {
+                $crate::model::table::store_one_row(self, cx)
+            }
+
+            #[allow(unused_variables)]
+            fn each_elem(
+                e: &$row,
+                at: u32,
+                t: &$crate::model::table::Tables,
+                f: &mut dyn FnMut($crate::model::XrefId),
+            ) {
+                $(<$pty as $crate::model::driver::PayloadField>::each_raw(&e.$pfield, f);)?
+                $(<$fty as $crate::model::table::RowSlot>::each(&e.$field, t, f);)*
+                $(
+                    if let Some(d) = e.detail {
+                        <$dname as $crate::model::table::Item>::each_one(d, t, f);
+                    }
+                )?
+                $crate::model::node::each_extra(e.extra_in(at, t), t, f);
+            }
+
+            fn each_one(
+                o: Self::One,
+                t: &$crate::model::table::Tables,
+                f: &mut dyn FnMut($crate::model::XrefId),
+            ) {
+                if let Some(e) = Self::elems(t).get(o.get() as usize) {
+                    Self::each_elem(e, o.get(), t, f);
+                }
+            }
+
+            fn copy_elem(
+                e: &$row,
+                at: u32,
+                cx: &mut $crate::model::table::CopyCx<'_>,
+                to: u32,
+            ) -> $row {
+                #[allow(unused_mut)]
+                let mut row = $row {
+                    $($xfield: e.$xfield.map(|x| cx.xref(x)),)?
+                    $($tfield: <$tty as $crate::model::driver::TagField>::copy_raw(&e.$tfield, cx),)?
+                    $($pfield: <$pty as $crate::model::driver::PayloadField>::copy_raw(&e.$pfield, cx),)?
+                    $($field: <$fty as $crate::model::table::RowSlot>::copy(&e.$field, cx),)*
+                    $(detail: e.detail.map(|d: $crate::model::table::Idx<$dname>| {
+                        <$dname as $crate::model::table::Item>::copy_one(d, cx)
+                    }),)?
+                    $(extra: gedcom_struct!(@extra_empty $xfield),)?
+                };
+                let extra = e.extra_in(at, cx.from);
+                if !extra.is_empty() {
+                    let copied = $crate::model::node::copy_extra(extra, cx);
+                    row.set_extra_in(to, cx.to, copied);
+                }
+                row
+            }
+
+            fn copy_one(o: Self::One, cx: &mut $crate::model::table::CopyCx<'_>) -> Self::One {
+                $crate::model::table::copy_one_row::<$name>(o, cx)
+            }
+
+            #[inline]
+            fn view_elem<'a>(
+                e: &'a $row,
+                at: u32,
+                data: &'a $crate::model::Dataset,
+            ) -> Self::View<'a> {
+                $crate::model::table::View::new(data, e, at)
+            }
+
+            #[inline]
+            fn view_one(o: Self::One, data: &$crate::model::Dataset) -> Self::View<'_> {
+                $crate::model::table::view_one_row::<$name>(o, data)
+            }
+        }
+
+        impl<'a> $crate::model::table::View<'a, $name> {
+            $(
+                $(#[$xmeta])*
+                #[must_use]
+                pub fn $xfield(self) -> Option<$crate::model::XrefId> {
+                    self.row.$xfield
+                }
+            )?
+            $(
+                $(#[$tmeta])*
+                #[must_use]
+                pub fn $tfield(self) -> $tty {
+                    <$tty as $crate::model::driver::TagField>::load_raw(&self.row.$tfield, self.tables())
+                }
+            )?
+            $(
+                $(#[$pmeta])*
+                #[must_use]
+                pub fn $pfield(self) -> $crate::model::FieldView<'a, $pty> {
+                    <$pty as $crate::model::driver::PayloadField>::view_raw(self.row.$pfield, self.data)
+                }
+            )?
+            $(
+                $(#[$fmeta])*
+                #[must_use]
+                pub fn $field(self) -> $crate::model::FieldView<'a, $fty> {
+                    <$fty as $crate::model::table::RowSlot>::view(self.row.$field, self.data)
+                }
+            )*
+            $(
+                /// The row of the detail, when the structure has one.
+                fn detail_row(self) -> Option<&'a $drow> {
+                    let d = self.row.detail?;
+                    <$dname as $crate::model::table::HasTable>::table(self.tables())
+                        .rows
+                        .get(d.get() as usize)
+                }
+
+                $(
+                    $(#[$gmeta])*
+                    #[must_use]
+                    pub fn $gfield(self) -> $crate::model::FieldView<'a, $gty> {
+                        <$gty as $crate::model::table::RowSlot>::view(
+                            self.detail_row().map(|d| d.$gfield).unwrap_or_default(),
+                            self.data,
+                        )
+                    }
+                )*
+            )?
+
+            /// The substructures it keeps untyped: extensions, unknown tags,
+            /// repeated singletons and structures of another shape, in
+            /// order.
+            #[must_use]
+            pub fn extra(self) -> $crate::model::Items<'a, $crate::model::Node> {
+                let list = self.row.extra_in(self.at, self.tables());
+                $crate::model::Items::new(self.data, list.of(&self.tables().nodes), list.start)
+            }
+
+        }
+
+        /// The structure, copied out.
+        impl std::fmt::Debug for $crate::model::table::View<'_, $name> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_tuple("View").field(&self.into_owned()).finish()
+            }
+        }
     };
-    (@read_xref $self:ident $node:ident $cx:ident) => {{
-        let _ = &$cx;
-        // An identifier on a substructure (a 5.5.1 pointer may name it)
-        // has no field: the node stays untyped, with it.
-        !$node.has_xref()
-    }};
-    (@read_xref $self:ident $node:ident $cx:ident $xfield:ident) => {{
-        $self.$xfield = $cx.xref($node);
-        true
-    }};
-    (@read_tag $self:ident $node:ident) => {{
+    (@extra_ty $xfield:ident) => { $crate::model::table::List<$crate::model::Node> };
+    (@extra_empty $xfield:ident) => { $crate::model::table::List::EMPTY };
+    (@extra_get $self:ident $at:ident $t:ident $name:ident) => {
+        <$name as $crate::model::table::HasTable>::table($t).extra($at)
+    };
+    (@extra_get $self:ident $at:ident $t:ident $name:ident $xfield:ident) => {
+        $self.extra
+    };
+    (@extra_set $self:ident $at:ident $t:ident $extra:ident $name:ident) => {
+        <$name as $crate::model::table::HasTable>::table_mut($t).set_extra($at, $extra)
+    };
+    (@extra_set $self:ident $at:ident $t:ident $extra:ident $name:ident $xfield:ident) => {
+        $self.extra = $extra
+    };
+    (@drow) => { () };
+    (@drow $drow:ident) => { $drow };
+    (@row_read_tag $self:ident $node:ident) => {{
         let _ = $node;
         true
     }};
-    (@read_tag $self:ident $node:ident $tfield:ident $tty:ty) => {
-        match $node.standard_tag().and_then(<$tty as $crate::model::driver::TagField>::from_tag) {
+    (@row_read_tag $self:ident $node:ident $tfield:ident $tty:ty) => {
+        match $node.standard_tag().and_then(<$tty as $crate::model::driver::TagField>::raw_of_tag) {
             Some(v) => {
-                $self.$tfield = v;
+                $self.row.$tfield = v;
                 true
             }
             None => false,
         }
     };
-    (@read_payload $self:ident $node:ident $cx:ident) => {{
+    (@row_read_xref $self:ident $node:ident $cx:ident) => {{
+        let _ = &$cx;
+        !$node.has_xref()
+    }};
+    (@row_read_xref $self:ident $node:ident $cx:ident $xfield:ident) => {{
+        $self.row.$xfield = $cx.xref($node);
+        true
+    }};
+    (@row_read_payload $self:ident $node:ident $cx:ident) => {{
         let _ = $cx;
         $node.has_no_payload()
     }};
-    (@read_payload $self:ident $node:ident $cx:ident $pfield:ident $pty:ty) => {
-        match <$pty as $crate::model::driver::PayloadField>::read($node, $cx) {
+    (@row_read_payload $self:ident $node:ident $cx:ident $pfield:ident $pty:ty) => {
+        match <$pty as $crate::model::driver::PayloadField>::read_raw($node, $cx) {
             Some(v) => {
-                $self.$pfield = v;
+                $self.row.$pfield = v;
                 true
             }
             None => false,
         }
+    };
+    (@row_xref $self:ident $cx:ident) => {{
+        let _ = $cx;
+        None
+    }};
+    (@row_xref $self:ident $cx:ident $xfield:ident) => {
+        $self
+            .$xfield
+            .map(|x| std::borrow::Cow::Borrowed($cx.store.xref(x)))
+    };
+    (@row_payload $self:ident $cx:ident) => {{
+        let _ = $cx;
+        $crate::tree::FlatPayload::None
+    }};
+    (@row_payload $self:ident $cx:ident $pfield:ident $pty:ty) => {
+        <$pty as $crate::model::driver::PayloadField>::payload_raw(&$self.$pfield, $cx)
+    };
+    (@row_claim $self:ident $cx:ident) => {{
+        let _ = $cx;
+        None
+    }};
+    (@row_claim $self:ident $cx:ident $pfield:ident $pty:ty) => {
+        <$pty as $crate::model::driver::PayloadField>::claim_raw(&$self.$pfield, $cx)
     };
     (@write_xref $self:ident $cx:ident) => {{
         let _ = $cx;
@@ -1964,3 +3263,65 @@ macro_rules! gedcom_struct {
     };
 }
 pub(crate) use gedcom_struct;
+
+/// The row side of [`PayloadField`] for a payload that is a pointer or a
+/// text (a citation's source, a note's content): one span, which holds the
+/// pointer when it is one.
+macro_rules! pointer_or_text_raw {
+    ($ty:ident, $pointer:ident, $text:ident) => {
+        type Raw = $crate::model::text::Span;
+        type View<'a> = $ty;
+
+        fn read_raw(
+            node: $crate::model::driver::NodeRef<'_>,
+            cx: &mut $crate::model::driver::ReadCx<'_>,
+        ) -> Option<$crate::model::text::Span> {
+            match cx.pointer(node) {
+                Some(id) => Some($crate::model::text::Span::pointer(id)),
+                None => cx.span(node),
+            }
+        }
+
+        fn payload_raw<'s>(
+            raw: &$crate::model::text::Span,
+            cx: &$crate::model::driver::WriteCx<'s>,
+        ) -> $crate::tree::FlatPayload<'s> {
+            cx.span_flat(*raw)
+        }
+
+        fn load_raw(raw: &$crate::model::text::Span, _t: &$crate::model::table::Tables) -> Self {
+            match raw.as_pointer() {
+                Some(id) => $ty::$pointer(id),
+                None => $ty::$text($crate::model::Text::from_span(*raw)),
+            }
+        }
+
+        fn store_raw(
+            &self,
+            cx: &mut $crate::model::table::StoreCx<'_>,
+        ) -> $crate::model::text::Span {
+            match self {
+                $ty::$pointer(id) => $crate::model::text::Span::pointer(*id),
+                $ty::$text(t) => t.to_span(cx.store),
+            }
+        }
+
+        fn each_raw(raw: &$crate::model::text::Span, f: &mut dyn FnMut($crate::model::XrefId)) {
+            if let Some(id) = raw.as_pointer() {
+                f(id);
+            }
+        }
+
+        fn copy_raw(
+            raw: &$crate::model::text::Span,
+            cx: &mut $crate::model::table::CopyCx<'_>,
+        ) -> $crate::model::text::Span {
+            cx.span(*raw)
+        }
+
+        fn view_raw(raw: $crate::model::text::Span, data: &$crate::model::Dataset) -> $ty {
+            Self::load_raw(&raw, &data.tables)
+        }
+    };
+}
+pub(crate) use pointer_or_text_raw;
