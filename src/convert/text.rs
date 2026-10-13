@@ -70,8 +70,45 @@ fn is_url(s: &str) -> bool {
         && rest.starts_with("//")
 }
 
+/// A URL (`https://…`) as a valid URL string: what the WHATWG URL
+/// standard's serializer percent-encodes is (a space, `"`, `<`, `>`, `` ` ``,
+/// `{`, `}`, `|`, `^`, `\\`, control characters, a second `#`, brackets
+/// outside an IP literal host, a `%` that starts no encoding); valid
+/// characters and existing `%XX` encodings stay as they are. `None` when
+/// nothing needs encoding.
+fn url_encoded(url: &str) -> Option<String> {
+    // Where brackets may stand: the host of the authority.
+    let host_end = url.find("//").map(|at| at + 2).map(|start| {
+        start
+            + url[start..]
+                .find(['/', '?', '#'])
+                .unwrap_or(url.len() - start)
+    });
+    let mut out = String::with_capacity(url.len() + 8);
+    let mut fragment = false;
+    for (i, c) in url.char_indices() {
+        match c {
+            '%' if url
+                .get(i + 1..i + 3)
+                .is_some_and(|h| h.bytes().all(|b| b.is_ascii_hexdigit())) =>
+            {
+                out.push('%');
+            }
+            '#' if !fragment => {
+                fragment = true;
+                out.push('#');
+            }
+            '[' | ']' if host_end.is_some_and(|end| i < end) => out.push(c),
+            c if crate::spec::payload::is_url_code_point(c) => out.push(c),
+            c => percent_encode(&mut out, c),
+        }
+    }
+    (out != url).then_some(out)
+}
+
 /// A 5.5.1 file reference (any text naming a file) as a 7.x file path, a
-/// valid URL string (§2.12): a URL stays as it is; a Windows drive path
+/// valid URL string (§2.12): a URL keeps its form, the characters a URL
+/// string does not permit percent-encoded ([`url_encoded`]); a Windows drive path
 /// (`C:\x`) becomes `file:///C:/x`, a network path (`\\host\x`)
 /// `file://host/x`, an absolute path (`/x`) `file:///x`; backslashes
 /// become slashes; characters a URL string does not permit, `%` not
@@ -79,8 +116,11 @@ fn is_url(s: &str) -> bool {
 /// percent-encoded.
 /// `None` when the reference is a valid one already.
 pub(crate) fn file_uri(path: &str) -> Option<String> {
-    if path.is_empty() || is_url(path) {
+    if path.is_empty() {
         return None;
+    }
+    if is_url(path) {
+        return url_encoded(path);
     }
     let mut out = String::with_capacity(path.len() + 8);
     let bytes = path.as_bytes();
@@ -321,6 +361,50 @@ mod tests {
         }
         assert_eq!(file_uri("a/relative/path"), None);
         assert_eq!(file_uri("https://leave.alone?with=args#and-frags"), None);
+        // A URL keeps its form; what a valid URL string does not permit is
+        // percent-encoded, existing encodings and IP literals kept.
+        for (from, to) in [
+            (
+                "https://example.org/a b.jpg",
+                "https://example.org/a%20b.jpg",
+            ),
+            (
+                "https://example.org/a%20b c.jpg",
+                "https://example.org/a%20b%20c.jpg",
+            ),
+            (
+                "http://example.org/p?q=a b#frag ment",
+                "http://example.org/p?q=a%20b#frag%20ment",
+            ),
+            ("https://example.org/x#a#b", "https://example.org/x#a%23b"),
+            ("https://[::1]/a[1].jpg", "https://[::1]/a%5B1%5D.jpg"),
+            (
+                "https://example.org/{x}|\"y\"<z>",
+                "https://example.org/%7Bx%7D%7C%22y%22%3Cz%3E",
+            ),
+            (
+                "https://example.org/100% done",
+                "https://example.org/100%25%20done",
+            ),
+            (
+                "ftp://example.org/\u{e9}t\u{e9} 1.jpg",
+                "ftp://example.org/\u{e9}t\u{e9}%201.jpg",
+            ),
+        ] {
+            let fixed = file_uri(from);
+            assert_eq!(fixed.as_deref(), Some(to), "{from}");
+            assert!(
+                crate::spec::payload::check(
+                    crate::spec::schema::Kind::FilePath,
+                    None,
+                    to,
+                    crate::spec::payload::Family::V7
+                )
+                .is_none(),
+                "{to}"
+            );
+            assert_eq!(file_uri(to), None, "{to}");
+        }
 
         assert_eq!(
             file_path("file:///unix/absolute").as_deref(),

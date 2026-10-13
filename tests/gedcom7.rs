@@ -874,3 +874,49 @@ fn the_7_0_17_examples_read_and_write_as_they_are() {
         assert!(out.contains(lines), "{lines:?} in {out}");
     }
 }
+
+/// A web-address file with characters a URL string does not permit (a
+/// space) is percent-encoded when written in 7.x, as local paths are, and
+/// its multimedia record stays a record (it used to become `_OBJE`). The
+/// encoded address reads back and writes again unchanged.
+#[test]
+fn web_file_addresses_are_percent_encoded() {
+    let v551 = "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @M1@ OBJE\n1 FILE https://example.org/a b.jpg\n\
+                2 FORM jpg\n0 @M2@ OBJE\n1 FILE photos/a b.jpg\n2 FORM jpg\n0 TRLR\n";
+    let data = ged_io::Dataset::parse(v551);
+    let (out, report) = GedcomWriter::new()
+        .gedcom_version(GedcomVersion::V7_0)
+        .write_to_string_with_report(&data)
+        .unwrap();
+    assert!(
+        out.contains("1 FILE https://example.org/a%20b.jpg\n"),
+        "{out}"
+    );
+    assert!(out.contains("1 FILE photos/a%20b.jpg\n"), "{out}");
+    assert!(!out.contains("_OBJE") && !out.contains("_FILE"), "{out}");
+    assert!(
+        report
+            .repairs
+            .iter()
+            .all(|r| r.kind != RepairKind::Misplaced),
+        "{:?}",
+        report.repairs
+    );
+    assert!(ged_io::spec::validate_text(&out).is_empty());
+    let back = ged_io::Dataset::parse(out.clone());
+    let again = GedcomWriter::new()
+        .gedcom_version(GedcomVersion::V7_0)
+        .write_to_string(&back)
+        .unwrap();
+    assert_eq!(again, out);
+    // A 7.0 file that holds such an address is repaired the same way.
+    let v70 = "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @M1@ OBJE\n1 FILE https://example.org/a b.jpg\n\
+               2 FORM image/jpeg\n0 TRLR\n";
+    let out = GedcomWriter::new()
+        .write_to_string(&ged_io::Dataset::parse(v70))
+        .unwrap();
+    assert!(
+        out.contains("0 @M1@ OBJE\n1 FILE https://example.org/a%20b.jpg\n"),
+        "{out}"
+    );
+}

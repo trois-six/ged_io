@@ -176,6 +176,12 @@ keeps all data; writing is conformant to GEDCOM 5.5.1, 7.0 or 7.1.
 
 ### Fixed
 
+- A web address (`https://…`) as a multimedia file path, written in 7.x,
+  has the characters a valid URL string does not permit (a space, `"`,
+  `<`, `>`, a second `#`, a `%` that starts no encoding, …)
+  percent-encoded, as local paths already had; its valid characters and
+  existing `%XX` encodings stay. It used to be left as it was, so the
+  repair made the `FILE` an extension and its `OBJE` record `_OBJE`.
 - Reading accepts CR, LF CR and mixed terminators, blank lines, lines
   without a level, level jumps, `CONT`/`CONC` anywhere, extension tags under
   any structure, unknown records, a second `HUSB`/`WIFE`, xrefs on

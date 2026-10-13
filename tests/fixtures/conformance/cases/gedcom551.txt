@@ -869,3 +869,26 @@ This line lacks a CONT tag.
 1 SEX M
 0 TRLR
 #lacks CHAR UNICODE
+
+### G5-OBJE-URL-SPACE-TO-70 | C | a web-address FILE with a space, written as 7.0: percent-encoded, the OBJE kept (OxidGene port)
+0 HEAD
+1 SOUR EXAMPLE_APP
+1 SUBM @U0@
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+0 @M1@ OBJE
+1 FILE https://example.org/media/a b.jpg
+2 FORM jpg
+0 @M2@ OBJE
+1 FILE photos/c d.jpg
+2 FORM jpg
+0 @U0@ SUBM
+1 NAME Example Submitter
+0 TRLR
+#target 7.0
+#want 1 FILE https://example.org/media/a%20b.jpg
+#want 1 FILE photos/c%20d.jpg
+#lacks _OBJE
+#lacks _FILE
