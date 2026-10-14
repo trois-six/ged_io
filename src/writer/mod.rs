@@ -532,6 +532,16 @@ impl GedcomWriter {
         mut writer: W,
         data: &Dataset,
     ) -> Result<WriteReport, WriteError> {
+        if let Some(rules) = self
+            .interpretation(data)
+            .filter(|_| !self.drops_credentials(data))
+        {
+            if let Some((sink, report)) = self.interpreting(data, rules, None)? {
+                writer.write_all(&sink.into_bytes())?;
+                writer.flush()?;
+                return Ok(report);
+            }
+        }
         if let Some((records, mut report, typed)) = self.rewritten(data) {
             let more = self.write_rewritten(writer, &records, data, typed)?;
             report.repairs.extend(more.repairs);
@@ -559,8 +569,7 @@ impl GedcomWriter {
     /// the credentials [`Credentials::LeftOut`] leaves out. `None` when
     /// the dataset is written as it is.
     fn rewritten(&self, data: &Dataset) -> Option<(Vec<Structure>, WriteReport, bool)> {
-        let credentials = self.config.credentials == Credentials::LeftOut
-            && holds_credentials(data.store().other_tags());
+        let credentials = self.drops_credentials(data);
         if let Some((mut records, report)) = self.reinterpreted(data) {
             if credentials {
                 for r in &mut records {
@@ -575,6 +584,12 @@ impl GedcomWriter {
         let mut records = data.to_structures();
         let dropped: usize = records.iter_mut().map(drop_credentials).sum();
         (dropped > 0).then(|| (records, WriteReport::default(), true))
+    }
+
+    /// Whether credentials may be left out of `data` ([`Credentials`]).
+    fn drops_credentials(&self, data: &Dataset) -> bool {
+        self.config.credentials == Credentials::LeftOut
+            && holds_credentials(data.store().other_tags())
     }
 
     /// Writes the records [`rewritten`](Self::rewritten) gave for `data`.
@@ -598,22 +613,7 @@ impl GedcomWriter {
     /// that interprets anything ([`crate::profile`]).
     fn reinterpreted(&self, data: &Dataset) -> Option<(Vec<Structure>, WriteReport)> {
         let to = self.config.version?;
-        if !to.is_v7() || data.version().is_v7() {
-            return None;
-        }
-        let detection = data.producer()?;
-        let rules = crate::profile::RuleSet::of(detection, data.interpretation());
-        if !rules.has_v7_only()
-            || !rules.may_apply(
-                data.store().input(),
-                data.store().other_tags(),
-                false,
-                true,
-                true,
-            )
-        {
-            return None;
-        }
+        let rules = self.interpretation(data)?;
         // The conversion as the writer makes it, read back to interpret.
         let mut plain = self.clone().output_encoding(OutputEncoding::Utf8);
         plain.config.bom = Bom::Never;
@@ -636,6 +636,59 @@ impl GedcomWriter {
         Some((Dataset::parse(text).to_structures(), report))
     }
 
+    /// The rules of the producer of a 5.5.1 dataset written in 7.x, when
+    /// some rule only says something in 7.x and may apply
+    /// ([`crate::profile`]): what is interpreted as it is written.
+    fn interpretation(&self, data: &Dataset) -> Option<crate::profile::RuleSet> {
+        let to = self.config.version?;
+        if !to.is_v7() || data.version().is_v7() {
+            return None;
+        }
+        let detection = data.producer()?;
+        let rules = crate::profile::RuleSet::of(detection, data.interpretation());
+        (rules.has_v7_only()
+            && rules.may_apply(
+                data.store().input(),
+                data.store().other_tags(),
+                false,
+                true,
+                true,
+            ))
+        .then_some(rules)
+    }
+
+    /// `data`, a 5.5.1 dataset written in 7.x, its producer's conventions
+    /// that only 7.x says interpreted with `rules` as each record is
+    /// written ([`crate::convert::Watch::interpreting`]): a held sink and
+    /// the report, or `None` when a record's interpretation reaches
+    /// outside it (a change in another record, an extension to declare in
+    /// the header), or the header's would: the whole dataset is then
+    /// interpreted at once ([`Self::reinterpreted`]). `text`: as
+    /// [`Self::unconverted`] says.
+    fn interpreting(
+        &self,
+        data: &Dataset,
+        rules: crate::profile::RuleSet,
+        text: Option<usize>,
+    ) -> Result<Option<(LineSink<'static>, WriteReport)>, WriteError> {
+        let built = data.built(self);
+        let Some(plan) = self.plan_for(data, &built, false) else {
+            return Ok(None);
+        };
+        let mut watch = plan.watch();
+        watch.interpreting(rules);
+        let head = match plan.head() {
+            Some((_, h)) => watch.interprets(h),
+            None => built
+                .first()
+                .is_some_and(|h| watch.interprets(&crate::convert::built_structure(h))),
+        };
+        if head {
+            return Ok(None);
+        }
+        self.unconverted_with(data, &plan, &built, text, watch)
+    }
+
     /// `data` written in a version of the other family with its header
     /// converted and its records as they are, as long as none needs
     /// converting ([`Plan::of_dataset`] without a scan, `plan`): a held
@@ -653,7 +706,19 @@ impl GedcomWriter {
         built: &'d [crate::model::write::Built<'d>],
         text: Option<usize>,
     ) -> Result<Option<(LineSink<'static>, WriteReport)>, WriteError> {
-        let watch = std::rc::Rc::new(plan.watch());
+        self.unconverted_with(data, plan, built, text, plan.watch())
+    }
+
+    /// [`Self::unconverted`], its records looked at as `watch` says.
+    fn unconverted_with<'d>(
+        &self,
+        data: &'d Dataset,
+        plan: &Plan,
+        built: &'d [crate::model::write::Built<'d>],
+        text: Option<usize>,
+        watch: crate::convert::Watch,
+    ) -> Result<Option<(LineSink<'static>, WriteReport)>, WriteError> {
+        let watch = std::rc::Rc::new(watch);
         let order = crate::model::field_order;
         let head = plan.head().map(|(i, h)| (i, h.clone()));
         let unconverted = Unconverted { watch, head };
@@ -711,6 +776,16 @@ impl GedcomWriter {
         &self,
         data: &Dataset,
     ) -> Result<(String, WriteReport), WriteError> {
+        if let Some(rules) = self
+            .interpretation(data)
+            .filter(|_| !self.drops_credentials(data))
+        {
+            let size = data.store().input_len();
+            if let Some((sink, report)) = self.interpreting(data, rules, Some(size))? {
+                let text = sink.into_string();
+                return Ok((text, report));
+            }
+        }
         if let Some((records, mut report, typed)) = self.rewritten(data) {
             let mut text = self.clone().output_encoding(OutputEncoding::Utf8);
             if text.config.bom == Bom::Auto {
@@ -1404,7 +1479,11 @@ fn write_direct<'n>(
                     put_flat(&mut out, &mut xrefs, xref, root)?;
                 }
             }
-            (Place::Record, Some(s)) => put_record(&mut out, &mut xrefs, xref, s, &mut Vec::new())?,
+            (Place::Record, Some(s)) => {
+                put_record(&mut out, &mut xrefs, xref, s, &mut Vec::new())?;
+                // A record converted is not kept once written.
+                *record = Rec::owned(Structure::default());
+            }
             (Place::Record, None) | (Place::Lines, _) => return Ok(None),
         }
     }
@@ -1451,7 +1530,7 @@ fn place_record<'n>(
         let alone = match (&place, watch) {
             (None, Some(w)) if !converted && direct.wants_converting() => {
                 let mut s = record.to_structure(direct.c_arena());
-                w.convert_alone(&mut s).map(|changed| changed.then_some(s))
+                w.rewrite_alone(&mut s).map(|changed| changed.then_some(s))
             }
             _ => None,
         };

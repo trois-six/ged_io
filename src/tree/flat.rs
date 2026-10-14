@@ -794,13 +794,9 @@ impl<'s> Flat<'s> {
             FlatPayload::Text(t, special) => special_of(t, *special),
             FlatPayload::None | FlatPayload::Pointer(..) => 0,
         };
+        let node = (tag, standard, &payload, special);
         if let Some(w) = st.watch.as_deref() {
-            let (kind, len) = match &payload {
-                FlatPayload::None => (crate::convert::NONE, 0),
-                FlatPayload::Text(t, _) => (crate::convert::TEXT, t.len()),
-                FlatPayload::Pointer(..) => (crate::convert::POINTER, 0),
-            };
-            if w.may_apply(standard, kind, len, special) && watched(w, &st.open, tag, &payload) {
+            if rewrites(w, &st.open, node, xref.is_some(), depth == 0) {
                 st.converts = true;
                 st.spoiled = true;
                 return;
@@ -907,12 +903,18 @@ impl<'s> Flat<'s> {
             }
             FlatPayload::None | FlatPayload::Pointer(..) => 0,
         };
-        // Whether it needs converting is for the record's look.
-        if st
-            .watch
-            .as_deref()
-            .is_some_and(|w| w.may(tag, payload_ref(&payload), special))
-        {
+        // Whether it needs converting, or interpreting, is for the
+        // record's look.
+        if st.watch.as_deref().is_some_and(|w| {
+            w.may(tag, payload_ref(&payload), special)
+                || w.interprets_node(
+                    tag,
+                    standard,
+                    payload_ref(&payload),
+                    xref.is_some(),
+                    depth == 0,
+                )
+        }) {
             st.spoiled = true;
             return;
         }
@@ -1105,6 +1107,27 @@ fn size_bound(
         FlatPayload::Pointer(p, _) | FlatPayload::Text(p, _) => p.len(),
     };
     8 + tag + xref.map_or(0, str::len) + 13 * payload
+}
+
+/// Whether a conversion or an interpretation `w` watches for may rewrite
+/// the structure `node` (its tag, standard index, payload and special
+/// bytes) under the structures `open`: a record with an identifier when
+/// `xref`, at the top when `record`.
+fn rewrites(
+    w: &Watch,
+    open: &[Open],
+    node: (&str, Option<u16>, &FlatPayload<'_>, u8),
+    xref: bool,
+    record: bool,
+) -> bool {
+    let (tag, standard, payload, special) = node;
+    let (kind, len) = match payload {
+        FlatPayload::None => (crate::convert::NONE, 0),
+        FlatPayload::Text(t, _) => (crate::convert::TEXT, t.len()),
+        FlatPayload::Pointer(..) => (crate::convert::POINTER, 0),
+    };
+    (w.may_apply(standard, kind, len, special) && watched(w, open, tag, payload))
+        || w.interprets_node(tag, standard, payload_ref(payload), xref, record)
 }
 
 /// Whether `watch` says that a typed structure tagged `tag` with

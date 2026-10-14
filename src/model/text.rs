@@ -1021,6 +1021,8 @@ impl XrefTable {
 pub struct Store {
     /// The decoded input, then the texts appended.
     text: String,
+    /// How much of `text` the input is.
+    read: usize,
     pieces: Vec<TextPiece>,
     xrefs: XrefTable,
     tags: Vec<Box<str>>,
@@ -1179,6 +1181,7 @@ fn push_big(big: &mut Vec<Box<str>>, text: Box<str>, special: u8) -> Span {
 impl Store {
     pub(crate) fn new(text: String) -> Self {
         Self {
+            read: text.len(),
             text,
             ..Self::default()
         }
@@ -1192,9 +1195,9 @@ impl Store {
         store
     }
 
-    /// The text, which spans point into.
+    /// The text read (without what was appended since).
     pub(crate) fn input(&self) -> &str {
-        &self.text
+        self.text.get(..self.read).unwrap_or(&self.text)
     }
 
     /// The text, the rest of the store dropped.
@@ -1501,6 +1504,7 @@ impl fmt::Debug for Store {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Store")
             .field("text", &self.text.len())
+            .field("read", &self.read)
             .field("pieces", &self.pieces.len())
             .field("xrefs", &self.xrefs.len())
             .field("tags", &self.tags)
