@@ -797,6 +797,40 @@ impl RuleSet {
         })
     }
 
+    /// [`RuleSet::may_rewrite`] in 7.x, documented extensions counted, of
+    /// a structure under any tags: of a record when `record`, else of a
+    /// substructure wherever a rule's context may put it.
+    pub(crate) fn may_rewrite_anywhere(
+        &self,
+        tag: &str,
+        standard: Option<u16>,
+        payload: PayloadRef<'_>,
+        has_xref: bool,
+        record: bool,
+    ) -> bool {
+        let rules = self.rules_of(tag, standard);
+        let any = if standard.is_some() {
+            &self.any_standard
+        } else {
+            &self.any
+        };
+        if rules.is_empty() && any.is_empty() {
+            return false;
+        }
+        rules.iter().chain(any).any(|a| {
+            let alts = self.context(a);
+            let placed = if record {
+                Context::matches_in::<&str>(alts, &[])
+            } else {
+                alts.iter().any(|alt| !alt.is_empty())
+            };
+            placed
+                && a.rule
+                    .op
+                    .may_apply_to_parts(tag, payload, has_xref, record, true)
+        })
+    }
+
     /// Whether some rule changes records other than the one it reads
     /// (pedigrees, families' order, witnesses, adoptions).
     pub(crate) fn spans_records(&self) -> bool {
@@ -904,6 +938,8 @@ impl Op {
             Op::DateWords => {
                 value.trim().eq_ignore_ascii_case("stillborn") || date_dialect(value, v7).is_some()
             }
+            // Markup, or markup escaped once more.
+            Op::Html => value.contains(['<', '&']),
             _ => true,
         }
     }

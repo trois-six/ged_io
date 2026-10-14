@@ -662,6 +662,10 @@ pub(crate) struct Watch {
     conv: Converter,
     /// The order of the typed model the records come from, if they do.
     order: Option<&'static FieldOrder>,
+    /// The rules a 5.5.1 dataset's producer is interpreted with again in
+    /// 7.x, what only 7.x says ([`crate::profile`]), each record as it is
+    /// written ([`Watch::interprets`]).
+    interp: Option<crate::profile::RuleSet>,
     /// By the index of a standard tag: the payloads with which a rule may
     /// apply to a structure of that tag ([`Converter::may_apply`]).
     tags: [u8; STANDARD_TAGS.len()],
@@ -692,8 +696,92 @@ impl Watch {
             pointers: conv.watches_pointers(),
             conv,
             order: None,
+            interp: None,
             tags,
         }
+    }
+
+    /// Interprets each record written with `rules` too.
+    pub(crate) fn interpreting(&mut self, rules: crate::profile::RuleSet) {
+        self.interp = Some(rules);
+    }
+
+    /// Whether interpretation may change a structure tagged `tag` (of
+    /// index `standard` among the standard tags) with `payload` (and an
+    /// identifier when `has_xref`), a record when `record`, wherever it is:
+    /// the look of a record streamed, which [`Watch::interprets`] makes
+    /// precise.
+    #[inline]
+    pub(crate) fn interprets_node(
+        &self,
+        tag: &str,
+        standard: Option<u16>,
+        payload: PayloadRef<'_>,
+        has_xref: bool,
+        record: bool,
+    ) -> bool {
+        self.interp.as_ref().is_some_and(|rules| {
+            rules.may_rewrite_anywhere(tag, standard, payload, has_xref, record)
+        })
+    }
+
+    /// Whether interpretation may change record `r` (or a record beside
+    /// it, or the header): what [`Watch::rewrite_alone`] then does.
+    pub(crate) fn interprets<'n, N: Node<'n>>(&self, r: N) -> bool {
+        fn walk<'n, N: Node<'n>>(
+            rules: &crate::profile::RuleSet,
+            n: N,
+            path: &mut Vec<&'n str>,
+        ) -> bool {
+            if rules.may_rewrite(
+                n.tag(),
+                n.standard_tag(),
+                path,
+                || n.payload(),
+                n.xref().is_some(),
+                true,
+                true,
+            ) {
+                return true;
+            }
+            path.push(n.tag());
+            let found = n.children().any(|c| walk(rules, c, path));
+            path.pop();
+            found
+        }
+        self.interp
+            .as_ref()
+            .is_some_and(|rules| walk(rules, r, &mut Vec::new()))
+    }
+
+    /// Converts record `s` alone ([`Watch::convert_alone`]), then
+    /// interprets it alone, when the watch interprets: whether it changed
+    /// (as written, in the model's order); `None` when either reaches
+    /// outside it.
+    pub(crate) fn rewrite_alone(&self, s: &mut Structure) -> Option<bool> {
+        let converted = self.convert_alone(s)?;
+        let Some(rules) = &self.interp else {
+            return Some(converted);
+        };
+        let target = self.conv.target();
+        let mut interp = crate::profile::interpret::Interpreter::new(rules, target);
+        let mut drafts = vec![crate::profile::draft::Draft::of_structure(s)];
+        let rewrite = interp.record(&mut drafts, &|_| false);
+        if rewrite.promoted || rewrite.placeholder || interp.has_pending() || drafts.len() != 1 {
+            return None;
+        }
+        if !rewrite.changed {
+            return Some(converted);
+        }
+        let mut interpreted = drafts
+            .first()
+            .map(crate::profile::draft::Draft::to_structure)?;
+        drop(drafts);
+        if let Some(order) = self.order {
+            model_order(&mut interpreted, target, order);
+        }
+        *s = interpreted;
+        Some(true)
     }
 
     /// Converts record `s` on its own, as a plan converts it, when the

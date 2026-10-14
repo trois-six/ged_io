@@ -623,6 +623,13 @@ impl<'n> Direct<'n> {
         self.relocated.iter().any(|t| tags.contains(t))
     }
 
+    /// Whether the watch converts or interprets record `r`.
+    fn rewrites<'m, M: Node<'m>>(&self, r: M) -> bool {
+        self.watch
+            .as_ref()
+            .is_some_and(|w| w.needs(r) || w.interprets(r))
+    }
+
     /// [`Direct::record`] of a record written as structures.
     fn record_nodes<N: Node<'n>>(&mut self, index: usize, r: &mut Rec<'n, N>) -> Option<Place> {
         let mut walk = Walk {
@@ -637,11 +644,9 @@ impl<'n> Direct<'n> {
                 self.arena.clear();
                 b.build(&mut self.arena);
                 let root = self.arena.root();
-                if let (Some(w), Some(root)) = (&self.watch, root) {
-                    if w.needs(root) {
-                        self.converts = true;
-                        return None;
-                    }
+                if root.is_some_and(|root| self.rewrites(root)) {
+                    self.converts = true;
+                    return None;
                 }
                 if self.uses_relocated(r) {
                     return None;
@@ -649,7 +654,7 @@ impl<'n> Direct<'n> {
                 (c.is_clean_written(&self.arena, &mut walk), Place::Arena)
             }
             Body::Owned(s) => {
-                if self.watch.as_ref().is_some_and(|w| w.needs(&**s)) {
+                if self.rewrites(&**s) {
                     self.converts = true;
                     return None;
                 }
@@ -659,7 +664,7 @@ impl<'n> Direct<'n> {
                 )
             }
             Body::Given(n) => {
-                if self.watch.as_ref().is_some_and(|w| w.needs(*n)) {
+                if self.rewrites(*n) {
                     self.converts = true;
                     return None;
                 }
