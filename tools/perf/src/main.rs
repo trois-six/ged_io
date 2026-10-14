@@ -2,9 +2,9 @@
 //! process (so that each peak resident set is its own).
 //!
 //! ```sh
-//! perf generate <individuals> <file>      # the generated dataset
-//! perf run <pipeline> <file> [iterations] # one pipeline, measured
-//! perf check <file> [threshold=value…]    # every pipeline, against limits
+//! perf generate <individuals> <file> [ftm|paf] # the generated dataset
+//! perf run <pipeline> <file> [iterations]      # one pipeline, measured
+//! perf check <file> [ftm=<file>] [paf=<file>] [threshold=value…]
 //! ```
 //!
 //! Pipelines: `read` (the bytes into a `Dataset`, with the default
@@ -19,6 +19,10 @@
 //! of `iterations` runs (default 5), the throughput, the peak resident set
 //! (Linux `VmHWM`) and its ratio to the file's size.
 //!
+//! `generate` writes the generated dataset (see `generate.rs`), or, with
+//! `ftm` or `paf`, the same as that producer writes it, with the extension
+//! of its own its import profile interprets in every individual.
+//!
 //! `check` runs each pipeline once in a child process and fails (exit 1)
 //! when a peak or a throughput passes its threshold. The thresholds, which
 //! the CI's memory job checks, default to the redesign's targets: a
@@ -28,6 +32,17 @@
 //! (`stream-mib=64`); the in-memory pipelines run at 50 MB/s at least
 //! (`min-mbps=50`), the streams at 20 (`min-stream-mbps=20`): generous
 //! floors, CI machines vary.
+//!
+//! The pipelines of the producer profiles are checked against the plain
+//! ones on the same machine, by the median of three runs: the `geneanet`
+//! export of the file against its write (`export-time=16`, a peak of at
+//! most 14 times the input: `export-ratio=14`); and, given the files the
+//! `ftm` and `paf` generators write (`ftm=…`, `paf=…`), each read
+//! interpreted against its read without interpretation
+//! (`profile-read-time=3`), each 7.0 write against the plain file's 7.0
+//! write (`profile-write-time=8`), each peaking at most at 4.5 times its
+//! input (`profile-ratio=4.5`). These thresholds hold what the profiles'
+//! redesign reached with some room, so that a regression fails.
 
 mod generate;
 
@@ -76,7 +91,10 @@ fn stream(path: &str, write: bool) -> usize {
     let file = BufReader::new(fs::File::open(path).expect("open the file"));
     let mut records = GedcomStreamParser::new(file).expect("read the file");
     if !write {
-        return records.map(|r| r.expect("reads")).count();
+        return records.fold(0, |n, r| {
+            r.expect("reads");
+            n + 1
+        });
     }
     let Some(head) = records.next().map(|r| r.expect("reads")) else {
         return 0;
@@ -178,7 +196,7 @@ fn run(pipeline: &str, path: &str, iterations: usize) -> Result<String, String> 
 fn field(line: &str, i: usize) -> f64 {
     line.split('\t')
         .nth(i)
-        .and_then(|f| f.split(|c: char| c == ' ' || c == 'x').next())
+        .and_then(|f| f.split([' ', 'x']).next())
         .and_then(|f| f.parse().ok())
         .unwrap_or(f64::NAN)
 }
@@ -191,11 +209,22 @@ fn check(path: &str, args: &[String]) -> Result<bool, String> {
         ("stream-mib", 64.0),
         ("min-mbps", 50.0),
         ("min-stream-mbps", 20.0),
+        ("export-time", 16.0),
+        ("export-ratio", 14.0),
+        ("profile-read-time", 3.0),
+        ("profile-write-time", 8.0),
+        ("profile-ratio", 4.5),
     ];
+    // The files of the producers, by name.
+    let mut producers: Vec<(&str, &str)> = Vec::new();
     for arg in args {
         let (name, value) = arg
             .split_once('=')
             .ok_or_else(|| format!("{arg}: threshold=value"))?;
+        if matches!(name, "ftm" | "paf") {
+            producers.push((name, value));
+            continue;
+        }
         let slot = limits
             .iter_mut()
             .find(|(n, _)| *n == name)
@@ -208,21 +237,10 @@ fn check(path: &str, args: &[String]) -> Result<bool, String> {
             .find(|(n, _)| *n == name)
             .map_or(f64::NAN, |l| l.1)
     };
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let size = fs::metadata(path).map_err(|e| e.to_string())?.len() as f64;
     let mut ok = true;
     for pipeline in ["read", "write", "stream", "stream-write", "tree"] {
-        let output = Command::new(&exe)
-            .args(["run", pipeline, path, "1"])
-            .output()
-            .map_err(|e| e.to_string())?;
-        if !output.status.success() {
-            return Err(format!(
-                "{pipeline} failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ));
-        }
-        let line = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let line = run_child(pipeline, path, 1)?;
         let (mbps, peak_mb, ratio) = (field(&line, 4), field(&line, 5), field(&line, 6));
         let mut failed = Vec::new();
         match pipeline {
@@ -252,22 +270,87 @@ fn check(path: &str, args: &[String]) -> Result<bool, String> {
         );
     }
     println!("input: {:.1} MB", size / 1e6);
+    // The profiles, against the plain pipelines.
+    let mut relative = |what: &str, line: &str, base: &str, time: f64, peak: f64| {
+        let times = field(line, 2) / field(base, 2);
+        let mut failed = Vec::new();
+        if times > time {
+            failed.push("time");
+        }
+        if field(line, 6) > peak {
+            failed.push("peak");
+        }
+        ok &= failed.is_empty();
+        println!(
+            "{line}\t{times:.2}x {what}\t{}",
+            if failed.is_empty() {
+                "ok".to_string()
+            } else {
+                format!("FAILED: {}", failed.join(", "))
+            }
+        );
+    };
+    let write = run_child("write", path, 3)?;
+    let export = run_child("export", path, 3)?;
+    relative(
+        "the write",
+        &export,
+        &write,
+        limit("export-time"),
+        limit("export-ratio"),
+    );
+    if !producers.is_empty() {
+        let plain_v7 = run_child("write-v7", path, 3)?;
+        for (name, file) in producers {
+            let none = run_child("read-none", file, 3)?;
+            let read = run_child("read", file, 3)?;
+            let what = format!("{name}: its read without interpretation");
+            let (time, peak) = (limit("profile-read-time"), limit("profile-ratio"));
+            relative(&what, &read, &none, time, peak);
+            let v7 = run_child("write-v7", file, 3)?;
+            let what = format!("{name}: the plain file's 7.0 write");
+            relative(&what, &v7, &plain_v7, limit("profile-write-time"), peak);
+        }
+    }
     Ok(ok)
+}
+
+/// The line `run` prints of `pipeline` on `path`, `iterations` times, in a
+/// child process (so that its peak is its own).
+fn run_child(pipeline: &str, path: &str, iterations: usize) -> Result<String, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let output = Command::new(&exe)
+        .args(["run", pipeline, path, &iterations.to_string()])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(format!(
+            "{pipeline} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "perf generate <individuals> <file> | perf run <pipeline> <file> [iterations] | perf check <file> [threshold=value…]";
+    let usage = "perf generate <individuals> <file> [ftm|paf] | perf run <pipeline> <file> [iterations] | perf check <file> [ftm=<file>] [paf=<file>] [threshold=value…]";
     let result = match args
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>()
         .as_slice()
     {
-        ["generate", n, path] => n
+        ["generate", n, path, producer @ ..] => n
             .parse::<usize>()
             .map_err(|e| e.to_string())
-            .and_then(|n| fs::write(path, generate::generated(n)).map_err(|e| e.to_string()))
+            .and_then(|n| {
+                let text = match producer.first() {
+                    Some(producer) => generate::generated_by(n, producer),
+                    None => generate::generated(n),
+                };
+                fs::write(path, text).map_err(|e| e.to_string())
+            })
             .map(|()| true),
         ["run", pipeline, path, rest @ ..] => {
             let iterations = rest.first().and_then(|n| n.parse().ok()).unwrap_or(5);
