@@ -196,6 +196,7 @@ pub(crate) fn read_segmented(text: String, limit: usize) -> Dataset {
             });
         }
     }
+    store.add_seen(tags.seen());
     store.set_tags(tags.others);
     store.shrink();
     // The spare rows of a small file, a few kilobytes at most, are not
@@ -734,6 +735,7 @@ pub(crate) fn read_interpreting(
     }
     store.append_text(&side);
     drop(side);
+    store.add_seen(tags.seen());
     store.set_tags(std::mem::take(&mut tags.others));
     data.store = store;
     let report = if interp.has_pending() {
@@ -1371,6 +1373,7 @@ fn retype_all(
             }
         });
     }
+    store.add_seen(tags.seen());
     store.set_tags(std::mem::take(&mut tags.others));
     fits
 }
@@ -1527,6 +1530,7 @@ impl RecordReader {
                 }
             });
         }
+        store.add_seen(tags.seen());
         store.set_tags(tags.others);
         store.shrink();
         data.store = store;

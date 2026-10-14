@@ -690,13 +690,7 @@ impl GedcomWriter {
         let detection = data.producer()?;
         let rules = crate::profile::RuleSet::of(detection, data.interpretation());
         (rules.has_v7_only()
-            && rules.may_apply(
-                data.store().input(),
-                data.store().other_tags(),
-                false,
-                true,
-                true,
-            ))
+            && rules.may_apply(data.store(), data.store().other_tags(), false, true, true))
         .then_some(rules)
     }
 
