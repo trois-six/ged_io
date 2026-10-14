@@ -8,11 +8,38 @@ use std::fmt::Write as _;
 /// and citations: about 470 bytes an individual.
 #[must_use]
 pub fn generated(n: usize) -> String {
-    let mut s = String::from("0 HEAD\n1 GEDC\n2 VERS 5.5.1\n2 FORM LINEAGE-LINKED\n1 CHAR UTF-8\n");
+    generated_by(n, "")
+}
+
+/// [`generated`] as the producer `producer` writes it, with the extension
+/// of its own that its import profile interprets in every individual:
+/// `ftm` (Family Tree Maker: a military service, `_MILT` with a date and a
+/// place, read as an event), `paf` (Personal Ancestral File: a `_UID`,
+/// read as 7.0's `UID`); any other name: [`generated`]. About 20 and 40
+/// bytes more an individual.
+#[must_use]
+pub fn generated_by(n: usize, producer: &str) -> String {
+    let source = match producer {
+        "ftm" => "1 SOUR FTM\n",
+        "paf" => "1 SOUR PAF\n",
+        _ => "",
+    };
+    let mut s =
+        format!("0 HEAD\n{source}1 GEDC\n2 VERS 5.5.1\n2 FORM LINEAGE-LINKED\n1 CHAR UTF-8\n");
     for i in 0..n {
+        let _ = writeln!(s, "0 @I{i}@ INDI");
+        match producer {
+            "ftm" => {
+                let _ = writeln!(s, "1 _MILT\n2 DATE {}\n2 PLAC Sampletown", 1820 + i % 80);
+            }
+            "paf" => {
+                let _ = writeln!(s, "1 _UID {:032X}", 12_345 + i * 7_919);
+            }
+            _ => {}
+        }
         let _ = write!(
             s,
-            "0 @I{i}@ INDI\n1 NAME Given{i} /Family{}/\n1 SEX {}\n1 BIRT\n2 DATE {} JAN {}\n2 PLAC Sampletown, Region {}\n2 SOUR @S{}@\n3 PAGE p. {i}\n1 FAMS @F{}@\n1 NOTE {}\n2 CONT second line with an @@ sign\n1 CHAN\n2 DATE 1 JAN 2000\n",
+            "1 NAME Given{i} /Family{}/\n1 SEX {}\n1 BIRT\n2 DATE {} JAN {}\n2 PLAC Sampletown, Region {}\n2 SOUR @S{}@\n3 PAGE p. {i}\n1 FAMS @F{}@\n1 NOTE {}\n2 CONT second line with an @@ sign\n1 CHAN\n2 DATE 1 JAN 2000\n",
             i % 97,
             if i % 2 == 0 { "M" } else { "F" },
             1 + i % 28,

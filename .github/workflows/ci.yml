@@ -160,11 +160,16 @@ jobs:
 
     # Each pipeline runs in a process of its own and reads its peak
     # resident set (VmHWM): a dataset read peaks at most at 3 times the
-    # input, its write at 4.5, a stream at 64 MiB; see tools/perf.
+    # input, its write at 4.5, a stream at 64 MiB; the producer profiles'
+    # read, 7.0 write and export are checked against the plain pipelines;
+    # see tools/perf.
     - name: Check peak memory and throughput on a generated 47 MB file
       run: |
-        tools/perf/target/release/ged_io-perf generate 100000 "$RUNNER_TEMP/generated.ged"
-        tools/perf/target/release/ged_io-perf check "$RUNNER_TEMP/generated.ged"
+        perf=tools/perf/target/release/ged_io-perf
+        $perf generate 100000 "$RUNNER_TEMP/generated.ged"
+        $perf generate 100000 "$RUNNER_TEMP/ftm.ged" ftm
+        $perf generate 100000 "$RUNNER_TEMP/paf.ged" paf
+        $perf check "$RUNNER_TEMP/generated.ged" ftm="$RUNNER_TEMP/ftm.ged" paf="$RUNNER_TEMP/paf.ged"
 
   security-audit:
     name: Security Audit
