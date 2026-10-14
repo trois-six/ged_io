@@ -269,7 +269,8 @@ pub(crate) const LONG_FORMS: &[(&str, &str)] = &[
 
 /// The standard tag a long form names.
 pub(crate) fn long_form(tag: &str) -> Option<&'static str> {
-    if tag.len() <= 4 {
+    // (Every long form is a word of letters: an extension tag is none.)
+    if tag.len() <= 4 || !tag.bytes().next().is_some_and(|b| b.is_ascii_alphabetic()) {
         return None;
     }
     LONG_FORMS
@@ -281,6 +282,16 @@ pub(crate) fn long_form(tag: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`long_form`] passes over what does not start with a letter.
+    #[test]
+    fn long_forms_start_with_a_letter() {
+        assert!(LONG_FORMS
+            .iter()
+            .all(|(long, _)| long.bytes().next().is_some_and(|b| b.is_ascii_alphabetic())));
+        assert_eq!(long_form("birth"), Some("BIRT"));
+        assert_eq!(long_form("_BIRTH"), None);
+    }
 
     #[test]
     fn name_parts() {
