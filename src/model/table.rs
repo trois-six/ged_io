@@ -1313,6 +1313,11 @@ pub(crate) trait Item: sealed::Listed {
         let _ = e;
         None
     }
+    /// The text of occurrence `o`, when the items are texts.
+    fn one_text(o: Self::One) -> Option<Span> {
+        let _ = o;
+        None
+    }
 }
 
 /// A field of a structure, in a row: one occurrence or a list of them.
@@ -1413,6 +1418,17 @@ impl<T: Item + 'static> RowSlot for Option<T> {
     #[inline]
     fn view(s: Self::Stored, data: &Dataset) -> Self::View<'_> {
         s.map(|o| T::view_one(o, data))
+    }
+
+    fn texts(s: &Self::Stored, _: &Tables, f: &mut dyn FnMut(Span)) -> Option<usize> {
+        if !T::TEXT {
+            return None;
+        }
+        let text = s.and_then(T::one_text);
+        if let Some(text) = text {
+            f(text);
+        }
+        Some(usize::from(text.is_some()))
     }
 }
 

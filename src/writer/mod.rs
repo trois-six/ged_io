@@ -54,8 +54,10 @@ mod stream;
 mod xref;
 
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::fmt;
 use std::io;
+use std::rc::Rc;
 
 use crate::convert::{ConversionOptions, Plan};
 use crate::model::Dataset;
@@ -69,8 +71,8 @@ use emit::{emit, emit_known, emit_tagged};
 use xref::XrefMap;
 
 pub(crate) use emit::{
-    emit_typed, extension_tag, is_valid_pointer, new_xref, special_bytes, LineSink, AT_SIGN,
-    CONTROL, LINE_FEED, MAYBE_BANNED, TAB,
+    emit_typed, extension_tag, is_valid_pointer, new_xref, special_bytes, LineSink, Looker,
+    AT_SIGN, CONTROL, LINE_FEED, MAYBE_BANNED, TAB,
 };
 pub(crate) use head::{complete as complete_head, needs_submitter, stub_submitter, PLACEHOLDER};
 pub use stream::GedcomStreamWriter;
@@ -641,6 +643,42 @@ impl GedcomWriter {
         Some((Dataset::parse(text).to_structures(), report))
     }
 
+    /// `data` written in its own version family, record by record, as
+    /// [`write`](Self::write) writes it, with `rewrite` rewriting
+    /// structures and `looker` looking at each structure and record as
+    /// they are written ([`crate::profile::Exporter`]): the sink, in the
+    /// configured encoding, and the report. `None` when the write is not
+    /// one record at a time (or the looker stopped it).
+    pub(crate) fn write_looked<'d>(
+        &self,
+        data: &'d Dataset,
+        rewrite: &'d dyn crate::model::driver::RowRewrite,
+        looker: Rc<RefCell<dyn Looker>>,
+        head: Structure,
+    ) -> Result<Option<(LineSink<'static>, WriteReport)>, WriteError> {
+        if self.interpretation(data).is_some() || self.drops_credentials(data) {
+            return Ok(None);
+        }
+        let built = data.built_with(self, self.adoptions(data), Some(rewrite));
+        if self.plan_for(data, &built, false).is_some() {
+            return Ok(None);
+        }
+        let order = crate::model::field_order;
+        let watched = Looked {
+            looker,
+            head: Some(head),
+        };
+        self.direct_built(
+            &built,
+            order,
+            data.store(),
+            None,
+            None,
+            Some(data),
+            Some(watched),
+        )
+    }
+
     /// The rules of the producer of a 5.5.1 dataset written in 7.x, when
     /// some rule only says something in 7.x and may apply
     /// ([`crate::profile`]): what is interpreted as it is written.
@@ -734,6 +772,7 @@ impl GedcomWriter {
             text,
             Some(unconverted),
             Some(data),
+            None,
         )?;
         Ok(out)
     }
@@ -986,7 +1025,7 @@ impl GedcomWriter {
     ) -> Result<WriteReport, WriteError> {
         if let Some(store) = store {
             if let Some((sink, report)) =
-                self.direct_built(built, order, store, None, None, whole)?
+                self.direct_built(built, order, store, None, None, whole, None)?
             {
                 writer.write_all(&sink.into_bytes())?;
                 writer.flush()?;
@@ -1008,6 +1047,7 @@ impl GedcomWriter {
     /// and no other record may need converting
     /// ([`GedcomWriter::unconverted`]). `whole`: the dataset `built` are
     /// the records of, one for one, when they are.
+    #[allow(clippy::too_many_arguments)] // The records, how to write them, and what watches them.
     fn direct_built<'n>(
         &self,
         built: &'n [impl Build<'n>],
@@ -1016,9 +1056,17 @@ impl GedcomWriter {
         text: Option<usize>,
         watch: Option<Unconverted>,
         whole: Option<&'n Dataset>,
+        watched: Option<Looked>,
     ) -> Result<Option<(LineSink<'static>, WriteReport)>, WriteError> {
         let mut records: Vec<Rec<'n, &'n Structure>> =
             built.iter().map(|r| Rec::built(r)).collect();
+        // The header given instead of the dataset's.
+        let looker = watched.map(|Looked { looker, head }| {
+            if let (Some(head), Some(r)) = (head, records.first_mut()) {
+                *r = Rec::owned(head);
+            }
+            looker
+        });
         // The header converted.
         let watch = watch.map(|Unconverted { watch, head }| {
             if let Some((at, head)) = head {
@@ -1046,9 +1094,18 @@ impl GedcomWriter {
         if self.wants_bom(rules, encoding, text.is_some()) {
             sink.bom();
         }
+        sink.looker.clone_from(&looker);
         let order = order(rules.version);
-        let Some(conformed) =
-            write_direct(rules, &mut sink, &mut records, order, store, watch, whole)?
+        let Some(conformed) = write_direct(
+            rules,
+            &mut sink,
+            &mut records,
+            order,
+            store,
+            watch,
+            whole,
+            looker.as_ref(),
+        )?
         else {
             return Ok(None);
         };
@@ -1090,7 +1147,7 @@ impl GedcomWriter {
     ) -> Result<(String, WriteReport), WriteError> {
         if let Some(store) = store {
             if let Some((sink, report)) =
-                self.direct_built(built, order, store, Some(size), None, whole)?
+                self.direct_built(built, order, store, Some(size), None, whole, None)?
             {
                 return Ok((sink.into_string(), report));
             }
@@ -1288,6 +1345,13 @@ impl Pointers for XrefMap<'_> {
     }
 }
 
+/// What a direct write is looked at with ([`GedcomWriter::write_looked`]),
+/// and the header written instead of the dataset's.
+struct Looked {
+    looker: Rc<RefCell<dyn Looker>>,
+    head: Option<Structure>,
+}
+
 /// A dataset written in a version of the other family as it is
 /// ([`GedcomWriter::unconverted`]): what its records are looked at for,
 /// and its header converted with its index, when the conversion changes it.
@@ -1410,6 +1474,7 @@ thread_local! {
 /// [`write_records`] writes once the whole conformance pass is done, with
 /// the pass's repairs. `None` when the dataset needs the whole pass: what
 /// was written is to be thrown away.
+#[allow(clippy::too_many_arguments)] // The records, how to write them, and who looks.
 fn write_direct<'n>(
     rules: &'static VersionRules,
     sink: &mut LineSink<'_>,
@@ -1418,6 +1483,7 @@ fn write_direct<'n>(
     store: &'n Store,
     watch: Option<std::rc::Rc<crate::convert::Watch>>,
     whole: Option<&'n Dataset>,
+    looker: Option<&Rc<RefCell<dyn Looker>>>,
 ) -> Result<Option<Vec<Repair>>, WriteError> {
     let utf8 = sink.encoding() == OutputEncoding::Utf8;
     let stream = utf8.then_some(&*sink);
@@ -1473,6 +1539,9 @@ fn write_direct<'n>(
         let Some(record) = records.get_mut(i) else {
             break;
         };
+        if let Some(looker) = &looker {
+            looker.borrow_mut().begin(i);
+        }
         let place = place_record(
             &mut direct,
             &mut out,
@@ -1484,23 +1553,27 @@ fn write_direct<'n>(
         let Some(place) = place else {
             return Ok(None);
         };
-        if place == Place::Lines {
-            continue;
-        }
-        let xref = xrefs.record(i - 1, record.xref());
-        let xref = xref.as_deref();
-        match (place, record.as_structure()) {
-            (Place::Arena, _) => {
-                if let Some(root) = direct.root() {
-                    put_flat(&mut out, &mut xrefs, xref, root)?;
+        if place != Place::Lines {
+            let xref = xrefs.record(i - 1, record.xref());
+            let xref = xref.as_deref();
+            match (place, record.as_structure()) {
+                (Place::Arena, _) => {
+                    if let Some(root) = direct.root() {
+                        put_flat(&mut out, &mut xrefs, xref, root)?;
+                    }
                 }
+                (Place::Record, Some(s)) => {
+                    put_record(&mut out, &mut xrefs, xref, s, &mut Vec::new())?;
+                    // A record converted is not kept once written.
+                    *record = Rec::owned(Structure::default());
+                }
+                (Place::Record, None) | (Place::Lines, _) => return Ok(None),
             }
-            (Place::Record, Some(s)) => {
-                put_record(&mut out, &mut xrefs, xref, s, &mut Vec::new())?;
-                // A record converted is not kept once written.
-                *record = Rec::owned(Structure::default());
+        }
+        if let Some(looker) = &looker {
+            if !looker.borrow_mut().end(i, place == Place::Record) {
+                return Ok(None);
             }
-            (Place::Record, None) | (Place::Lines, _) => return Ok(None),
         }
     }
     out.sink.source_line = 0;
@@ -1587,6 +1660,8 @@ fn assert_lines<'n>(
     lines: &LineSink<'_>,
 ) {
     let mut expected = out.sink.record_lines();
+    // (What the record wrote was looked at already.)
+    expected.looker = None;
     let mut flat = Flat::default();
     let mut scratch = Flat::default();
     let xref = xrefs.record(index, record.xref()).map(Cow::into_owned);
@@ -1780,6 +1855,7 @@ fn put_clean(out: &mut Emitter<'_, '_>, root: &Structure) -> Result<(), WriteErr
             level,
             s.xref.as_deref(),
             s.tag.as_str(),
+            s.tag.standard_index(),
             payload,
             special,
         )?;
