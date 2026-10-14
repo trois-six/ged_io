@@ -665,16 +665,6 @@ impl GedcomWriter {
             Some(unconverted),
             Some(data),
         )?;
-        #[cfg(debug_assertions)]
-        if out.is_some() {
-            debug_assert!(
-                self.plan_for(data, built, true)
-                    .is_none_or(|p| p.converts_no_record()),
-                "a record that needs converting was written as it is: {:?}",
-                self.plan_for(data, built, true)
-                    .map(|p| p.debug_converted(built))
-            );
-        }
         Ok(out)
     }
 
@@ -746,7 +736,19 @@ impl GedcomWriter {
         let order = crate::model::field_order;
         if let Some(plan) = self.plan_for(data, &built, false) {
             if let Some((sink, report)) = self.unconverted(data, &plan, &built, Some(size))? {
-                return Ok((sink.into_string(), report));
+                let text = sink.into_string();
+                // The records converted one at a time are those the whole
+                // plan converts, and as it does.
+                #[cfg(debug_assertions)]
+                if let Some(plan) = self.plan_for(data, &built, true) {
+                    let planned =
+                        self.write_built_to_string(&plan.entries(&built), order, size, store, None);
+                    if let Ok((planned, planned_report)) = planned {
+                        debug_assert_eq!(text, planned, "converted alone");
+                        debug_assert_eq!(report, planned_report, "converted alone");
+                    }
+                }
+                return Ok((text, report));
             }
             if let Some(plan) = self.plan_for(data, &built, true) {
                 return self.write_built_to_string(&plan.entries(&built), order, size, store, None);
@@ -1333,6 +1335,7 @@ fn write_direct<'n>(
     else {
         return Ok(None);
     };
+    let alone = watch.clone();
     if let Some(watch) = watch {
         direct.watch(watch);
     }
@@ -1379,32 +1382,14 @@ fn write_direct<'n>(
         let Some(record) = records.get_mut(i) else {
             break;
         };
-        // The identifier of a record that writes itself, for its lines.
-        let built = if record.is_built() {
-            xrefs.record(i - 1, record.built_xref())
-        } else {
-            None
-        };
-        // A record that writes itself streams its lines right after the
-        // output, kept when they are its own (`Place::Lines`).
-        let lent = match (record.is_built(), direct.lines()) {
-            (true, Some(lines)) => {
-                out.sink.lend(lines);
-                true
-            }
-            _ => false,
-        };
-        let place = direct.record(i, record, built);
-        if lent {
-            if let Some(lines) = direct.lines() {
-                let keep = place == Some(Place::Lines);
-                #[cfg(debug_assertions)]
-                if keep {
-                    assert_lines(rules, &out, &mut xrefs, record, i - 1, lines);
-                }
-                out.sink.take_back(lines, keep);
-            }
-        }
+        let place = place_record(
+            &mut direct,
+            &mut out,
+            &mut xrefs,
+            record,
+            i,
+            alone.as_deref(),
+        );
         let Some(place) = place else {
             return Ok(None);
         };
@@ -1426,6 +1411,70 @@ fn write_direct<'n>(
     out.sink.source_line = 0;
     out.put(0, None, "TRLR", PayloadRef::None)?;
     Ok(Some(direct.into_repairs()))
+}
+
+/// Checks record `i` (`record`) of a direct write ([`write_direct`]):
+/// where it is then. A record that needs converting is converted alone
+/// when that changes nothing outside it (most conversions: `_UID` as
+/// `UID`, a role as a 7.x `ROLE`), and checked again: the dataset is
+/// planned whole only for the others.
+fn place_record<'n>(
+    direct: &mut Direct<'n>,
+    out: &mut Emitter<'_, '_>,
+    xrefs: &mut XrefMap<'_>,
+    record: &mut Rec<'n, &'n Structure>,
+    i: usize,
+    watch: Option<&crate::convert::Watch>,
+) -> Option<Place> {
+    let mut converted = false;
+    loop {
+        // The identifier of a record that writes itself, for its lines.
+        let built = if record.is_built() {
+            xrefs.record(i - 1, record.built_xref())
+        } else {
+            None
+        };
+        // A record that writes itself streams its lines right after the
+        // output, kept when they are its own (`Place::Lines`).
+        let lent = match (record.is_built(), direct.lines()) {
+            (true, Some(lines)) => {
+                out.sink.lend(lines);
+                true
+            }
+            _ => false,
+        };
+        let place = if converted {
+            direct.record_converted(i, record, built)
+        } else {
+            direct.record(i, record, built)
+        };
+        let alone = match (&place, watch) {
+            (None, Some(w)) if !converted && direct.wants_converting() => {
+                let mut s = record.to_structure(direct.c_arena());
+                w.convert_alone(&mut s).map(|changed| changed.then_some(s))
+            }
+            _ => None,
+        };
+        if lent {
+            if let Some(lines) = direct.lines() {
+                let keep = place == Some(Place::Lines);
+                #[cfg(debug_assertions)]
+                if keep {
+                    assert_lines(out.rules, out, xrefs, record, i - 1, lines);
+                }
+                out.sink.take_back(lines, keep);
+            }
+        }
+        match alone {
+            Some(s) => {
+                if let Some(s) = s {
+                    *record = Rec::owned(s);
+                }
+                converted = true;
+            }
+            None => return place,
+        }
+    }
 }
 
 /// Checks, in debug builds, that the lines a record wrote as it wrote

@@ -508,7 +508,7 @@ impl<'n, N: Node<'n>> Rec<'n, N> {
     }
 
     /// The record as an owned structure, as it is.
-    fn to_structure(&self, arena: &Flat<'n>) -> Structure {
+    pub(crate) fn to_structure(&self, arena: &Flat<'n>) -> Structure {
         if let Some(s) = match self.body {
             Body::Built(b) => b.owned(),
             Body::Given(_) | Body::Owned(_) => None,

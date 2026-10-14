@@ -137,6 +137,11 @@ impl Converter {
         })
     }
 
+    /// The version converted to.
+    pub(crate) fn target(&self) -> GedcomVersion {
+        self.target
+    }
+
     /// Learns what the header says that records convert by: the source
     /// system, and the extension tags it declares.
     pub(crate) fn read_head(&mut self, head: &Structure) {
