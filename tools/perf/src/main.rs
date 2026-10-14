@@ -35,14 +35,15 @@
 //!
 //! The pipelines of the producer profiles are checked against the plain
 //! ones on the same machine, by the median of three runs: the `geneanet`
-//! export of the file against its write (`export-time=16`, a peak of at
-//! most 14 times the input: `export-ratio=14`); and, given the files the
-//! `ftm` and `paf` generators write (`ftm=…`, `paf=…`), each read
-//! interpreted against its read without interpretation
-//! (`profile-read-time=3`), each 7.0 write against the plain file's 7.0
-//! write (`profile-write-time=8`), each peaking at most at 4.5 times its
-//! input (`profile-ratio=4.5`). These thresholds hold what the profiles'
-//! redesign reached with some room, so that a regression fails.
+//! export of the file against its write (`export-time=2`); and, given the
+//! files the `ftm` and `paf` generators write (`ftm=…`, `paf=…`), each
+//! read interpreted against its read without interpretation
+//! (`profile-read-time=2`), each 7.0 write against the plain file's 7.0
+//! write (`profile-write-time=2`). Each peaks within the budget of its
+//! plain pipeline: an export or a 7.0 write at `write-ratio`, a read at
+//! `read-ratio`. The profiles run at about 1.5 times their plain pipeline
+//! in instructions; the time thresholds leave room for the machine, so
+//! that a regression fails.
 
 mod generate;
 
@@ -209,11 +210,9 @@ fn check(path: &str, args: &[String]) -> Result<bool, String> {
         ("stream-mib", 64.0),
         ("min-mbps", 50.0),
         ("min-stream-mbps", 20.0),
-        ("export-time", 16.0),
-        ("export-ratio", 14.0),
-        ("profile-read-time", 3.0),
-        ("profile-write-time", 8.0),
-        ("profile-ratio", 4.5),
+        ("export-time", 2.0),
+        ("profile-read-time", 2.0),
+        ("profile-write-time", 2.0),
     ];
     // The files of the producers, by name.
     let mut producers: Vec<(&str, &str)> = Vec::new();
@@ -297,7 +296,7 @@ fn check(path: &str, args: &[String]) -> Result<bool, String> {
         &export,
         &write,
         limit("export-time"),
-        limit("export-ratio"),
+        limit("write-ratio"),
     );
     if !producers.is_empty() {
         let plain_v7 = run_child("write-v7", path, 3)?;
@@ -305,11 +304,12 @@ fn check(path: &str, args: &[String]) -> Result<bool, String> {
             let none = run_child("read-none", file, 3)?;
             let read = run_child("read", file, 3)?;
             let what = format!("{name}: its read without interpretation");
-            let (time, peak) = (limit("profile-read-time"), limit("profile-ratio"));
+            let (time, peak) = (limit("profile-read-time"), limit("read-ratio"));
             relative(&what, &read, &none, time, peak);
             let v7 = run_child("write-v7", file, 3)?;
             let what = format!("{name}: the plain file's 7.0 write");
-            relative(&what, &v7, &plain_v7, limit("profile-write-time"), peak);
+            let (time, peak) = (limit("profile-write-time"), limit("write-ratio"));
+            relative(&what, &v7, &plain_v7, time, peak);
         }
     }
     Ok(ok)
