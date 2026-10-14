@@ -1252,8 +1252,8 @@ impl<'r> Interpreter<'r> {
         // have none.)
         let mut path: Option<[&'a str; IN_ARENA_DEPTH]> = None;
         for (at, raw) in nodes.iter().enumerate() {
-            let depth = raw.depth.wrapping_sub(top);
-            let bit = if depth == 0 {
+            // (The record is the first, and the only one at its depth.)
+            let bit = if at == 0 {
                 InArena::RECORD
             } else {
                 InArena::BELOW
@@ -1265,6 +1265,7 @@ impl<'r> Interpreter<'r> {
             {
                 continue;
             }
+            let depth = raw.depth.wrapping_sub(top);
             let Some(n) = root.below(at) else { break };
             // Most structures a rule reads are values no rule changes (a
             // date in no dialect): told by the rules' ops alone, wherever
@@ -1613,7 +1614,7 @@ impl<'a> Look<'_, 'a, '_> {
                 Op::Event { tag: to, label, y } if label != Label::Schema => {
                     let node = read();
                     let ty = label_of(&node, label);
-                    event_of(node, to, ty.as_deref(), label == Label::Payload, y)
+                    event_of(node, to, ty, label == Label::Payload, y)
                 }
                 _ => {
                     self.emulated = false;
@@ -1665,17 +1666,29 @@ impl<'a> Look<'_, 'a, '_> {
     fn place(&mut self, n: NodeRef<'a>, k: usize, new: Draft<'a>, a: Applied) -> bool {
         let read = self.read;
         let want = new.tag.as_str().trim_start_matches('_');
+        // A standard tag read is told by its id: those of `new`'s tag and
+        // of `want`, when standard.
+        let standard = u32::try_from(STANDARD_TAGS.len()).unwrap_or(u32::MAX);
+        let new_id = standard_index(new.tag.as_str()).map(u32::from);
+        let want_id = standard_index(want).map(u32::from);
         // Whether a sibling `c` holds `new` (`said`: as `holds` finds,
         // else equal).
         let like = |c: Sibling<'_, 'a>, said: bool| -> bool {
-            let tag = match c {
-                Sibling::Read(r) => r.tag_text(read.others),
-                Sibling::New(d) => d.tag.as_str(),
-            };
-            let fits = if said {
-                tag.trim_start_matches('_') == want
-            } else {
-                tag == new.tag.as_str()
+            let fits = match c {
+                Sibling::Read(r) if r.tag_id() < standard => {
+                    Some(r.tag_id()) == if said { want_id } else { new_id }
+                }
+                _ => {
+                    let tag = match c {
+                        Sibling::Read(r) => r.tag_text(read.others),
+                        Sibling::New(d) => d.tag.as_str(),
+                    };
+                    if said {
+                        tag.trim_start_matches('_') == want
+                    } else {
+                        tag == new.tag.as_str()
+                    }
+                }
             };
             if !fits {
                 return false;
@@ -2099,13 +2112,13 @@ fn renames(to: &str, payload: &str, v7: bool) -> bool {
 
 /// The type label an [`Op::Event`] rule gives the event it makes of
 /// `node`, but from the header's schema ([`Label::Schema`]).
-fn label_of(node: &Draft<'_>, label: Label) -> Option<String> {
+fn label_of(node: &Draft<'_>, label: Label) -> Option<Cow<'static, str>> {
     match label {
         Label::None | Label::Schema => None,
-        Label::Text(t) => Some(t.to_string()),
+        Label::Text(t) => Some(Cow::Borrowed(t)),
         Label::Payload => {
             let t = payload_str(node).trim();
-            (!t.is_empty()).then(|| t.to_string())
+            (!t.is_empty()).then(|| Cow::Owned(t.to_string()))
         }
     }
 }
@@ -2116,7 +2129,7 @@ fn label_of(node: &Draft<'_>, label: Label) -> Option<String> {
 fn event_of<'s>(
     mut new: Draft<'s>,
     tag: &'static str,
-    ty: Option<&str>,
+    ty: Option<Cow<'s, str>>,
     payload: bool,
     y: bool,
 ) -> Draft<'s> {
@@ -2126,7 +2139,19 @@ fn event_of<'s>(
     }
     if let Some(ty) = ty {
         if !has(&new, "TYPE") {
-            new.substructures.insert(0, text_node("TYPE", ty));
+            // First, the others after.
+            let mut substructures = Vec::with_capacity(new.substructures.len() + 1);
+            substructures.push(Draft {
+                tag: DraftTag::new("TYPE"),
+                payload: if ty.is_empty() {
+                    Value::None
+                } else {
+                    Value::Text(ty)
+                },
+                ..Draft::default()
+            });
+            substructures.append(&mut new.substructures);
+            new.substructures = substructures;
         }
     }
     // A standard event says `Y` or nothing: a text goes to a note.
@@ -2193,7 +2218,7 @@ fn apply<'s>(
                         .schema
                         .iter()
                         .find(|(r, t, _)| r == record && t == node.tag.as_str())
-                        .map(|(_, _, l)| l.clone());
+                        .map(|(_, _, l)| Cow::Owned(l.clone()));
                     if found.is_none() {
                         return Outcome::skip();
                     }
@@ -2201,7 +2226,7 @@ fn apply<'s>(
                 }
                 label => label_of(&node, label),
             };
-            let new = event_of(node, tag, ty.as_deref(), label == Label::Payload, y);
+            let new = event_of(node, tag, ty, label == Label::Payload, y);
             place(parent, i, vec![new], applied, cx)
         }
         Op::Name(kind, value) => name(parent, i, applied, path, cx, kind, value),
