@@ -308,13 +308,12 @@ impl<'s> Stream<'s> {
         &mut self,
         level: u32,
         tag: &str,
-        standard: bool,
+        standard: Option<u16>,
         payload: &FlatPayload<'_>,
         special: u8,
     ) {
         // Every tag streamed is in the grammar, and only the record has an
         // identifier (valid: the writer's).
-        let _ = standard;
         let xref = if level == 0 {
             self.xref.as_deref()
         } else {
@@ -331,6 +330,7 @@ impl<'s> Stream<'s> {
             level as usize,
             xref,
             tag,
+            standard,
             payload,
             special,
         )
@@ -834,7 +834,7 @@ impl<'s> Flat<'s> {
         if !typing.v7() {
             self.size += size_bound(tag, standard, xref, &payload);
         }
-        st.line(depth, tag, standard.is_some(), &payload, special);
+        st.line(depth, tag, standard, &payload, special);
         let empty = match &payload {
             FlatPayload::None => true,
             FlatPayload::Pointer(..) => false,
@@ -948,7 +948,7 @@ impl<'s> Flat<'s> {
             return;
         }
         self.size += size_bound(tag, standard, xref, &payload);
-        st.line(depth, tag, standard.is_some(), &payload, special);
+        st.line(depth, tag, standard, &payload, special);
         if let FlatPayload::Pointer(p, id) = payload {
             match &st.targets {
                 Some(targets) => {

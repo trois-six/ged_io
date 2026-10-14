@@ -24,10 +24,12 @@
 //! through all of them at once. Conformance looks again only at what the
 //! folds changed since it last looked.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
 use std::ops::Range;
+use std::rc::Rc;
 
 use crate::convert::{convert_structures, ConversionOptions};
 use crate::model::driver::WriteCx;
@@ -37,7 +39,8 @@ use std::borrow::Cow;
 use crate::spec::conform::{conform_records, Checked, Rec};
 use crate::tree::{standard_index, standard_index_const, Flat, Structure, Xref, STANDARD_TAGS};
 use crate::writer::{
-    Bom, Credentials, GedcomWriter, LineEnding, OutputEncoding, Repair, WriteError, XrefIndex,
+    Bom, Credentials, GedcomWriter, LineEnding, LineSink, OutputEncoding, Repair, WriteError,
+    XrefIndex,
 };
 use crate::GedcomVersion;
 
@@ -527,7 +530,7 @@ pub(crate) enum PlaceStyle {
 
 impl PlaceStyle {
     /// The format, as `HEAD.PLAC.FORM` says it.
-    fn form(self) -> &'static str {
+    pub(super) fn form(self) -> &'static str {
         match self {
             PlaceStyle::Geneanet => "Town, Area code, County, Region, Country",
             PlaceStyle::Heredis => "Town, Area code, County, Region, Country, Subdivision",
@@ -536,15 +539,20 @@ impl PlaceStyle {
 
     /// Whether a place follows the format: its jurisdictions, with
     /// Geneanet's `[subdivision] - ` before them.
-    fn fits(self, place: &str) -> bool {
+    pub(super) fn fits(self, place: &str) -> bool {
         let place = match self {
             PlaceStyle::Geneanet if place.trim_start().starts_with('[') => {
                 place.split_once("] - ").map_or(place, |(_, rest)| rest)
             }
             _ => place,
         };
-        place.split(',').count() == self.form().split(',').count()
+        jurisdictions(place) == jurisdictions(self.form())
     }
+}
+
+/// The jurisdictions of a place, comma-separated: one more than its commas.
+pub(super) fn jurisdictions(place: &str) -> usize {
+    1 + place.bytes().filter(|&b| b == b',').count()
 }
 
 /// Writes datasets for an importer: see the [`profile` documentation](crate::profile).
@@ -641,10 +649,24 @@ impl Exporter {
             structures = owned;
             structures.iter().map(Draft::of_structure).collect()
         };
+        let mut report = self.fold_with(data, &mut records, false).report;
+        let room = data.store.input().len();
+        let text = self.text(records, limits.then_some(&mut report), room);
+        drop(structures);
+        (text, report)
+    }
+
+    /// The folds of `records` (those of `data`, in the target version), in
+    /// place, and what they folded. `direct`: for a direct export
+    /// ([`Exporter::direct`]), each step runs on every record before the
+    /// next, what each fold and limit was reported by is kept, and the
+    /// places folded are kept to report with the write's.
+    fn fold_with(&self, data: &Dataset, records: &mut Vec<Draft<'_>>, direct: bool) -> Folded {
+        let to = self.version();
         if to.is_v7() && !data.version().is_v7() {
             if let Some(producer) = data.producer() {
                 let rules = super::RuleSet::of(producer, data.interpretation());
-                super::interpret::interpret_with(&mut records, to, &rules);
+                super::interpret::interpret_with(records, to, &rules);
             }
         }
         let mut cx = Cx {
@@ -654,36 +676,37 @@ impl Exporter {
             target: &self.profile.target,
             next_xref: 0,
             place_style: None,
+            seq: 0,
+            next_seq: 1,
+            tags: direct.then(Default::default),
+            alone: direct,
+            places: direct.then(Default::default),
         };
         let read = data.read_source.as_deref();
-        let program = own_source(&mut records, &mut cx, read);
+        let program = own_source(records, &mut cx, read);
         if self.options.credentials == Credentials::LeftOut {
-            omit_credentials(&mut records, &mut cx);
+            omit_credentials(records, &mut cx);
         }
         if self.options.omit_private {
-            omit_private(&mut records, &mut cx);
+            omit_private(records, &mut cx);
         }
         if self.options.omit_media {
-            omit_media(&mut records, &mut cx);
+            omit_media(records, &mut cx);
         }
         if self.options.omit_change_dates {
-            omit_change_dates(&mut records, &mut cx);
+            omit_change_dates(records, &mut cx);
         }
         // Steps in three rounds: the folds; then, once conformance has made
         // extensions of what the target has no place for, the extension
         // folds; last the notes, which the folds before write to.
-        let round = |s: &Step| match s.fold {
-            Op::ExtensionsAsNotes | Op::ExtensionsAsEvents | Op::SexSaid => 1,
-            Op::EscapedNotes | Op::PlainNotes => 2,
-            _ => 0,
-        };
+        let round = step_round;
         let first: Vec<&Step> = self
             .profile
             .steps
             .iter()
             .filter(|s| round(s) == 0)
             .collect();
-        run_steps(&first, &mut records, &mut cx, None);
+        run_steps(&first, records, &mut cx, None);
         let later: Vec<&Step> = self
             .profile
             .steps
@@ -693,7 +716,7 @@ impl Exporter {
         // What conformance found clean of each record.
         let mut checked = Vec::new();
         if !later.is_empty() {
-            let (repairs, found) = conform_drafts(&mut records, to, None);
+            let (repairs, found) = conform_drafts(records, to, None);
             cx.report.repairs.extend(repairs);
             checked = found;
         }
@@ -706,10 +729,11 @@ impl Exporter {
         let mut touched = vec![false; records.len()];
         #[cfg(debug_assertions)]
         let before = records.clone();
-        run_steps(&last, &mut records, &mut cx, Some(&mut touched));
-        media_paths(&mut records, &mut cx, &mut touched);
+        run_steps(&last, records, &mut cx, Some(&mut touched));
+        cx.seq = cx.next_seq;
+        media_paths(records, &mut cx, &mut touched);
         #[cfg(debug_assertions)]
-        for ((b, r), t) in before.iter().zip(&records).zip(&touched) {
+        for ((b, r), t) in before.iter().zip(records.iter()).zip(&touched) {
             debug_assert!(*t || b == r, "a record changed untold: {r:?}");
         }
         if let Some(style) = cx.place_style {
@@ -717,18 +741,236 @@ impl Exporter {
             // makes extensions are not the format's. What it found clean
             // and the steps since left as it was is clean still.
             let known = (!checked.is_empty()).then_some((checked.as_slice(), touched.as_slice()));
-            let (repairs, _) = conform_drafts(&mut records, to, known);
+            let (repairs, _) = conform_drafts(records, to, known);
             cx.report.repairs.extend(repairs);
-            place_form(&mut records, style);
+            place_form(records, style);
         }
         if program {
-            name_the_crate(&mut records, cx.v7);
+            name_the_crate(records, cx.v7);
         }
-        let mut report = cx.report;
-        let room = data.store.input().len();
-        let text = self.text(records, limits.then_some(&mut report), room);
-        drop(structures);
-        (text, report)
+        let (fold_steps, limit_steps) = cx.tags.unwrap_or_default();
+        Folded {
+            report: cx.report,
+            fold_steps,
+            limit_steps,
+            places: cx.places,
+        }
+    }
+
+    /// The order in which the steps of the profile run ([`Cx::seq`]), by
+    /// their index: the folds, then those that look at what conformance
+    /// made, then the notes.
+    fn step_seqs(&self) -> Vec<u16> {
+        let steps = &self.profile.steps;
+        let mut seqs = vec![0_u16; steps.len()];
+        let mut next = 1_u16;
+        for round in 0..3 {
+            for (k, s) in steps.iter().enumerate() {
+                if step_round(s) == round {
+                    if let Some(slot) = seqs.get_mut(k) {
+                        *slot = next;
+                    }
+                    next += 1;
+                }
+            }
+        }
+        seqs
+    }
+
+    /// The export written record by record as the dataset is
+    /// ([`super::export_direct`]), when nothing changes a record but the
+    /// header, the submitters and the submission (folded as drafts) except
+    /// the folds made as it is written: the sink, in the encoding of
+    /// `writer`, and the report, the size aside. `None`: the dataset is to
+    /// be folded whole.
+    fn direct(
+        &self,
+        data: &Dataset,
+        writer: &GedcomWriter,
+    ) -> Result<Option<(LineSink<'static>, ExportReport)>, WriteError> {
+        use super::export_direct::{Census, Rewrite};
+        if !self.direct_fits(data) {
+            return Ok(None);
+        }
+        let Some(front) = self.fold_front(data) else {
+            return Ok(None);
+        };
+        let steps = &self.profile.steps;
+        let rewrite = Rewrite::new(data, steps, front.mapping);
+        let media = self.profile.target.media != MediaPaths::Keep;
+        let census = Census::new(steps, false, media, front.limits, &rewrite);
+        let census = Rc::new(RefCell::new(census));
+        let looker: Rc<RefCell<dyn crate::writer::Looker>> = census.clone();
+        let Some((mut sink, written)) = writer.write_looked(data, &rewrite, looker, front.head)?
+        else {
+            return Ok(None);
+        };
+        sink.looker = None;
+        drop(rewrite);
+        let Ok(census) = Rc::try_unwrap(census).map(RefCell::into_inner) else {
+            return Ok(None);
+        };
+        let (found, limits) = census.into_found();
+        if found.whole {
+            return Ok(None);
+        }
+        let mut report = self.direct_report(front.folded, found);
+        limits.done(&mut report);
+        report.repairs.extend(written.repairs);
+        #[cfg(test)]
+        DIRECT.with(|n| n.set(n.get() + 1));
+        Ok(Some((sink, report)))
+    }
+
+    /// Whether `data` may be exported directly ([`Exporter::direct`]): in
+    /// the target's version (5.5.1), without the options that leave
+    /// records out, with a header, the identifiers valid and unique, and
+    /// only the folds a direct export makes or looks out for.
+    fn direct_fits(&self, data: &Dataset) -> bool {
+        let to = self.version();
+        let options = &self.options;
+        data.version() == to
+            && !to.is_v7()
+            && !options.omit_private
+            && !options.omit_media
+            && !options.omit_change_dates
+            && data.header_ref().is_some()
+            && self
+                .profile
+                .steps
+                .iter()
+                .all(|s| super::export_direct::made_direct(&s.fold))
+            && data.xrefs_conform(to.rules())
+    }
+
+    /// The header, the submitters and the submissions of `data` folded as
+    /// drafts ([`Exporter::direct`]), when they point to no other record
+    /// and the folds change none but the header (and make a submitter the
+    /// writer makes the same).
+    fn fold_front(&self, data: &Dataset) -> Option<Front> {
+        let mut front = front_drafts(data);
+        let named: Vec<Option<String>> = front
+            .iter()
+            .map(|r| r.xref.as_deref().map(str::to_string))
+            .collect();
+        if !front.iter().all(|r| points_within(r, &named)) {
+            return None;
+        }
+        let mapping = place_mapping(&front);
+        let given = front.clone();
+        let folded = self.fold_with(data, &mut front, true);
+        let mut limits = Limits::new(&self.profile.target);
+        for r in &front {
+            limits.record(r);
+        }
+        let mut made = None;
+        for r in front.iter().skip(1).filter(|r| !is(r, "TRLR")) {
+            match given.iter().find(|g| g.xref == r.xref && g.tag == r.tag) {
+                Some(g) if g == r => {}
+                None if made.is_none() && is(r, "SUBM") && data.submitters().is_empty() => {
+                    made = r.xref.as_deref().map(str::to_string);
+                }
+                _ => return None,
+            }
+        }
+        if made
+            .as_deref()
+            .is_some_and(|x| data.store().find_xref(x).is_some())
+        {
+            return None;
+        }
+        let head = front.first().filter(|h| is(h, "HEAD"))?;
+        // Typed again, written as the writer writes a typed header.
+        let mut text = String::new();
+        let version = child(head, "GEDC")
+            .and_then(|g| child_text(g, "VERS"))
+            .map_or(GedcomVersion::V5_5_1, GedcomVersion::from_version_str);
+        head.write_gedcom(&mut text, 0, version);
+        drop(front);
+        let typed = Dataset::parse(text);
+        let Some(RecordRef::Header(h)) = typed.records().next() else {
+            return None;
+        };
+        let mut head =
+            crate::model::write::Built::new(RecordRef::Header(h), self.version()).owned_record()?;
+        if let Some(x) = &made {
+            // Its pointer: the writer completes the header with its own.
+            head.substructures
+                .retain(|c| !(c.tag == "SUBM" && c.pointer().is_some_and(|p| p.as_str() == x)));
+        }
+        Some(Front {
+            folded,
+            head,
+            limits,
+            mapping,
+        })
+    }
+
+    /// The report of a direct export ([`Exporter::direct`]): the front's
+    /// (`folded`), and what the write `found`, in the place of the steps
+    /// that made them.
+    fn direct_report(&self, folded: Folded, found: super::export_direct::Found) -> ExportReport {
+        let Folded {
+            mut report,
+            fold_steps,
+            limit_steps,
+            places,
+        } = folded;
+        let steps = &self.profile.steps;
+        let seqs = self.step_seqs();
+        let seq_of = |op: fn(&Op) -> bool| {
+            steps
+                .iter()
+                .position(|s| op(&s.fold))
+                .and_then(|k| Some((seqs.get(k).copied()?, steps.get(k)?.rows)))
+        };
+        let mut folds: Vec<(u16, Fold)> = report
+            .folds
+            .drain(..)
+            .zip(fold_steps)
+            .map(|(f, k)| (k, f))
+            .collect();
+        let mut kept: Vec<(u16, Limit)> = report
+            .limits
+            .drain(..)
+            .zip(limit_steps)
+            .map(|(l, k)| (k, l))
+            .collect();
+        if let Some((seq, rows)) = seq_of(|op| matches!(op, Op::InlineSources)) {
+            folds.reserve(found.inline.len());
+            for (record, n) in found.inline {
+                let mut detail = String::with_capacity(48);
+                super::export_direct::push_count(&mut detail, n);
+                detail.push_str(" citations of source records written inline");
+                let kind = FoldKind::AsText;
+                let fold = Fold {
+                    rows,
+                    kind,
+                    lossy: false,
+                    record,
+                    detail,
+                };
+                folds.push((seq, fold));
+            }
+        }
+        let style = steps.iter().find_map(|s| match s.fold {
+            Op::Places(style) => Some(style),
+            _ => None,
+        });
+        if let (Some((seq, mut seen)), Some(style)) = (places, style) {
+            seen.changed += found.changed;
+            seen.guessed += found.guessed;
+            seen.skipped += found.skipped;
+            let rows = seq_of(|op| matches!(op, Op::Places(_))).map_or(&[][..], |(_, r)| r);
+            let (limit, fold) = places_report(rows, style, &seen);
+            kept.extend(limit.map(|l| (seq, l)));
+            folds.extend(fold.map(|f| (seq, f)));
+        }
+        folds.sort_by_key(|(k, _)| *k);
+        kept.sort_by_key(|(k, _)| *k);
+        report.folds = folds.into_iter().map(|(_, f)| f).collect();
+        report.limits = kept.into_iter().map(|(_, l)| l).collect();
+        report
     }
 
     /// The records as text, each let go once written; with `report`, the
@@ -778,6 +1020,14 @@ impl Exporter {
         writer: W,
         data: &Dataset,
     ) -> Result<ExportReport, WriteError> {
+        let mut writer = writer;
+        if let Some((sink, mut report)) = self.direct(data, &self.writer())? {
+            let bytes = sink.into_bytes();
+            writer.write_all(&bytes)?;
+            writer.flush()?;
+            self.size_limit(bytes.len() as u64, &mut report);
+            return Ok(report);
+        }
         let (typed, mut report) = self.prepared(data);
         let mut counter = Counter {
             inner: writer,
@@ -797,6 +1047,17 @@ impl Exporter {
     ///
     /// As [`GedcomWriter::write_to_string`].
     pub fn write_to_string(&self, data: &Dataset) -> Result<(String, ExportReport), WriteError> {
+        let utf8 = self.writer().output_encoding(OutputEncoding::Utf8);
+        if let Some((sink, mut report)) = self.direct(data, &utf8)? {
+            let text = sink.into_string();
+            self.size_limit(text.len() as u64, &mut report);
+            return Ok((text, report));
+        }
+        self.whole_to_string(data)
+    }
+
+    /// [`Exporter::write_to_string`] of the dataset folded whole, as drafts.
+    fn whole_to_string(&self, data: &Dataset) -> Result<(String, ExportReport), WriteError> {
         let (typed, mut report) = self.prepared(data);
         let mut bytes = Vec::new();
         let written = self
@@ -829,20 +1090,68 @@ impl Exporter {
     }
 
     /// The importer's limits on the records, found record after record.
-    fn limits(&self) -> Limits<'_> {
-        Limits {
-            target: &self.profile.target,
-            individuals: 0,
-            deep: Vec::new(),
-            names: Vec::new(),
-            children: Vec::new(),
-        }
+    fn limits(&self) -> Limits<'static> {
+        Limits::new(&self.profile.target)
     }
+}
+
+/// The header, the submitters and the submission of a direct export,
+/// folded ([`Exporter::fold_front`]).
+struct Front {
+    /// What their folds folded.
+    folded: Folded,
+    /// The header, as the writer writes it.
+    head: Structure,
+    /// The importer's limits on them.
+    limits: Limits<'static>,
+    /// The jurisdictions the header names, as the place fold reads them.
+    mapping: (Vec<Option<usize>>, bool),
+}
+
+/// What [`Exporter::fold_with`] folded.
+struct Folded {
+    report: ExportReport,
+    /// With each fold and each limit reported, the step that reported it
+    /// ([`Cx::seq`]), for a direct export.
+    fold_steps: Vec<u16>,
+    limit_steps: Vec<u16>,
+    /// The places the place fold folded, and its step, for a direct
+    /// export.
+    places: Option<(u16, PlacesSeen)>,
+}
+
+/// The round a step runs in: the folds; then, once conformance has made
+/// extensions of what the target has no place for, the extension folds;
+/// last the notes, which the folds before write to.
+fn step_round(s: &Step) -> u8 {
+    match s.fold {
+        Op::ExtensionsAsNotes | Op::ExtensionsAsEvents | Op::SexSaid => 1,
+        Op::EscapedNotes | Op::PlainNotes => 2,
+        _ => 0,
+    }
+}
+
+/// The header, the submitters and the submissions of `data`, then the
+/// trailer, as [`drafts`] gives them.
+fn front_drafts(data: &Dataset) -> Vec<Draft<'_>> {
+    let n = 1 + data.submitters().len() + data.submissions().len();
+    let mut out = drafts_of(data, data.records().take(n));
+    out.push(Draft::new("TRLR"));
+    out
+}
+
+/// Whether every pointer of `s` names one of `named` (or none).
+fn points_within(s: &Draft<'_>, named: &[Option<String>]) -> bool {
+    let within = match &s.payload {
+        Value::Pointer(p) => named.iter().flatten().any(|n| n == &**p),
+        _ => true,
+    };
+    within && s.substructures.iter().all(|c| points_within(c, named))
 }
 
 /// The importer's limits on the records ([`Exporter::limits`]), as the
 /// records go by.
-struct Limits<'a> {
+pub(super) struct Limits<'a> {
     target: &'a Target,
     individuals: usize,
     deep: Vec<Limit>,
@@ -850,15 +1159,56 @@ struct Limits<'a> {
     children: Vec<Limit>,
 }
 
-impl Limits<'_> {
+impl<'a> Limits<'a> {
+    /// The longest name the importer takes, when it says.
+    pub(super) fn max_name(&self) -> Option<usize> {
+        self.target.max_name
+    }
+
+    pub(super) fn new(target: &'a Target) -> Self {
+        Self {
+            target,
+            individuals: 0,
+            deep: Vec::new(),
+            names: Vec::new(),
+            children: Vec::new(),
+        }
+    }
+
     fn record(&mut self, r: &Draft<'_>) {
+        let (indi, fam) = (is(r, "INDI"), is(r, "FAM"));
+        let names = r
+            .substructures
+            .iter()
+            .filter(|n| indi && is(n, "NAME"))
+            .map(|n| payload_str(n).chars().count());
+        let children = r.substructures.iter().filter(|c| is(c, "CHIL")).count();
+        self.add(
+            r.xref.as_deref(),
+            indi,
+            depth(r),
+            names,
+            fam.then_some(children),
+        );
+    }
+
+    /// The limits on record `xref` (a person when `indi`), whose
+    /// structures go `depth` levels deep, whose names (a person's) are
+    /// `names` characters long, and which has `children` (a family).
+    pub(super) fn add(
+        &mut self,
+        xref: Option<&str>,
+        indi: bool,
+        depth: usize,
+        names: impl IntoIterator<Item = usize>,
+        children: Option<usize>,
+    ) {
         let t = self.target;
-        let record = || r.xref.as_deref().map(Xref::new);
-        if is(r, "INDI") {
+        let record = || xref.map(Xref::new);
+        if indi {
             self.individuals += 1;
         }
         if let Some(max) = t.max_depth {
-            let depth = depth(r);
             if depth > max {
                 self.deep.push(Limit {
                     rows: t.rows,
@@ -867,9 +1217,8 @@ impl Limits<'_> {
                 });
             }
         }
-        if let (Some(max), true) = (t.max_name, is(r, "INDI")) {
-            for n in r.substructures.iter().filter(|n| is(n, "NAME")) {
-                let len = payload_str(n).chars().count();
+        if let (Some(max), true) = (t.max_name, indi) {
+            for len in names {
                 if len > max {
                     self.names.push(Limit {
                         rows: t.rows,
@@ -879,8 +1228,7 @@ impl Limits<'_> {
                 }
             }
         }
-        if let (Some(max), true) = (t.max_children, is(r, "FAM")) {
-            let n = r.substructures.iter().filter(|c| is(c, "CHIL")).count();
+        if let (Some(max), Some(n)) = (t.max_children, children) {
             if n > max {
                 self.children.push(Limit {
                     rows: t.rows,
@@ -893,7 +1241,7 @@ impl Limits<'_> {
 
     /// The limits, in the order of the importer's: the individuals, then
     /// the depth, the names and the children of each record.
-    fn done(self, report: &mut ExportReport) {
+    pub(super) fn done(self, report: &mut ExportReport) {
         let t = self.target;
         if let Some(max) = t.max_individuals {
             let n = self.individuals;
@@ -914,10 +1262,20 @@ impl Limits<'_> {
 /// The records of `data` and the trailer, as [`Dataset::to_structures`]
 /// gives them, their texts borrowed from the dataset.
 fn drafts(data: &Dataset) -> Vec<Draft<'_>> {
+    let mut out = drafts_of(data, data.records());
+    out.push(Draft::new("TRLR"));
+    out
+}
+
+/// The `records` of `data`, as [`drafts`] gives them.
+fn drafts_of<'d>(
+    data: &'d Dataset,
+    records: impl Iterator<Item = RecordRef<'d>>,
+) -> Vec<Draft<'d>> {
     let cx = WriteCx::of(data, data.version(), false);
     let mut flat = Flat::default();
     let mut out = Vec::with_capacity(data.record_count() + 1);
-    for r in data.records() {
+    for r in records {
         let draft = if matches!(r, RecordRef::Header(_)) {
             // The header writes itself owned.
             Some(Draft::from_owned(r.to_structure(&cx)))
@@ -927,8 +1285,13 @@ fn drafts(data: &Dataset) -> Vec<Draft<'_>> {
         };
         out.extend(draft);
     }
-    out.push(Draft::new("TRLR"));
     out
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The exports of this thread written directly ([`Exporter::direct`]).
+    static DIRECT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Counts the bytes written.
@@ -966,6 +1329,19 @@ struct Cx<'a> {
     next_xref: u32,
     /// The places' format to name in the header ([`place_form`]).
     place_style: Option<PlaceStyle>,
+    /// The step running, by its place in the order the steps run (0
+    /// before them), and the next step's.
+    seq: u16,
+    next_seq: u16,
+    /// With each fold and limit reported, the step that reported it
+    /// ([`Cx::seq`]): kept for a direct export ([`Exporter::direct`]).
+    tags: Option<(Vec<u16>, Vec<u16>)>,
+    /// Whether each step runs on every record before the next
+    /// ([`run_steps`]).
+    alone: bool,
+    /// The places the place fold folded, and its step, kept to report with
+    /// a direct export's, which then reports them.
+    places: Option<(u16, PlacesSeen)>,
 }
 
 impl Cx<'_> {
@@ -984,6 +1360,9 @@ impl Cx<'_> {
             record: record.map(Xref::new),
             detail: detail.into(),
         });
+        if let Some((folds, _)) = &mut self.tags {
+            folds.push(self.seq);
+        }
     }
 
     fn limit(
@@ -997,11 +1376,14 @@ impl Cx<'_> {
             record: record.map(Xref::new),
             detail: detail.into(),
         });
+        if let Some((_, limits)) = &mut self.tags {
+            limits.push(self.seq);
+        }
     }
 }
 
 /// The 5.5.1 and 7.x events that say `Y` when nothing more is known.
-const Y_EVENTS: &[&str] = &[
+pub(super) const Y_EVENTS: &[&str] = &[
     "ADOP", "ANUL", "BAPM", "BARM", "BASM", "BIRT", "BLES", "BURI", "CENS", "CHR", "CHRA", "CONF",
     "CREM", "DEAT", "DIV", "DIVF", "EMIG", "ENGA", "FCOM", "GRAD", "IMMI", "MARB", "MARC", "MARL",
     "MARR", "MARS", "NATU", "ORDN", "PROB", "RETI", "WILL",
@@ -1039,7 +1421,7 @@ fn in_set(set: &[bool; STANDARD_TAGS.len()], tag: &str) -> bool {
 }
 
 /// Whether `tag` is one of [`Y_EVENTS`].
-fn is_y_event(tag: &str) -> bool {
+pub(super) fn is_y_event(tag: &str) -> bool {
     const SET: [bool; STANDARD_TAGS.len()] = standard_set(&[Y_EVENTS]);
     in_set(&SET, tag)
 }
@@ -1051,7 +1433,7 @@ fn is_event(tag: &str) -> bool {
 }
 
 /// The tags of family events that say a union.
-const UNION_EVENTS: &[&str] = &[
+pub(super) const UNION_EVENTS: &[&str] = &[
     "MARR", "ENGA", "MARB", "MARC", "MARL", "MARS", "DIV", "DIVF", "ANUL",
 ];
 
@@ -1367,9 +1749,12 @@ fn run_steps(
             t.fill(true);
         }
     }
+    let base = cx.next_seq;
+    cx.next_seq += u16::try_from(steps.len()).unwrap_or(u16::MAX);
     let mut at = 0;
     while let Some(rest) = steps.get(at..).filter(|r| !r.is_empty()) {
-        let n = together(rest);
+        let n = if cx.alone { 1 } else { together(rest) };
+        cx.seq = base + u16::try_from(at).unwrap_or(u16::MAX);
         match rest.get(..n) {
             Some([one]) if !(told && touched.is_some()) => {
                 let mut shared = Shared::default();
@@ -1457,7 +1842,13 @@ fn order_by_step<T>(list: &mut Vec<T>, from: usize, step_of: &[usize]) {
 /// Reports what `step` did once it ran on every record.
 fn finish(step: &Step, cx: &mut Cx<'_>, shared: &mut Shared<'_>) {
     if let Op::Places(style) = step.fold {
-        places_done(step.rows, style, &std::mem::take(&mut shared.places), cx);
+        let seen = std::mem::take(&mut shared.places);
+        if let Some(kept) = &mut cx.places {
+            // Reported with the direct export's.
+            *kept = (cx.seq, seen);
+            return;
+        }
+        places_done(step.rows, style, &seen, cx);
     }
 }
 
@@ -3337,7 +3728,7 @@ fn each_date<'s>(s: &'s Draft<'s>, f: &mut dyn FnMut(&'s str)) {
 }
 
 /// Whether a date names a day its month does not have.
-fn impossible_date(d: &str) -> bool {
+pub(super) fn impossible_date(d: &str) -> bool {
     const MONTHS: [(&str, u32); 12] = [
         ("JAN", 31),
         ("FEB", 29),
@@ -4431,7 +4822,7 @@ const SUB: &[&str] = &[
 ];
 
 /// What became of a place.
-enum Placed {
+pub(super) enum Placed {
     /// Its jurisdictions as the header's format names them.
     Mapped(String),
     /// Its jurisdictions by position (the format named none).
@@ -4442,51 +4833,67 @@ enum Placed {
 
 /// A place (`text`) in a target's `style`, its jurisdictions mapped by the
 /// header's format (`mapping`, when `known`) or by position.
-fn place_in(text: &str, mapping: &[Option<usize>], known: bool, style: PlaceStyle) -> Placed {
-    let parts: Vec<&str> = text.split(',').map(str::trim).collect();
-    let mut fields: [String; 6] = Default::default();
-    let mapped = known && parts.len() == mapping.len();
+pub(super) fn place_in(
+    text: &str,
+    mapping: &[Option<usize>],
+    known: bool,
+    style: PlaceStyle,
+) -> Placed {
+    let parts = || text.split(',').map(str::trim);
+    let mut fields: [&str; 6] = [""; 6];
+    let mapped = known && jurisdictions(text) == mapping.len();
     if mapped {
-        for (part, slot) in parts.iter().zip(mapping) {
+        for (part, slot) in parts().zip(mapping) {
             if let Some(field) = slot.and_then(|at| fields.get_mut(at)) {
-                *field = (*part).to_string();
+                *field = part;
             }
         }
     } else {
         // Smallest first: the first is the town, the last the country,
         // the ones between the county and the region.
-        match parts.as_slice() {
-            [] => return Placed::TooMany,
-            [one] => fields[0] = (*one).to_string(),
-            [first, middle @ .., last] => {
-                fields[0] = (*first).to_string();
-                fields[4] = (*last).to_string();
-                match middle {
-                    [] => {}
-                    [county] => fields[2] = (*county).to_string(),
-                    [county, region] => {
-                        fields[2] = (*county).to_string();
-                        fields[3] = (*region).to_string();
-                    }
-                    _ => return Placed::TooMany,
+        let mut each = parts();
+        let (Some(first), last) = (each.next(), each.next_back()) else {
+            return Placed::TooMany;
+        };
+        fields[0] = first;
+        if let Some(last) = last {
+            fields[4] = last;
+            match (each.next(), each.next(), each.next()) {
+                (None, ..) => {}
+                (Some(county), None, _) => fields[2] = county,
+                (Some(county), Some(region), None) => {
+                    fields[2] = county;
+                    fields[3] = region;
                 }
+                _ => return Placed::TooMany,
             }
         }
     }
-    let [town, code, county, region, land, subdivision] = &fields;
-    let new = match style {
+    let [town, code, county, region, land, subdivision] = fields;
+    let mut new = String::with_capacity(text.len() + 16);
+    let main = [town, code, county, region, land];
+    match style {
         PlaceStyle::Geneanet => {
-            let main = format!("{town}, {code}, {county}, {region}, {land}");
-            if subdivision.is_empty() {
-                main
-            } else {
-                format!("[{subdivision}] - {main}")
+            if !subdivision.is_empty() {
+                new.push('[');
+                new.push_str(subdivision);
+                new.push_str("] - ");
+            }
+            for (k, f) in main.iter().enumerate() {
+                if k > 0 {
+                    new.push_str(", ");
+                }
+                new.push_str(f);
             }
         }
         PlaceStyle::Heredis => {
-            format!("{town}, {code}, {county}, {region}, {land}, {subdivision}")
+            for f in main {
+                new.push_str(f);
+                new.push_str(", ");
+            }
+            new.push_str(subdivision);
         }
-    };
+    }
     if mapped {
         Placed::Mapped(new)
     } else {
@@ -4532,13 +4939,13 @@ fn place_form(records: &mut [Draft<'_>], style: PlaceStyle) {
 /// Places in a target's format.
 /// What [`places`] found so far, to report once it is done.
 #[derive(Default)]
-struct PlacesSeen {
+pub(super) struct PlacesSeen {
     /// The jurisdictions the header names, as slots of the target's, and
     /// whether each is known; read once.
     form: Option<(Vec<Option<usize>>, bool)>,
-    changed: usize,
-    guessed: usize,
-    skipped: usize,
+    pub(super) changed: usize,
+    pub(super) guessed: usize,
+    pub(super) skipped: usize,
 }
 
 fn places<'s>(
@@ -4549,28 +4956,7 @@ fn places<'s>(
     shared: &mut Shared<'s>,
 ) {
     let seen = &mut shared.places;
-    let (mapping, known) = seen.form.get_or_insert_with(|| {
-        // The jurisdictions the header names, in order.
-        let form: Vec<String> = records
-            .iter()
-            .find(|r| is(r, "HEAD"))
-            .and_then(|h| child(h, "PLAC"))
-            .and_then(|p| child_text(p, "FORM"))
-            .map(|f| {
-                f.split(',')
-                    .map(|j| j.trim().to_ascii_lowercase())
-                    .collect()
-            })
-            .unwrap_or_default();
-        let slot = |name: &str| -> Option<usize> {
-            [TOWN, CODE, COUNTY, REGION, COUNTRY, SUB]
-                .iter()
-                .position(|names| names.contains(&name))
-        };
-        let mapping: Vec<Option<usize>> = form.iter().map(|j| slot(j)).collect();
-        let known = !form.is_empty() && mapping.iter().all(Option::is_some);
-        (mapping, known)
-    });
+    let (mapping, known) = seen.form.get_or_insert_with(|| place_mapping(records));
     let known = *known;
     for r in records
         .get_mut(range)
@@ -4614,6 +5000,31 @@ fn places<'s>(
     cx.place_style = Some(style);
 }
 
+/// The jurisdictions the header of `records` names, as slots of a
+/// target's format, and whether each is known.
+pub(super) fn place_mapping(records: &[Draft<'_>]) -> (Vec<Option<usize>>, bool) {
+    // The jurisdictions the header names, in order.
+    let form: Vec<String> = records
+        .iter()
+        .find(|r| is(r, "HEAD"))
+        .and_then(|h| child(h, "PLAC"))
+        .and_then(|p| child_text(p, "FORM"))
+        .map(|f| {
+            f.split(',')
+                .map(|j| j.trim().to_ascii_lowercase())
+                .collect()
+        })
+        .unwrap_or_default();
+    let slot = |name: &str| -> Option<usize> {
+        [TOWN, CODE, COUNTY, REGION, COUNTRY, SUB]
+            .iter()
+            .position(|names| names.contains(&name))
+    };
+    let mapping: Vec<Option<usize>> = form.iter().map(|j| slot(j)).collect();
+    let known = !form.is_empty() && mapping.iter().all(Option::is_some);
+    (mapping, known)
+}
+
 /// Reports what [`places`] did, once it ran on every record.
 fn places_done(
     rows: &'static [&'static str],
@@ -4621,6 +5032,22 @@ fn places_done(
     seen: &PlacesSeen,
     cx: &mut Cx<'_>,
 ) {
+    let (limit, fold) = places_report(rows, style, seen);
+    if let Some(l) = limit {
+        cx.limit(l.rows, None, l.detail);
+    }
+    if let Some(f) = fold {
+        cx.fold(f.rows, f.kind, f.lossy, None, f.detail);
+    }
+}
+
+/// What [`places_done`] reports of `seen`: the places left, the places
+/// changed.
+fn places_report(
+    rows: &'static [&'static str],
+    style: PlaceStyle,
+    seen: &PlacesSeen,
+) -> (Option<Limit>, Option<Fold>) {
     let form_text = style.form();
     let PlacesSeen {
         changed: n,
@@ -4628,29 +5055,28 @@ fn places_done(
         skipped,
         ..
     } = *seen;
-    if skipped > 0 {
-        cx.limit(
-            rows,
-            None,
-            format!("{skipped} places with more jurisdictions than {form_text}, left as they are"),
-        );
-    }
-    if n > 0 {
-        cx.fold(
-            rows,
-            FoldKind::Recoded,
-            guessed > 0,
-            None,
-            format!(
-                "{n} places in the format {form_text}{}",
-                if guessed > 0 {
-                    " (jurisdictions guessed by position)"
-                } else {
-                    ""
-                }
-            ),
-        );
-    }
+    let limit = (skipped > 0).then(|| Limit {
+        rows,
+        record: None,
+        detail: format!(
+            "{skipped} places with more jurisdictions than {form_text}, left as they are"
+        ),
+    });
+    let fold = (n > 0).then(|| Fold {
+        rows,
+        kind: FoldKind::Recoded,
+        lossy: guessed > 0,
+        record: None,
+        detail: format!(
+            "{n} places in the format {form_text}{}",
+            if guessed > 0 {
+                " (jurisdictions guessed by position)"
+            } else {
+                ""
+            }
+        ),
+    });
+    (limit, fold)
 }
 
 /// The system `HEAD.SOUR` names ([`HeadSource`]): the crate's, unless
@@ -5041,6 +5467,65 @@ fn conform_drafts(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    /// A fictitious tree whose records need, of the Geneanet folds, only
+    /// those made as it is written: places, citations of source records.
+    const PLAIN: &str = "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n2 FORM LINEAGE-LINKED\n1 CHAR UTF-8\n\
+        0 @I1@ INDI\n1 NAME Ann /Example/\n1 SEX F\n1 BIRT\n2 DATE 1 JAN 1800\n\
+        2 PLAC Sampletown, Region\n2 SOUR @S1@\n3 PAGE p. 1\n1 FAMS @F1@\n\
+        1 NOTE word word\n2 CONT a second line with an @@ sign\n1 CHAN\n2 DATE 1 JAN 2000\n\
+        0 @I2@ INDI\n1 NAME Bob /Example/\n1 SEX M\n1 FAMS @F1@\n1 SOUR @S1@\n\
+        0 @F1@ FAM\n1 HUSB @I2@\n1 WIFE @I1@\n1 MARR\n2 DATE 1820\n\
+        2 PLAC Othertown, County, Region, Land\n2 SOUR @S1@\n3 PAGE p. 2\n\
+        0 @S1@ SOUR\n1 TITL Parish register\n1 AUTH Sample archive\n1 REPO @R1@\n2 CALN 7\n\
+        0 @R1@ REPO\n1 NAME Sample archive\n0 TRLR\n";
+
+    /// Every profile's export of `text`, the direct one when it is made,
+    /// is the export folded whole; how many were direct.
+    fn direct_as_whole(text: &str) -> usize {
+        let data = Dataset::parse(text);
+        let before = DIRECT.with(Cell::get);
+        for p in super::super::export_profiles() {
+            let e = Exporter::new(p);
+            let direct = e.write_to_string(&data).unwrap();
+            let whole = e.whole_to_string(&data).unwrap();
+            assert_eq!(direct, whole, "{}", p.id());
+        }
+        DIRECT.with(Cell::get) - before
+    }
+
+    #[test]
+    fn direct_exports_are_the_whole_ones() {
+        // Geneanet writes it directly.
+        assert!(direct_as_whole(PLAIN) > 0);
+        // A record another fold changes: folded whole.
+        let markup = PLAIN.replace("1 NOTE word word", "1 NOTE a <b>bold</b> word");
+        let before = DIRECT.with(Cell::get);
+        let data = Dataset::parse(markup.as_str());
+        let e = Exporter::named("geneanet").unwrap();
+        assert_eq!(
+            e.write_to_string(&data).unwrap(),
+            e.whole_to_string(&data).unwrap()
+        );
+        assert_eq!(DIRECT.with(Cell::get), before);
+        direct_as_whole(&markup);
+        // A citation with more than a page, a place with a form, a header
+        // without a submitter, bare events, an extension.
+        for change in [
+            ("3 PAGE p. 1", "3 PAGE p. 1\n3 QUAY 2"),
+            (
+                "2 PLAC Sampletown, Region",
+                "2 PLAC Sampletown, Region\n3 FORM Town, Region",
+            ),
+            ("1 SEX M", "1 SEX M\n1 DEAT"),
+            ("1 SEX M", "1 SEX M\n1 _MILT"),
+            ("1 SEX F", "1 SEX F\n1 BURI"),
+            ("2 DATE 1 JAN 1800", "2 DATE 31 FEB 1800"),
+        ] {
+            direct_as_whole(&PLAIN.replace(change.0, change.1));
+        }
+    }
 
     #[test]
     fn the_event_tags_are_standard() {

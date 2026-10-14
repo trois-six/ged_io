@@ -25,8 +25,10 @@
 //! Each such rewrite is reported as a [`Repair`].
 
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::fmt::{self, Write as _};
 use std::io;
+use std::rc::Rc;
 
 use super::{OutputEncoding, Repair, RepairKind, RepairPolicy, Unencodable, WriteError};
 use crate::tree::PayloadRef;
@@ -62,6 +64,58 @@ pub(crate) struct LineSink<'w> {
     /// Where the lines of this sink start in `text`, when it writes after
     /// the text of another ([`LineSink::lend`]).
     base: usize,
+    /// What looks at each structure written, when something does
+    /// ([`Looker`]); the sinks of a record's lines share it.
+    pub(crate) looker: Option<Rc<RefCell<dyn Looker>>>,
+}
+
+/// Tells `looker` of a structure written ([`Looker::structure`]): out of
+/// the emitter's way, which most writes take without one.
+#[cold]
+#[inline(never)]
+fn look(
+    looker: &RefCell<dyn Looker>,
+    level: usize,
+    xref: Option<&str>,
+    tag: &str,
+    standard: Option<u16>,
+    payload: PayloadRef<'_>,
+) {
+    looker
+        .borrow_mut()
+        .structure(level, xref, tag, standard, payload);
+}
+
+/// [`Looker::rollback`], out of the way.
+#[cold]
+#[inline(never)]
+fn taken_back(looker: &RefCell<dyn Looker>) {
+    looker.borrow_mut().rollback();
+}
+
+/// What looks at the structures a dataset's write writes, record after
+/// record ([`crate::profile::Exporter`]): told of each structure as it
+/// is written, before its payload is escaped and continued, of the lines
+/// of a record taken back, and of each record's start and end.
+pub(crate) trait Looker {
+    /// A structure written: its level, identifier, tag (and the tag's
+    /// index among the standard tags, when it is one) and payload.
+    fn structure(
+        &mut self,
+        level: usize,
+        xref: Option<&str>,
+        tag: &str,
+        standard: Option<u16>,
+        payload: PayloadRef<'_>,
+    );
+    /// The lines of the record being written are taken back, all of
+    /// them: it is written again.
+    fn rollback(&mut self);
+    /// Record `index` of the dataset's records (the header 0) starts.
+    fn begin(&mut self, index: usize);
+    /// Record `index` is written, repaired by the conformance pass when
+    /// `repaired`: whether the write goes on.
+    fn end(&mut self, index: usize, repaired: bool) -> bool;
 }
 
 impl<'w> LineSink<'w> {
@@ -96,6 +150,7 @@ impl<'w> LineSink<'w> {
             repairs: Vec::new(),
             source_line: 0,
             base: 0,
+            looker: None,
         }
     }
 
@@ -103,13 +158,15 @@ impl<'w> LineSink<'w> {
     /// in UTF-8 and in memory, where a line that needs a repair fails
     /// ([`RepairPolicy::Error`]).
     pub(crate) fn record_lines(&self) -> LineSink<'static> {
-        LineSink::new(
+        let mut lines = LineSink::new(
             None,
             self.eol,
             self.max_line,
             OutputEncoding::Utf8,
             RepairPolicy::Error,
-        )
+        );
+        lines.looker.clone_from(&self.looker);
+        lines
     }
 
     /// Hands the bytes written so far, encoded, to `writer`, and forgets
@@ -164,6 +221,9 @@ impl<'w> LineSink<'w> {
             self.line_no += lines.line_no - 1;
         } else {
             lines.text.truncate(lines.base);
+            if let Some(looker) = &self.looker {
+                taken_back(looker);
+            }
         }
         std::mem::swap(&mut self.text, &mut lines.text);
         self.line_start = self.text.len();
@@ -438,6 +498,25 @@ pub(crate) fn emit_known(
     payload: PayloadRef<'_>,
     special: Option<u8>,
 ) -> Result<(), WriteError> {
+    if let Some(looker) = &sink.looker {
+        let index = crate::tree::standard_index(tag);
+        look(looker, level, xref, tag, index, payload);
+    }
+    emit_seen(rules, sink, level, xref, tag, standard, payload, special)
+}
+
+/// [`emit_known`] of a structure the [`Looker`] was told of.
+#[allow(clippy::too_many_arguments)] // As `emit_known`.
+fn emit_seen(
+    rules: &VersionRules,
+    sink: &mut LineSink<'_>,
+    level: usize,
+    xref: Option<&str>,
+    tag: &str,
+    standard: bool,
+    payload: PayloadRef<'_>,
+    special: Option<u8>,
+) -> Result<(), WriteError> {
     let level = if level > rules.max_level {
         level_repair(rules, sink, level)?
     } else {
@@ -509,15 +588,20 @@ pub(crate) fn emit_known(
 /// in 7.x or, in 5.5.1, a substructure or another file, or throws the line
 /// away.
 #[inline]
+#[allow(clippy::too_many_arguments)] // A line, and its tag's index.
 pub(crate) fn emit_typed(
     rules: &VersionRules,
     sink: &mut LineSink<'_>,
     level: usize,
     xref: Option<&str>,
     tag: &str,
+    standard: Option<u16>,
     payload: PayloadRef<'_>,
     special: u8,
 ) -> Result<(), WriteError> {
+    if let Some(looker) = &sink.looker {
+        look(looker, level, xref, tag, standard, payload);
+    }
     if level > rules.max_level || matches!(tag, "CONT" | "CONC") || (xref.is_some() && level > 0) {
         return emit_unusual(rules, sink, level, xref, tag, payload, special);
     }
@@ -594,7 +678,7 @@ fn emit_unusual(
     payload: PayloadRef<'_>,
     special: u8,
 ) -> Result<(), WriteError> {
-    emit_known(rules, sink, level, xref, tag, true, payload, Some(special))
+    emit_seen(rules, sink, level, xref, tag, true, payload, Some(special))
 }
 
 /// Reports a repair of the line being written: `output line n: what`.

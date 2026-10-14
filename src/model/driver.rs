@@ -789,6 +789,10 @@ pub(crate) struct WriteCx<'s> {
     /// conversion makes of them, where their structure's type has a field
     /// for them ([`crate::convert::Adoptions`]).
     pub(crate) adopt: Option<&'s crate::convert::Adoptions>,
+    /// What an export writes instead of some structures ([`RowRewrite`]),
+    /// and the tags of those structures ([`RowRewrite::tags`]).
+    pub(crate) rewrite: Option<&'s dyn RowRewrite>,
+    pub(crate) rewrite_tags: [Option<u16>; 2],
 }
 
 impl<'a> WriteCx<'a> {
@@ -851,6 +855,8 @@ impl<'a> WriteCx<'a> {
             version,
             convert,
             adopt: None,
+            rewrite: None,
+            rewrite_tags: [None; 2],
         }
     }
 
@@ -862,6 +868,8 @@ impl<'a> WriteCx<'a> {
             version,
             convert,
             adopt: None,
+            rewrite: None,
+            rewrite_tags: [None; 2],
         }
     }
 
@@ -1546,6 +1554,12 @@ macro_rules! leaf_item {
                 <$ty as $crate::model::driver::PayloadField>::raw_text(e)
             }
 
+            fn one_text(o: Self::One) -> Option<$crate::model::text::Span> {
+                <$ty as $crate::model::driver::PayloadField>::raw_text(
+                    &<$ty as $crate::model::driver::LeafOne>::raw(o),
+                )
+            }
+
             fn elems(t: &$crate::model::table::Tables) -> &[Self::Elem] {
                 <Self::Elem as $crate::model::driver::RawTable>::table(t)
             }
@@ -2036,6 +2050,28 @@ pub(crate) trait RowWrite {
     /// ([`RowSlot::texts`](super::table::RowSlot::texts)): how many it
     /// holds, `f` called with each.
     fn field_texts(&self, field: usize, t: &Tables, f: &mut dyn FnMut(Span)) -> Option<usize>;
+    /// Calls `f` with the index of each field (in
+    /// [`RowWrite::field_descs`]) that holds something.
+    fn holds(&self, t: &Tables, f: &mut dyn FnMut(usize));
+    /// The type of the structure.
+    fn struct_type(&self) -> std::any::TypeId;
+}
+
+/// What an export writes of a structure of a dataset instead of the
+/// structure ([`crate::profile::Exporter`]): the folds that rewrite a
+/// structure where it stands, made as it is written.
+pub(crate) trait RowRewrite {
+    /// The standard tags of the structures it may rewrite (by index): the
+    /// others are written without a look.
+    fn tags(&self) -> [Option<u16>; 2];
+    /// A record tagged `tag` is written (again: a record may be written
+    /// more than once, its structures rewritten each time).
+    fn record(&self, tag: &str);
+    /// The text structure `s` (with untyped substructures when `extra`)
+    /// is written with instead of its own payload, without its
+    /// substructures, and its [`special_bytes`](crate::writer::special_bytes)
+    /// ([`crate::tree::UNKNOWN`] when not known); `None`: as it is.
+    fn rewrite(&self, s: &dyn RowWrite, extra: bool, cx: &WriteCx<'_>) -> Option<(String, u8)>;
 }
 
 /// Writes a row of a dataset's tables into a flat arena, its texts
@@ -2050,6 +2086,9 @@ pub(crate) fn write_row_flat<'s, R: RowWrite + ?Sized>(
     out: &mut Flat<'s>,
     claim: Option<Kind>,
 ) {
+    if cx.rewrite.is_some() && rewritten(s.as_dyn(), extra, tag, cx, out, claim) {
+        return;
+    }
     // Most structures have no untyped substructure.
     if !extra.is_empty() {
         write_row_extra(s.as_dyn(), extra, tag, cx, out, claim);
@@ -2061,6 +2100,37 @@ pub(crate) fn write_row_flat<'s, R: RowWrite + ?Sized>(
     let at = out.open_typed(tag.name, tag.index, xref, payload, claim);
     s.write_fields(cx, out);
     out.close(at);
+}
+
+/// Writes the structure `s` (with the untyped substructures `extra`), tagged
+/// `tag`, as [`WriteCx::rewrite`] rewrites it, when it does: whether it
+/// did.
+#[inline(never)]
+fn rewritten<'s>(
+    s: &dyn RowWrite,
+    extra: List<Node>,
+    tag: StdTag,
+    cx: &WriteCx<'s>,
+    out: &mut Flat<'s>,
+    claim: Option<Kind>,
+) -> bool {
+    let (Some(r), Some(i)) = (cx.rewrite, tag.index) else {
+        return false;
+    };
+    if !cx.rewrite_tags.contains(&Some(i)) {
+        return false;
+    }
+    let Some((text, special)) = r.rewrite(s, !extra.is_empty(), cx) else {
+        return false;
+    };
+    let payload = if text.is_empty() {
+        FlatPayload::None
+    } else {
+        FlatPayload::Text(Cow::Owned(text), special)
+    };
+    let at = out.open_typed(tag.name, tag.index, None, payload, claim);
+    out.close(at);
+    true
 }
 
 /// An untyped substructure written as the standard structure it stands for
@@ -3209,6 +3279,40 @@ macro_rules! gedcom_struct {
                     )*
                 )?
                 None
+            }
+
+            fn struct_type(&self) -> std::any::TypeId {
+                std::any::TypeId::of::<$name>()
+            }
+
+            #[allow(unused_variables, unused_assignments, unused_mut)]
+            fn holds(
+                &self,
+                t: &$crate::model::table::Tables,
+                f: &mut dyn FnMut(usize),
+            ) {
+                let mut i = 0_usize;
+                $(
+                    if self.$field != Default::default() {
+                        f(i);
+                    }
+                    i += 1;
+                )*
+                $(
+                    if let Some(d) = self.detail.and_then(|d| {
+                        <$dname as $crate::model::table::Item>::elems(t)
+                            .get(d.get() as usize)
+                            .copied()
+                    }) {
+                        let d: $drow = d;
+                        $(
+                            if d.$gfield != Default::default() {
+                                f(i);
+                            }
+                            i += 1;
+                        )*
+                    }
+                )?
             }
         }
 

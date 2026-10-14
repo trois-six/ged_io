@@ -10,7 +10,7 @@ use crate::version::{GedcomVersion, VersionRules};
 use crate::writer::GedcomWriter;
 
 use super::dataset::{Dataset, RecordRef};
-use super::driver::WriteCx;
+use super::driver::{RowRewrite, WriteCx};
 use crate::convert::Adoptions;
 
 /// A record of a dataset that writes its structures for the target version
@@ -23,15 +23,26 @@ pub(crate) struct Built<'d> {
     /// The extension structures written as standard ones
     /// ([`WriteCx::adopt`]).
     adopt: Option<&'d Adoptions>,
+    /// What an export writes instead of some structures
+    /// ([`WriteCx::rewrite`]).
+    rewrite: Option<&'d dyn RowRewrite>,
 }
 
 impl<'d> Built<'d> {
+    /// The header as an owned structure, as the writer writes it
+    /// ([`Build::owned`]).
+    pub(crate) fn owned_record(&self) -> Option<Structure> {
+        let header = self.record.filter(|r| matches!(r, RecordRef::Header(_)))?;
+        Some(header.to_structure(&self.cx(header)))
+    }
+
     /// A record to write in `version`.
     pub(crate) fn new(record: RecordRef<'d>, version: GedcomVersion) -> Self {
         Self {
             record: Some(record),
             version,
             adopt: None,
+            rewrite: None,
         }
     }
 
@@ -39,6 +50,10 @@ impl<'d> Built<'d> {
     fn cx(&self, record: RecordRef<'d>) -> WriteCx<'d> {
         let mut cx = WriteCx::of(record.dataset(), self.version, true);
         cx.adopt = self.adopt;
+        if let Some(r) = self.rewrite {
+            cx.rewrite = Some(r);
+            cx.rewrite_tags = r.tags();
+        }
         cx
     }
 }
@@ -70,6 +85,9 @@ impl<'d> Build<'d> for Built<'d> {
 
     fn build(&self, out: &mut Flat<'d>) {
         if let Some(r) = self.record {
+            if let Some(rewrite) = self.rewrite {
+                rewrite.record(r.tag(self.version));
+            }
             r.to_flat(&self.cx(r), out);
         } else {
             let at = out.open(Cow::Borrowed("TRLR"), None, FlatPayload::None);
@@ -107,8 +125,7 @@ impl<'d> Build<'d> for Built<'d> {
     }
 
     fn owned(&self) -> Option<Structure> {
-        let header = self.record.filter(|r| matches!(r, RecordRef::Header(_)))?;
-        Some(header.to_structure(&self.cx(header)))
+        self.owned_record()
     }
 }
 
@@ -128,6 +145,17 @@ impl Dataset {
         writer: &GedcomWriter,
         adopt: Option<&'d Adoptions>,
     ) -> Vec<Built<'d>> {
+        self.built_with(writer, adopt, None)
+    }
+
+    /// [`Dataset::built_adopting`], the structures `rewrite` rewrites
+    /// written as it says ([`WriteCx::rewrite`]).
+    pub(crate) fn built_with<'d>(
+        &'d self,
+        writer: &GedcomWriter,
+        adopt: Option<&'d Adoptions>,
+        rewrite: Option<&'d dyn RowRewrite>,
+    ) -> Vec<Built<'d>> {
         let version = writer.config().version.unwrap_or(self.version);
         // The records in the order of [`Dataset::records`], one table after
         // the other.
@@ -137,6 +165,7 @@ impl Dataset {
                 record: Some(record),
                 version,
                 adopt,
+                rewrite,
             });
         };
         if let Some(h) = self.header_ref() {
@@ -174,6 +203,7 @@ impl Dataset {
             record: None,
             version,
             adopt: None,
+            rewrite: None,
         });
         built
     }

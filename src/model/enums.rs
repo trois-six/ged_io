@@ -1394,7 +1394,7 @@ struct PhrasedWrite<'s, E> {
     value: std::marker::PhantomData<fn() -> E>,
 }
 
-impl<E: Enumeration> super::driver::RowWrite for PhrasedWrite<'_, E> {
+impl<E: Enumeration + 'static> super::driver::RowWrite for PhrasedWrite<'_, E> {
     fn as_dyn(&self) -> &dyn super::driver::RowWrite {
         self
     }
@@ -1455,6 +1455,16 @@ impl<E: Enumeration> super::driver::RowWrite for PhrasedWrite<'_, E> {
         _f: &mut dyn FnMut(super::text::Span),
     ) -> Option<usize> {
         None
+    }
+
+    fn struct_type(&self) -> std::any::TypeId {
+        std::any::TypeId::of::<Phrased<E>>()
+    }
+
+    fn holds(&self, _t: &Tables, f: &mut dyn FnMut(usize)) {
+        if self.row.phrase.is_some() {
+            f(0);
+        }
     }
 }
 
