@@ -191,6 +191,16 @@ keeps all data; writing is conformant to GEDCOM 5.5.1, 7.0 or 7.1.
   `families()`, …, `extra()`, `header()`, `all::<T>()`) and changed
   through its editing methods, which keep its references whole; its record
   lists are no longer public fields.
+- Producer profiles run on the typed dataset: reading interprets a record
+  where it was read, in the reader's arena, and only a record a rule may
+  change; an export writes the dataset as it is, rewriting places and
+  citations as it writes them and looking at every structure written for
+  what another fold would change, and folds the whole dataset as drafts
+  only then. Each profile pipeline runs within about 1.5 times the
+  instructions of its plain pipeline (an export 1.5 times the write, 7
+  before; a 7.0 write of a PAF file 1.4 times the plain one, 5.3 before),
+  and peaks within its memory budget (an export at 4 times its input,
+  12 before). `tools/perf check` holds them to it.
 - `ThinVec` gains `remove`, `retain` and `retain_mut`.
 - A dataset whose identifiers are valid and unique is written without a
   look at every record's identifier: its index vouches for them.
