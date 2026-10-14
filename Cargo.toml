@@ -53,9 +53,11 @@ harness = false
 name = "oxidged"
 path = "src/lib.rs"
 
-[[bin]]
-name = "ged-io"
-path = "src/bin/ged-io.rs"
-
 [package.metadata.docs.rs]
 all-features = true
+
+# The library and the command-line tool (`cli/`). The fuzz targets and the tools
+# are stand-alone packages with workspaces of their own.
+[workspace]
+members = [".", "cli"]
+exclude = ["fuzz", "tools"]

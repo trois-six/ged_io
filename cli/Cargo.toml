@@ -1,0 +1,26 @@
+[package]
+name = "oxidged-cli"
+version = "0.1.0"
+authors = [
+    "Robert Pirtle <astropirtle@gmail.com>",
+    "Jacob Benison <ge3224@gmail.com>",
+    "Pierre Erraud <trois.six+github@ik.me>",
+    "n4n5 <its.just.n4n5@gmail.com>",
+]
+description = "Inspect, validate, repair, convert and export GEDCOM 5.5.1, 7.0 and 7.1 files from the command line, with oxidged"
+keywords = ["genealogy", "gedcom", "cli", "validator", "converter"]
+categories = ["command-line-utilities", "parser-implementations"]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/trois-six/oxidged"
+homepage = "https://github.com/trois-six/oxidged"
+edition = "2021"
+rust-version = "1.88"
+include = ["Cargo.toml", "src/**/*.rs", "README.md", "license.md"]
+
+[[bin]]
+name = "oxidged"
+path = "src/main.rs"
+
+[dependencies]
+oxidged = { path = "..", version = "0.1.0" }

@@ -1,4 +1,4 @@
-//! The `ged-io` binary: the summary of a file, one individual, the name
+//! The `oxidged` binary: the summary of a file, one individual, the name
 //! filters, validation (lenient and strict), rewriting in another version,
 //! and usage errors (exit code 3). Every name and place is fictitious.
 
@@ -16,7 +16,7 @@ struct TempFile(PathBuf);
 impl TempFile {
     fn new(contents: impl AsRef<[u8]>) -> Self {
         let path = std::env::temp_dir().join(format!(
-            "ged_io_cli_test_{}_{}.ged",
+            "oxidged_cli_test_{}_{}.ged",
             std::process::id(),
             SEQ.fetch_add(1, Ordering::Relaxed)
         ));
@@ -36,10 +36,10 @@ impl Drop for TempFile {
 }
 
 fn run(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_ged-io"))
+    Command::new(env!("CARGO_BIN_EXE_oxidged"))
         .args(args)
         .output()
-        .expect("run the ged-io binary")
+        .expect("run the oxidged binary")
 }
 
 fn stdout(output: &Output) -> String {
@@ -333,7 +333,7 @@ fn help_and_io_errors() {
     assert!(output.status.success());
     assert!(stdout(&output).contains("--write <VERSION>"));
 
-    let missing = Path::new(&std::env::temp_dir()).join("ged_io_cli_test_no_such_file.ged");
+    let missing = Path::new(&std::env::temp_dir()).join("oxidged_cli_test_no_such_file.ged");
     let output = run(&[missing.to_str().unwrap()]);
     assert_eq!(output.status.code(), Some(1));
     assert!(stderr(&output).contains("I/O error"));

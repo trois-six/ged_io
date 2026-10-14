@@ -1,4 +1,4 @@
-//! `ged-io`: inspect, validate and rewrite GEDCOM files.
+//! `oxidged`: inspect, validate and rewrite GEDCOM files.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -13,19 +13,19 @@ use oxidged::{
 };
 
 const HELP: &str = "\
-ged-io - inspect, validate and rewrite GEDCOM files (5.5.1, 7.0, 7.1)
+oxidged - inspect, validate and rewrite GEDCOM files (5.5.1, 7.0, 7.1)
 
 USAGE:
-  ged-io <file.ged>
-  ged-io --individual <XREF> <file.ged>
-  ged-io --individual-lastname <LASTNAME> <file.ged>
-  ged-io --individual-firstname <FIRSTNAME> <file.ged>
-  ged-io --validate [--validation-level <LEVEL>] <file.ged>
-  ged-io --write <VERSION> [--keep-obsolete] [--convert-encoding <ENC>] <file.ged>
-  ged-io --sanitize [--convert-encoding <ENC>] <file.ged>
-  ged-io --profile <NAME> <file.ged>
-  ged-io --detect <file.ged>
-  ged-io --list-profiles
+  oxidged <file.ged>
+  oxidged --individual <XREF> <file.ged>
+  oxidged --individual-lastname <LASTNAME> <file.ged>
+  oxidged --individual-firstname <FIRSTNAME> <file.ged>
+  oxidged --validate [--validation-level <LEVEL>] <file.ged>
+  oxidged --write <VERSION> [--keep-obsolete] [--convert-encoding <ENC>] <file.ged>
+  oxidged --sanitize [--convert-encoding <ENC>] <file.ged>
+  oxidged --profile <NAME> <file.ged>
+  oxidged --detect <file.ged>
+  oxidged --list-profiles
 
 OPTIONS:
   -h, --help                         Print this help
