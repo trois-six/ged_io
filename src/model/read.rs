@@ -845,7 +845,7 @@ impl Pass<'_, '_> {
                 self.record_drafts(&arena, root, head, None, input, tags, cx, sink);
                 return;
             }
-            if !self.wants(&arena, tags) {
+            if !self.reads_any(&arena, tags) {
                 self.place(root, cx, sink, false);
                 return;
             }
