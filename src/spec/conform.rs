@@ -148,17 +148,17 @@ struct ModelRead {
 impl ModelRead {
     /// The rank of the field `c`, a substructure of a `ty` structure, goes
     /// to; `None` when it is kept aside.
-    fn read(&mut self, order: &FieldOrder, ty: StructId, c: &Structure) -> Option<u16> {
+    fn read<'a, N: Node<'a>>(&mut self, order: &FieldOrder, ty: StructId, c: N) -> Option<u16> {
         fn bit(set: &mut [u64], i: u16) -> Option<(&mut u64, u64)> {
             let word = set.get_mut(usize::from(i / 64))?;
             Some((word, 1 << (i % 64)))
         }
-        let standard = c.tag.standard_index()?;
+        let standard = c.standard_tag()?;
         let field = order.field(ty, standard);
         let fits = field.filter(|f| {
             let blocked = bit(&mut self.aside, standard).is_none_or(|(w, b)| *w & b != 0);
             let full = !f.many && bit(&mut self.full, f.rank).is_none_or(|(w, b)| *w & b != 0);
-            c.xref.is_none() && (!f.leaf || c.substructures.is_empty()) && !blocked && !full
+            c.xref().is_none() && (!f.leaf || c.children().next().is_none()) && !blocked && !full
         });
         if let Some(f) = fits {
             if let (false, Some((w, b))) = (f.many, bit(&mut self.full, f.rank)) {
@@ -1290,9 +1290,11 @@ impl<'n> Conformer<'n> {
                 flat.root().map(Node::to_owned_structure)
             );
         }
+        // One that is not typed is clean when the repair also leaves its
+        // order as it is.
         typed.unwrap_or_else(|| {
             flat.root()
-                .is_some_and(|n| self.is_clean_record(n, n.xref(), walk))
+                .is_some_and(|n| self.is_clean_record(n, n.xref(), walk) && self.in_model_order(n))
         })
     }
 
@@ -1726,7 +1728,7 @@ impl<'n> Conformer<'n> {
         }
         let mut read = ModelRead::default();
         for c in &mut s.substructures {
-            if read.read(order, ty, c).is_none() || c.substructures.is_empty() {
+            if read.read(order, ty, &*c).is_none() || c.substructures.is_empty() {
                 continue;
             }
             let is_ptr = matches!(c.payload, Payload::Pointer(_));
@@ -1734,6 +1736,46 @@ impl<'n> Conformer<'n> {
                 self.model_order_to(c, cty, levels - 1);
             }
         }
+    }
+
+    /// Whether record `n` is in the order [`Conformer::model_order`] puts
+    /// it in, its substructures too: always without a [`FieldOrder`].
+    fn in_model_order<N: Node<'n>>(&self, n: N) -> bool {
+        let (Some(order), Some(ty)) = (
+            self.order,
+            self.record_of_standard(n.tag(), n.standard_tag()),
+        ) else {
+            return true;
+        };
+        self.in_order_under(order, n, ty)
+    }
+
+    fn in_order_under<'a, M: Node<'a>>(&self, order: &FieldOrder, n: M, ty: StructId) -> bool {
+        let mut read = ModelRead::default();
+        let (mut last, mut aside) = (0, false);
+        let in_order = n.children().all(|c| {
+            let Some(rank) = read.read(order, ty, c) else {
+                aside = true;
+                return true;
+            };
+            let ok = !aside && rank >= last;
+            last = rank;
+            ok
+        });
+        if !in_order {
+            return false;
+        }
+        let mut read = ModelRead::default();
+        n.children().all(|c| {
+            if read.read(order, ty, c).is_none() || c.children().next().is_none() {
+                return true;
+            }
+            let is_ptr = matches!(c.payload(), PayloadRef::Pointer(_));
+            match self.picker.pick(ty, c, is_ptr) {
+                Pick::Type(cty) => self.in_order_under(order, c, cty),
+                _ => true,
+            }
+        })
     }
 
     fn drop_xref(&mut self, s: &mut Structure) {

@@ -672,3 +672,31 @@ fn detaching_clears_an_untyped_records_payload() {
     assert!(has(&out, "0 @X1@ _FAMILY_OF\n1 _NOTE kept\n"), "{out}");
     assert_counts(&data);
 }
+
+#[test]
+fn a_structure_aside_that_fits_its_field_once_edited_is_written_in_order() {
+    // The name holds a note, which its field has no room for: the reading
+    // keeps it aside, after the record's notes.
+    let mut data = Dataset::parse(
+        "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n2 FORM LINEAGE-LINKED\n1 CHAR UTF-8\n1 SUBM @U1@\n\
+         0 @U1@ SUBM\n1 NAME Example submitter\n2 NOTE @N1@\n1 NOTE @N2@\n\
+         0 @N1@ NOTE A note\n0 @N2@ NOTE Another note\n0 TRLR\n",
+    );
+    // Removing the note detaches it: the name fits its field again.
+    let note = data.handle::<SharedNote>("@N1@").unwrap();
+    data.remove(note, Removal::Detach).unwrap();
+    for version in [GedcomVersion::V5_5_1, GedcomVersion::V7_0] {
+        let writer = GedcomWriter::new().gedcom_version(version);
+        let out = writer.write_to_string(&data).unwrap();
+        let name = out.find("1 NAME Example submitter").unwrap();
+        let notes = out
+            .find("1 NOTE @N2@")
+            .or_else(|| out.find("1 SNOTE @N2@"))
+            .unwrap();
+        assert!(name < notes, "{version}: {out}");
+        let again = writer
+            .write_to_string(&Dataset::parse(out.as_str()))
+            .unwrap();
+        assert_eq!(again, out, "{version}");
+    }
+}
