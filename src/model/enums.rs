@@ -854,7 +854,36 @@ impl super::driver::TagField for EventKind {
     type Raw = Option<Code>;
 
     fn raw_of_tag(tag: &'static str) -> Option<Option<Code>> {
-        Self::known_index(tag, None).map(|i| Some(Code::known(i)))
+        /// By the index of a standard tag, the variant (plus one) whose
+        /// 5.5.1 or 7.x spelling it is, the first: what
+        /// [`Enumeration::known_index`] finds of the tag, found without a
+        /// search.
+        #[allow(clippy::cast_possible_truncation)] // Fewer variants than a u16 counts: asserted.
+        const BY_TAG: [u16; crate::tree::STANDARD_TAGS.len()] = {
+            let values = EventKind::DESC.values;
+            assert!(values.len() < u16::MAX as usize);
+            let mut by_tag = [0_u16; crate::tree::STANDARD_TAGS.len()];
+            let mut i = 0;
+            while i < values.len() {
+                let spellings = [values[i].v551, values[i].v7];
+                let mut k = 0;
+                while k < spellings.len() {
+                    if let Some(s) = spellings[k] {
+                        if let Some(t) = crate::tree::standard_index_const(s) {
+                            if by_tag[t as usize] == 0 {
+                                by_tag[t as usize] = i as u16 + 1;
+                            }
+                        }
+                    }
+                    k += 1;
+                }
+                i += 1;
+            }
+            by_tag
+        };
+        let at = crate::tree::standard_index(tag)?;
+        let variant = BY_TAG.get(usize::from(at)).copied().filter(|&v| v > 0)?;
+        Some(Some(Code::known(usize::from(variant - 1))))
     }
 
     fn std_tag_raw(raw: &Option<Code>, _t: &Tables) -> super::driver::StdTag {
@@ -1638,3 +1667,17 @@ phrased_view!(
     Medium,
     NoteKind
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::driver::TagField;
+
+    #[test]
+    fn event_kinds_are_found_by_tag_as_by_spelling() {
+        for tag in crate::tree::STANDARD_TAGS {
+            let searched = EventKind::known_index(tag, None).map(|i| Some(Code::known(i)));
+            assert_eq!(EventKind::raw_of_tag(tag), searched, "{tag}");
+        }
+    }
+}
