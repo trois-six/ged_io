@@ -831,6 +831,16 @@ impl RuleSet {
         })
     }
 
+    /// Whether a rule may rewrite a structure of the standard tag of index
+    /// `standard`, whatever its payload and place.
+    pub(crate) fn may_rewrite_standard(&self, standard: u16) -> bool {
+        !self.any_standard.is_empty()
+            || self
+                .by_standard
+                .get(usize::from(standard))
+                .is_some_and(|rules| !rules.is_empty())
+    }
+
     /// Whether some rule changes records other than the one it reads
     /// (pedigrees, families' order, witnesses, adoptions).
     pub(crate) fn spans_records(&self) -> bool {
