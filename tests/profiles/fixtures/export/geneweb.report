@@ -1,4 +1,4 @@
-HEAD.SOUR EXAMPLE_APP written as ged_io (relabelled; EXF-082, EXC-018, EXC-057)
+HEAD.SOUR EXAMPLE_APP written as oxidged (relabelled; EXF-082, EXC-018, EXC-057)
 @I1@: 2 occupations made one (merged, lossy; EXF-013)
 @I1@: 1 surname-only names in the primary SURN list (merged, lossy; EXF-003, EXF-002)
 @I1@: 2 nicknames in one NICK of the primary name (merged, lossy; EXF-005)

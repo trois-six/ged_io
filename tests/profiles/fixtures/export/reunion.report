@@ -1,4 +1,4 @@
-HEAD.SOUR EXAMPLE_APP written as ged_io (relabelled; EXF-082, EXC-018, EXC-057)
+HEAD.SOUR EXAMPLE_APP written as oxidged (relabelled; EXF-082, EXC-018, EXC-057)
 @I1@: _PRIM on the preferred image (added; EXC-122)
 @I1@: UID as _UID (relabelled; EXC-123)
 repair: HEAD.SCHMA: not permitted here, written as _SCHMA

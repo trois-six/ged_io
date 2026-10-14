@@ -75,9 +75,9 @@ fn headers_per_version() {
         write(&data, GedcomVersion::V5_5_1),
         concat!(
             "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n2 FORM LINEAGE-LINKED\n1 CHAR UTF-8\n",
-            "1 SOUR ged_io\n2 VERS ",
+            "1 SOUR oxidged\n2 VERS ",
             env!("CARGO_PKG_VERSION"),
-            "\n2 NAME ged_io\n1 SUBM @U1@\n0 @U1@ SUBM\n1 NAME Unknown\n0 TRLR\n"
+            "\n2 NAME oxidged\n1 SUBM @U1@\n0 @U1@ SUBM\n1 NAME Unknown\n0 TRLR\n"
         )
     );
 

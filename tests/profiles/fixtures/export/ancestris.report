@@ -1,4 +1,4 @@
-HEAD.SOUR EXAMPLE_APP written as ged_io (relabelled; EXF-082, EXC-018, EXC-057)
+HEAD.SOUR EXAMPLE_APP written as oxidged (relabelled; EXF-082, EXC-018, EXC-057)
 1 places in the format Town, Area code, County, Region, Country, Subdivision (recoded; EXF-094)
 @I1@: FACT as EVEN (relabelled, lossy; EXF-096)
 @I1@: a witness of BAPM on the witness, RELA godparent@INDI:BAPM (moved; EXF-097)

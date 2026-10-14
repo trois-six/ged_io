@@ -1,4 +1,4 @@
-HEAD.SOUR EXAMPLE_APP written as ged_io (relabelled; EXF-082, EXC-018, EXC-057)
+HEAD.SOUR EXAMPLE_APP written as oxidged (relabelled; EXF-082, EXC-018, EXC-057)
 @I2@: the home person first (reordered; EXC-015)
 @I1@: FACT as EVEN (relabelled, lossy; EXC-004)
 @I1@: IDNO as EVEN + TYPE ID number (relabelled, lossy; EXC-005)

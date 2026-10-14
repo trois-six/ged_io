@@ -1,4 +1,4 @@
-HEAD.SOUR EXAMPLE_APP written as ged_io (relabelled; EXF-082, EXC-018, EXC-057)
+HEAD.SOUR EXAMPLE_APP written as oxidged (relabelled; EXF-082, EXC-018, EXC-057)
 @I1@: _UID in the PAF form (recoded; EXC-131)
 repair: HEAD.SCHMA: not permitted here, written as _SCHMA
 repair: INDI.BIRT.SDATE: not permitted here, written as _SDATE

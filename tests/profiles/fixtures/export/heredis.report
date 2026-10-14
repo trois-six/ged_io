@@ -1,4 +1,4 @@
-HEAD.SOUR EXAMPLE_APP written as ged_io (relabelled; EXF-082, EXC-018, EXC-057)
+HEAD.SOUR EXAMPLE_APP written as oxidged (relabelled; EXF-082, EXC-018, EXC-057)
 1 places in the format Town, Area code, County, Region, Country, Subdivision (recoded; EXF-052, EXF-053)
 @I1@: _PRIM on the preferred image (added; EXF-059, EXF-060)
 @I1@: extension _UID as EVEN (relabelled, lossy; EXF-054)

@@ -91,7 +91,7 @@ impl Header {
     /// Writes the header into `out` as the writer completes it for
     /// `rules` in UTF-8 ([`crate::writer::head`]), its fields in model
     /// order: `GEDC` with the target's version (and 5.5.1 form), 5.5.1
-    /// `CHAR UTF-8`, the `SOUR` 5.5.1 requires (`ged_io` when it has
+    /// `CHAR UTF-8`, the `SOUR` 5.5.1 requires (`oxidged` when it has
     /// none), the pointer `submitter` (if any) as its `SUBM` when it has none, then its other
     /// fields. `false`, having written nothing, when it holds a structure
     /// the completion would keep where the typed model does not write it

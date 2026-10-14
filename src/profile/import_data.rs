@@ -69,14 +69,18 @@ pub(crate) static PROFILES: &[&Profile] = &[
 const DATES: Op = Op::DateWords;
 
 import_profile! {
-    /// This crate (`HEAD.SOUR ged_io`, as its exports write): what it wrote
-    /// is read as written. Its data was interpreted when it was read; its
+    /// This crate (`HEAD.SOUR oxidged`, as its exports write, or `ged_io`,
+    /// as its pre-release builds wrote): what it wrote is read as written. Its data was interpreted when it was read; its
     /// extensions are those it kept, its repairs and the redundant ones an
     /// importer needs, none another producer's to interpret again.
-    OXIDGED = "oxidged", "oxidged (ged_io)", tier 0, parent None;
+    OXIDGED = "oxidged", "oxidged", tier 0, parent None;
     // An export of a program that names itself in `HEAD.SOUR` names the
     // crate in `HEAD.SOUR._OXIDGED` (`profile::HeadSource`).
-    detect [sig!(Sour, Eq("ged_io"), 200), sig!(HeadTag, Eq("_OXIDGED"), 200)];
+    detect [
+        sig!(Sour, Eq("oxidged"), 200),
+        sig!(Sour, Eq("ged_io"), 200),
+        sig!(HeadTag, Eq("_OXIDGED"), 200),
+    ];
     charset [];
     stats false;
     rules [];

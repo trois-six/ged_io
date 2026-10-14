@@ -5119,7 +5119,9 @@ fn own_source(records: &mut [Draft<'_>], cx: &mut Cx<'_>, read: Option<&str>) ->
         head.substructures.push(sour);
         String::new()
     };
-    if !previous.is_empty() {
+    // A name the crate wrote before it was named oxidged is the crate's:
+    // naming it again relabels nothing.
+    if !previous.is_empty() && !crate::writer::head::FORMER_PRODUCTS.contains(&previous.as_str()) {
         cx.fold(
             ROWS,
             FoldKind::Relabelled,

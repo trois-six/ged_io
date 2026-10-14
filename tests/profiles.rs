@@ -957,6 +957,46 @@ fn own_output_is_read_as_written() {
     }
 }
 
+/// What the crate wrote under its former name (`HEAD.SOUR ged_io`, as the
+/// builds before it was named oxidged wrote) is its own output too: read as
+/// written, and exported under its present name without a relabelling.
+#[test]
+fn own_output_under_the_former_name_is_read_as_written() {
+    for (head, label) in [
+        (
+            "1 SOUR ged_io\n2 VERS 0.17.0\n2 NAME ged_io\n",
+            "former name",
+        ),
+        (
+            "1 SOUR oxidged\n2 VERS 0.1.0\n2 NAME oxidged\n",
+            "present name",
+        ),
+        ("1 SOUR FTM\n2 _OXIDGED 0.1.0\n", "marker"),
+    ] {
+        let file = format!(
+            "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n2 FORM LINEAGE-LINKED\n1 CHAR UTF-8\n{head}\
+             0 @I1@ INDI\n1 NAME Ann /Example/\n1 _FUN\n2 DATE 1900\n0 TRLR\n"
+        );
+        let (data, report) = GedcomBuilder::new()
+            .build_from_str_with_report(file.as_str())
+            .unwrap();
+        assert_eq!(report.detection.profile().id(), "oxidged", "{label}");
+        assert!(report.detection.hints().is_empty(), "{label}");
+        assert!(report.interpretation.is_empty(), "{label}");
+        if label == "former name" {
+            let (out, report) = Exporter::named("geneanet")
+                .unwrap()
+                .write_to_string(&data)
+                .unwrap();
+            assert!(out.contains("1 SOUR oxidged\n"), "{out}");
+            assert!(
+                report.folds.iter().all(|f| !f.detail.contains("HEAD.SOUR")),
+                "{report:?}"
+            );
+        }
+    }
+}
+
 /// A program's dataset: its header names the program.
 fn program_dataset() -> Dataset {
     let mut data = Dataset::parse(
@@ -1023,14 +1063,14 @@ fn exports_name_the_crate_for_what_they_read() {
     let geneanet = Exporter::named("geneanet").unwrap();
     let (out, report) = geneanet.write_to_string(&read).unwrap();
     assert!(
-        out.contains("1 SOUR ged_io\n") && !out.contains("_OXIDGED"),
+        out.contains("1 SOUR oxidged\n") && !out.contains("_OXIDGED"),
         "{out}"
     );
     assert!(
         report
             .folds
             .iter()
-            .any(|f| f.detail == "HEAD.SOUR FTM written as ged_io"),
+            .any(|f| f.detail == "HEAD.SOUR FTM written as oxidged"),
         "{report:?}"
     );
     // Asked: the dataset's, the crate beside it.
@@ -1059,7 +1099,7 @@ fn exports_name_the_crate_for_what_they_read() {
     });
     let (out, _) = library.write_to_string(&program_dataset()).unwrap();
     assert!(
-        out.contains("1 SOUR ged_io\n") && !out.contains("EXAMPLE_APP"),
+        out.contains("1 SOUR oxidged\n") && !out.contains("EXAMPLE_APP"),
         "{out}"
     );
 }

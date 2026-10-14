@@ -737,7 +737,7 @@ fn repair_g_required() {
     assert_eq!(
         out,
         format!(
-            "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n2 FORM LINEAGE-LINKED\n1 CHAR UTF-8\n1 SOUR ged_io\n2 VERS {}\n2 NAME ged_io\n1 SUBM @U1@\n0 @U1@ SUBM\n1 NAME Unknown\n0 TRLR\n",
+            "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n2 FORM LINEAGE-LINKED\n1 CHAR UTF-8\n1 SOUR oxidged\n2 VERS {}\n2 NAME oxidged\n1 SUBM @U1@\n0 @U1@ SUBM\n1 NAME Unknown\n0 TRLR\n",
             env!("CARGO_PKG_VERSION")
         )
     );

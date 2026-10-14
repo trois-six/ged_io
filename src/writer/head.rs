@@ -7,7 +7,7 @@
 //! - in 5.5.1, `CHAR` naming the encoding of the output bytes; the input's
 //!   `CHAR` (and its `VERS`, which describes the input bytes) is not
 //!   carried, and 7.x has no `CHAR`;
-//! - in 5.5.1, the required `SOUR` (`ged_io` and its version when the data
+//! - in 5.5.1, the required `SOUR` (`oxidged` and its version when the data
 //!   has none) and `SUBM` pointer;
 //! - no cross-reference identifier.
 //!
@@ -19,7 +19,11 @@ use crate::tree::{Payload, Structure, Xref};
 use crate::version::VersionRules;
 
 /// The product written as `HEAD.SOUR` when the data names none.
-pub(crate) const PRODUCT: &str = "ged_io";
+pub(crate) const PRODUCT: &str = "oxidged";
+
+/// The products pre-release builds of this crate wrote as `HEAD.SOUR`
+/// (before it was named oxidged): what they wrote is the crate's too.
+pub(crate) const FORMER_PRODUCTS: &[&str] = &["ged_io"];
 
 /// The text of a required structure nothing else can fill (the name of a
 /// stub submitter, a missing `TYPE`, …).
@@ -188,8 +192,8 @@ mod tests {
         complete(&mut h, &V551, "UTF-8", Some("@U1@".into()));
         let out = h.to_gedcom(0, crate::GedcomVersion::V5_5_1);
         assert!(out.starts_with(
-            "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n2 FORM LINEAGE-LINKED\n1 CHAR UTF-8\n1 SOUR ged_io\n2 VERS "
+            "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n2 FORM LINEAGE-LINKED\n1 CHAR UTF-8\n1 SOUR oxidged\n2 VERS "
         ), "{out}");
-        assert!(out.ends_with("2 NAME ged_io\n1 SUBM @U1@\n"), "{out}");
+        assert!(out.ends_with("2 NAME oxidged\n1 SUBM @U1@\n"), "{out}");
     }
 }
