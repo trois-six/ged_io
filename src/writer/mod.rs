@@ -532,17 +532,16 @@ impl GedcomWriter {
         mut writer: W,
         data: &Dataset,
     ) -> Result<WriteReport, WriteError> {
-        if let Some(rules) = self
-            .interpretation(data)
-            .filter(|_| !self.drops_credentials(data))
-        {
+        let rules = self.interpretation(data);
+        let interprets = rules.is_some();
+        if let Some(rules) = rules.filter(|_| !self.drops_credentials(data)) {
             if let Some((sink, report)) = self.interpreting(data, rules, None)? {
                 writer.write_all(&sink.into_bytes())?;
                 writer.flush()?;
                 return Ok(report);
             }
         }
-        if let Some((records, mut report, typed)) = self.rewritten(data) {
+        if let Some((records, mut report, typed)) = self.rewritten(data, interprets) {
             let more = self.write_rewritten(writer, &records, data, typed)?;
             report.repairs.extend(more.repairs);
             return Ok(report);
@@ -567,10 +566,16 @@ impl GedcomWriter {
     /// those [`reinterpreted`](Self::reinterpreted) for 7.x, or `data`'s
     /// own structures (`true`: typed, in the model's order); either without
     /// the credentials [`Credentials::LeftOut`] leaves out. `None` when
-    /// the dataset is written as it is.
-    fn rewritten(&self, data: &Dataset) -> Option<(Vec<Structure>, WriteReport, bool)> {
+    /// the dataset is written as it is. `interprets`: whether
+    /// [`interpretation`](Self::interpretation) gives rules for `data`.
+    fn rewritten(
+        &self,
+        data: &Dataset,
+        interprets: bool,
+    ) -> Option<(Vec<Structure>, WriteReport, bool)> {
         let credentials = self.drops_credentials(data);
-        if let Some((mut records, report)) = self.reinterpreted(data) {
+        if let Some((mut records, report)) = interprets.then(|| self.reinterpreted(data)).flatten()
+        {
             if credentials {
                 for r in &mut records {
                     drop_credentials(r);
@@ -776,17 +781,16 @@ impl GedcomWriter {
         &self,
         data: &Dataset,
     ) -> Result<(String, WriteReport), WriteError> {
-        if let Some(rules) = self
-            .interpretation(data)
-            .filter(|_| !self.drops_credentials(data))
-        {
+        let rules = self.interpretation(data);
+        let interprets = rules.is_some();
+        if let Some(rules) = rules.filter(|_| !self.drops_credentials(data)) {
             let size = data.store().input_len();
             if let Some((sink, report)) = self.interpreting(data, rules, Some(size))? {
                 let text = sink.into_string();
                 return Ok((text, report));
             }
         }
-        if let Some((records, mut report, typed)) = self.rewritten(data) {
+        if let Some((records, mut report, typed)) = self.rewritten(data, interprets) {
             let mut text = self.clone().output_encoding(OutputEncoding::Utf8);
             if text.config.bom == Bom::Auto {
                 text.config.bom = Bom::Never;
