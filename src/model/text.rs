@@ -1028,6 +1028,9 @@ pub struct Store {
     tags: Vec<Box<str>>,
     /// Texts past what 32-bit offsets reach, whole.
     big: Vec<Box<str>>,
+    /// The standard tags of the lines read, as bits by index, when known
+    /// ([`Store::read_tag`]).
+    seen: Option<Box<[u64]>>,
 }
 
 /// The parts of a [`Store`] that reading fills: the text read (borrowed),
@@ -1230,6 +1233,23 @@ impl Store {
 
     pub(crate) fn set_tags(&mut self, tags: Vec<Box<str>>) {
         self.tags = tags;
+    }
+
+    /// Notes the standard tags of lines read (`seen`, as bits by index).
+    pub(crate) fn add_seen(&mut self, seen: &[u64]) {
+        match &mut self.seen {
+            Some(s) => s.iter_mut().zip(seen).for_each(|(a, b)| *a |= b),
+            None => self.seen = Some(seen.into()),
+        }
+    }
+
+    /// Whether a line read has the standard tag `tag`; `None` when the
+    /// store does not know (its text was not read here).
+    pub(crate) fn read_tag(&self, tag: &str) -> Option<bool> {
+        let i = usize::from(crate::tree::standard_index(tag)?);
+        self.seen
+            .as_ref()
+            .map(|s| s.get(i / 64).is_some_and(|w| w & (1 << (i % 64)) != 0))
     }
 
     /// The tags that are not standard, taken out (to read more records
@@ -1509,6 +1529,7 @@ impl fmt::Debug for Store {
             .field("xrefs", &self.xrefs.len())
             .field("tags", &self.tags)
             .field("big", &self.big.len())
+            .field("seen", &self.seen.is_some())
             .finish()
     }
 }
@@ -1516,6 +1537,20 @@ impl fmt::Debug for Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_store_knows_the_standard_tags_read() {
+        let data = crate::Dataset::parse(
+            "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 NAME Ann /Example/\n1 BIRT\n2 AGE 0y\n\
+             1 NOTE AGES and EMAIL in a text\n0 TRLR\n",
+        );
+        let store = data.store();
+        assert_eq!(store.read_tag("AGE"), Some(true));
+        assert_eq!(store.read_tag("BIRT"), Some(true));
+        assert_eq!(store.read_tag("EMAIL"), Some(false));
+        assert_eq!(store.read_tag("_UID"), None);
+        assert_eq!(Store::default().read_tag("AGE"), None);
+    }
 
     #[test]
     fn spans_pieces_owned_and_empty() {

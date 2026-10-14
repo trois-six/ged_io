@@ -144,10 +144,15 @@ pub(crate) struct RawNode {
     pub has_xref: bool,
 }
 
+/// The words of a set of standard tags, by index.
+pub(crate) const SEEN_WORDS: usize = STANDARD_TAGS.len().div_ceil(64);
+
 /// The tags that are not standard, interned per tree.
 #[derive(Debug, Default)]
 pub(crate) struct TagInterner {
     pub others: Vec<Box<str>>,
+    /// The standard tags interned, by index ([`TagInterner::seen`]).
+    seen: [u64; SEEN_WORDS],
     map: HashMap<Box<str>, u32, BuildHasherDefault<TagHasher>>,
 }
 
@@ -197,6 +202,11 @@ impl TagInterner {
         }
     }
 
+    /// The standard tags interned, as bits by index.
+    pub(crate) fn seen(&self) -> &[u64; SEEN_WORDS] {
+        &self.seen
+    }
+
     /// The id the next tag interned takes.
     pub(crate) fn next_id(&self) -> u32 {
         u32::try_from(STANDARD_TAGS.len() + self.others.len()).unwrap_or(u32::MAX)
@@ -204,6 +214,9 @@ impl TagInterner {
 
     pub(crate) fn intern(&mut self, tag: &str) -> u32 {
         if let Some(i) = standard_index(tag) {
+            if let Some(w) = self.seen.get_mut(usize::from(i) / 64) {
+                *w |= 1 << (i % 64);
+            }
             return u32::from(i);
         }
         if let Some(&id) = self.map.get(tag) {

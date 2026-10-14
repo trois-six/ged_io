@@ -643,12 +643,13 @@ impl RuleSet {
     /// only say something in 7.x only with `v7`.
     pub(crate) fn may_apply<'t>(
         &self,
-        input: &str,
+        store: &crate::model::Store,
         tags: impl Iterator<Item = &'t str>,
         untyped: bool,
         known: bool,
         v7: bool,
     ) -> bool {
+        let input = store.input();
         let relevant = |a: &Applied| match a.rule.op {
             Op::Known => known,
             Op::RecordXref => untyped,
@@ -680,8 +681,8 @@ impl RuleSet {
         self.by_tag.iter().any(|(tag, rules)| {
             Tag::new(tag).is_standard()
                 && rules.iter().any(relevant)
-                // (A quicker search first: most of these tags are rare.)
-                && input.contains(tag)
+                // (A quicker look first: most of these tags are rare.)
+                && store.read_tag(tag).unwrap_or_else(|| input.contains(tag))
                 && lines_of(input, tag).any(|value| {
                     rules
                         .iter()

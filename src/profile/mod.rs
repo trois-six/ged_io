@@ -568,7 +568,7 @@ fn read_whole(
     let mut interpreted = InterpretReport::default();
     if !rules.is_empty()
         && rules.may_apply(
-            data.store().input(),
+            data.store(),
             data.store().other_tags(),
             untyped,
             known,
