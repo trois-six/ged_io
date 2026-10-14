@@ -1,4 +1,7 @@
-ged_io
+oxidged
+Copyright (c) 2026 Pierre Erraud and the oxidged contributors. MIT License (license.md).
+
+oxidged is a fork of ged_io 0.17.0 (https://github.com/ge3224/ged_io):
 Copyright (c) 2020 Robert Pirtle and the ged_io contributors. MIT License (license.md).
 
 This crate and its repository include tables generated from third-party material:

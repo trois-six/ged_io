@@ -1,4 +1,9 @@
-# ged_io Roadmap
+# oxidged Roadmap
+
+oxidged 0.1.0 delivers the four phases ged_io planned for its 0.13 to 0.17
+releases, redesigned (see [CHANGELOG.md](CHANGELOG.md)); the version numbers
+of the phases below are the ged_io releases they were planned for. What
+comes next is at the end.
 
 ---
 
@@ -25,7 +30,7 @@ Dates are the backbone of genealogy. Every downstream app (timelines, reports, t
 
 ---
 
-## Phase 2: Record Manipulation API (v0.15)
+## Phase 2: Record Manipulation API (v0.15) ✅
 
 Any app that edits genealogy data needs operations that keep the dataset consistent.
 
@@ -52,11 +57,11 @@ Real-world GEDCOM files are messy: reading never fails and keeps their data; con
 - ✅ `GedcomBuilder::strict(true)`: the input is refused with every deviation from its specification (`GedcomError::NonConformant`) — `src/builder.rs`
 - ✅ `spec::validate*`: every deviation with its line, without failing — `src/spec/`
 - ✅ `GedcomWriter`: conformant 5.5.1, 7.0 or 7.1 output, every repair reported — `src/writer/`
-- ✅ Sanitizer CLI: `ged-io --write <version> <file.ged>`
+- ✅ Sanitizer CLI: `oxidged --write <version> <file.ged>`, `oxidged --sanitize <file.ged>` (package `oxidged-cli`)
 
 ---
 
-## Phase 4: Conversion Tools & Visitor Pattern (v0.17+)
+## Phase 4: Conversion Tools & Visitor Pattern (v0.17+) ✅
 
 ### GEDCOM Version Conversion
 - ✅ `GedcomVersion` (5.5.1, 7.0, 7.1) with a `VersionRules` table per version — `src/version.rs`
@@ -65,11 +70,14 @@ Real-world GEDCOM files are messy: reading never fails and keeps their data; con
 
 ### Streaming
 - ✅ `GedcomStreamParser`: typed records one at a time, any encoding — `src/stream.rs`
-- A streaming writer: records written one at a time, with the writer's conformance repairs
-- `GedcomVisitor` trait with `on_individual()`, `on_family()`, etc. returning `ControlFlow`
+- ✅ `GedcomStreamWriter`: records written one at a time, with the writer's conformance repairs and conversion — `src/writer/stream.rs`
+- ✅ `stream::Visitor` with `individual()`, `family()`, etc. returning `ControlFlow`, run by `GedcomStreamParser::visit` — `src/stream.rs`
 
 ### Encoding Conversion
-- ✅ `encoding::{decode, decode_as, detect_encoding, encode}` and `DecodeReader`; UTF-8, UTF-16 LE/BE, ANSEL, ASCII, Windows-1252, ISO-8859-1/15, IBM PC, Macintosh — `src/encoding/`
+- ✅ `encoding::{decode, decode_as, detect_encoding, encode}` and `DecodeReader`; UTF-8, UTF-16 LE/BE, ANSEL, ASCII, Windows-1250/1251/1252, ISO-8859-1/2/15, IBM PC, Macintosh — `src/encoding/`
+
+### Producer Profiles
+- ✅ 34 producers' conventions as data (`profile`): detection, `CHAR` as the producer means it, lossless interpretation of their extensions; exports for 23 importers, conformant, every lossy fold reported — `src/profile/`
 - ✅ 5.5.1 output in ANSEL, ASCII or UTF-16 (`GedcomWriter::output_encoding`)
 
 ---
@@ -88,4 +96,14 @@ Real-world GEDCOM files are messy: reading never fails and keeps their data; con
 | 1 | v0.13 | Date & Age | SDN conversion, ages, date ordering, day-of-week, normalization |
 | 2 | v0.15 | Record Mutation | Record removal, xref linking/unlinking |
 | 3 | v0.16 | Error & Compat | Lenient reading, strict mode, validation, conformant writer, sanitizer CLI |
-| 4 | v0.17+ | Conversion & Visitor | Dataset conversion between versions, streaming writer, visitor trait |
+| 4 | v0.17+ | Conversion & Visitor | Dataset conversion between versions, streaming writer, visitor trait, producer profiles |
+
+All four are in oxidged 0.1.0.
+
+---
+
+## Next
+
+- **Producer profiles re-verified**: the tier-1 profiles follow published and observed importer behaviour, much of it dated; check them against recent exports and imports of each program (`Profile::verification`).
+- **GEDCOM 7.1**: follow FamilySearch's `v7.1` branch until its release, then pin the tables to the release as 7.0 is.
+- **Known gaps**: close the cases `tests/fixtures/conformance/known_gaps.tsv` lists (records over the 5.5.1 size limit, notes shared in cycles, a few lossy round trips of 7.x extensions).

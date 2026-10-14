@@ -85,11 +85,17 @@ pub use version::{GedcomVersion, VersionRules};
 #[doc = include_str!("../README.md")]
 pub struct ReadmeExamples;
 
-/// The examples of the migration guide, compiled and run as documentation
-/// tests.
+/// The examples of the migration guide from ged_io 0.17, compiled and run
+/// as documentation tests.
 #[cfg(doctest)]
 #[doc = include_str!("../MIGRATION.md")]
 pub struct MigrationExamples;
+
+/// The examples of the guide to GEDCOM 5.5.1 and 7.0, compiled and run as
+/// documentation tests.
+#[cfg(doctest)]
+#[doc = include_str!("../docs/gedcom-7.md")]
+pub struct GedcomSevenExamples;
 
 pub use writer::{
     Bom, Credentials, GedcomStreamWriter, GedcomWriter, LineEnding, OutputEncoding, Repair,

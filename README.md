@@ -1,16 +1,17 @@
-# ged_io
+# oxidged
 
 **Read any GEDCOM file, write conformant GEDCOM 5.5.1, 7.0 and 7.1**
 
-[![Crates.io](https://img.shields.io/crates/v/ged_io.svg)](https://crates.io/crates/ged_io)
-[![Documentation](https://docs.rs/ged_io/badge.svg)](https://docs.rs/ged_io)
+[![Crates.io](https://img.shields.io/crates/v/oxidged.svg)](https://crates.io/crates/oxidged)
+[![Documentation](https://docs.rs/oxidged/badge.svg)](https://docs.rs/oxidged)
+[![CI](https://github.com/trois-six/oxidged/actions/workflows/ci.yml/badge.svg)](https://github.com/trois-six/oxidged/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ---
 
-## What is ged_io?
+## What is oxidged?
 
-`ged_io` is a Rust library for reading and writing
+`oxidged` is a Rust library for reading and writing
 [GEDCOM](https://en.wikipedia.org/wiki/GEDCOM) files, the standard for
 exchanging genealogical data between family tree software.
 
@@ -38,29 +39,41 @@ reporting each repair.
 | **Producer profiles** | 34 producers' conventions as data: the producer detected, its `CHAR` read its way, its extensions read as the standard says them without loss; exports shaped for 23 importers, conformant, every lossy fold reported |
 | **Validation** | The 5.5.1, 7.0 and 7.1 specification tables: every deviation of a file with its line, an opt-in strict mode, and a repair pass that makes any tree conformant without losing data |
 | **Values** | Date, age and time grammars of both versions, conversions between versions, and calendar arithmetic (feature `calendar`) |
-| **Fast** | 1.5 to 3 times as fast as 0.17 to read and up to 4 times as fast to write, at about twice the input's size in memory (see [Performance](#performance)) |
+| **Fast** | 1.5 to 3 times as fast as ged_io 0.17 to read and up to 4 times as fast to write, at about twice the input's size in memory (see [Performance](#performance)) |
+| **Command line** | `oxidged` (package `oxidged-cli`): summarise, validate, repair, convert, re-encode, detect the producer and export for an importer (see [Command Line Tool](#command-line-tool)) |
 
 ---
 
 ## Installation
 
+```bash
+cargo add oxidged
+```
+
+or, in `Cargo.toml`:
+
 ```toml
 [dependencies]
-ged_io = "0.18"
+oxidged = "0.1"
 ```
+
+The minimum supported Rust version is 1.88.
 
 ### Optional Features
 
-```toml
-# Serialize and deserialize the dataset with serde (JSON and others)
-ged_io = { version = "0.18", features = ["serde"] }
+| Feature | Adds | Dependencies |
+|---------|------|--------------|
+| `serde` | `Serialize` and `Deserialize` for the dataset (JSON and other self-describing formats) | `serde` |
+| `gedzip` | GEDZIP archives (`.gdz`): read, write, media files (`oxidged::gedzip`) | `zip` (deflate only) |
+| `calendar` | Calendar arithmetic: conversions between calendars, day numbers, weekdays | `calendrical_calculations`, `calendrier` |
 
-# GEDZIP archive support (.gdz files)
-ged_io = { version = "0.18", features = ["gedzip"] }
-
-# Calendar arithmetic: conversions between calendars, day numbers
-ged_io = { version = "0.18", features = ["calendar"] }
+```bash
+cargo add oxidged --features serde,gedzip,calendar
 ```
+
+None is enabled by default; everything else (reading, writing, conversion,
+validation, streaming, editing, encodings, producer profiles) is always
+built.
 
 ---
 
@@ -282,8 +295,6 @@ for writing. **The tier-1 profiles follow published and observed importer
 behaviour, much of it dated: they are to be re-verified against recent
 exports and imports** (`Profile::verification`); the others come from the
 research alone.
-
----
 
 ---
 
@@ -667,7 +678,7 @@ assert!(validate(&records, GedcomVersion::V7_0).is_empty());
 ```
 
 Every rule the validator checks and every repair are listed in the
-[`spec` module documentation](https://docs.rs/ged_io/latest/ged_io/spec/).
+[`spec` module documentation](https://docs.rs/oxidged/latest/oxidged/spec/).
 
 One deliberate exception to strict conformance: the 5.5.1 file formats
 (`FILE.FORM`, `MULTIMEDIA_FORMAT`) are treated as an open list. The
@@ -720,52 +731,56 @@ assert_eq!(date.to_version(&store, GedcomVersion::V7_0).value.to_str(&store), "A
 
 ## Command Line Tool
 
+The command-line tool is the package `oxidged-cli` (in `cli/`); its
+command is `oxidged`.
+
 ```bash
 # Install
-cargo install ged_io
+cargo install oxidged-cli
 
 # A summary: version, records, pointers to no record
-ged-io family.ged
+oxidged family.ged
 
 # One individual, or every individual whose surname contains EXAMPLE
-ged-io --individual @I1@ family.ged
-ged-io --individual-lastname example family.ged
+oxidged --individual @I1@ family.ged
+oxidged --individual-lastname example family.ged
 
 # Check a file against the specification of the version it declares
-ged-io --validate --validation-level strict family.ged
+oxidged --validate --validation-level strict family.ged
 Validation: strict - errors: 2, warnings: 0
 error: line 14: SEX "male": not a value of enumset-SEX
 error: line 27: FAMC @F9@: no record has this identifier
 
 # Rewrite any file as conformant GEDCOM 7.0 (repairs on standard error),
 # converting a 5.5.1 file; --keep-obsolete keeps what 7.0 drops as extensions
-ged-io --write 7.0 family.ged > family70.ged
-ged-io --write 7.0 --keep-obsolete family.ged > family70.ged
+oxidged --write 7.0 family.ged > family70.ged
+oxidged --write 7.0 --keep-obsolete family.ged > family70.ged
 
 # Repair a file in its own version; re-encode a 5.5.1 file
-ged-io --sanitize family.ged > clean.ged
-ged-io --sanitize --convert-encoding ANSEL family.ged > family-ansel.ged
+oxidged --sanitize family.ged > clean.ged
+oxidged --sanitize --convert-encoding ANSEL family.ged > family-ansel.ged
 
 # Which program wrote it; a file for an importer (lossy folds on standard error)
-ged-io --detect family.ged
-ged-io --profile geneanet family.ged > for-geneanet.ged
-ged-io --list-profiles
+oxidged --detect family.ged
+oxidged --profile geneanet family.ged > for-geneanet.ged
+oxidged --list-profiles
 ```
 
-`ged-io --help` lists every option. Exit codes: 0 success, 1 I/O error,
+`oxidged --help` lists every option. Exit codes: 0 success, 1 I/O error,
 2 validation errors in strict mode, 3 usage error.
 
 ---
 
 ## Performance
 
-Measured against the published 0.17.0 with `tools/differential` (`perf`:
+Measured against the published ged_io 0.17.0, the crate oxidged was forked
+from, with `tools/differential` (`perf`:
 one crate and one operation per process, release build, on a performance
 core of an Intel Core Ultra 7 265H). Small files: CPU cycles per
 operation (`perf stat`, steady state over thousands of runs: free of the
 clock's changes), instructions in parentheses:
 
-| Input | Read 0.17 | Read 0.18 | Write 0.17 | Write 0.18 |
+| Input | Read ged_io 0.17 | Read oxidged | Write ged_io 0.17 | Write oxidged |
 |-------|----------:|----------:|-----------:|-----------:|
 | `tests/fixtures/simple.ged` (47 lines) | 25.8k (115k) | 17.5k (90k) | 10.0k (52k) | 9.5k (46k) |
 | `tests/fixtures/sample.ged` (96 lines) | 52.4k (231k) | 29.8k (166k) | 17.9k (94k) | 21.7k (104k) |
@@ -773,9 +788,9 @@ clock's changes), instructions in parentheses:
 | `tests/fixtures/washington.ged` (234 KB) | 8.12M (31.0M) | 3.59M (15.9M) | 2.26M (10.9M) | 2.16M (10.2M) |
 | generated, 1,000 individuals (457 KB) | 13.1M (51.3M) | 4.95M (25.3M) | 3.32M (17.8M) | 2.82M (15.3M) |
 
-0.17 writes 653 lines of `maximal551.ged`, 0.18 the 700 it holds; written
-in the other version family (`dataset-converted`), 0.18 converts and
-repairs what 0.17 writes as it is: a dataset that needs nothing converted
+ged_io 0.17 writes 653 lines of `maximal551.ged`, oxidged the 700 it holds;
+written in the other version family (`dataset-converted`), oxidged converts
+and repairs what ged_io 0.17 writes as it is: a dataset that needs nothing converted
 costs no more than its write (generated: 14.6M instructions), one that
 does several times more (`washington.ged`, whose individuals carry
 `_UID` and `_FSFTID`: 43M).
@@ -783,12 +798,12 @@ does several times more (`washington.ged`, whose individuals carry
 Large files, wall time (median of 5) and peak resident set (Linux
 `VmHWM`), with `tools/perf`:
 
-| Generated input | Read 0.17 | Read 0.18 | Write 0.17 | Write 0.18 |
+| Generated input | Read ged_io 0.17 | Read oxidged | Write ged_io 0.17 | Write oxidged |
 |-------|----------:|----------:|-----------:|-----------:|
 | 20,000 individuals (9.4 MB) | 89 ms (106 MB/s) | 25 ms (380 MB/s) | 45 ms | 13 ms |
 | 172,000 individuals (82 MB) | 1.10 s (75 MB/s) | 0.25 s (333 MB/s) | 0.48 s | 0.12 s |
 
-| Peak memory, 82 MB input | 0.17 | 0.18 |
+| Peak memory, 82 MB input | ged_io 0.17 | oxidged |
 |---|---:|---:|
 | In memory (`GedcomBuilder::build_from_bytes`) | 1.9 GB (23× the input) | 161 MB (1.96×) |
 | Streaming read (`GedcomStreamParser`) | — (UTF-8 only) | 4.5 MB, any encoding |
@@ -844,27 +859,35 @@ Criterion benchmarks: `cargo bench --bench read`, `--bench write`,
 ## Building from Source
 
 ```bash
-git clone https://github.com/ge3224/ged_io.git
-cd ged_io
-cargo build --release
-cargo test --all-features
-cargo clippy --all-targets --all-features -- -D warnings
+git clone https://github.com/trois-six/oxidged.git
+cd oxidged
+cargo build --workspace --release
+cargo test --workspace --all-features
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo bench
 ```
+
+The repository is a workspace of the library (the root) and the
+command-line tool (`cli/`). The fuzz targets (`fuzz/`, with `cargo fuzz`)
+and the tools (`tools/perf`, `tools/differential`) are packages of their
+own, built with `--manifest-path`.
 
 The conformance suite (`tests/conformance`) runs the vendored and
 generated cases with every test; `tools/fetch-corpora.sh` fetches the
 opt-in corpora for `cargo test --all-features --test conformance --
---ignored`, and `tools/differential` compares what this checkout keeps of
-them with the published 0.17.0.
+--ignored`, and `tools/differential` compares what oxidged keeps of
+them with the published ged_io 0.17.0.
 
 ---
 
 ## Documentation
 
-- [API Documentation](https://docs.rs/ged_io) - Full API reference
-- [MIGRATION.md](MIGRATION.md) - GEDCOM 5.5.1 to 7.0 migration guide
+- [API Documentation](https://docs.rs/oxidged) - Full API reference
+- [MIGRATION.md](MIGRATION.md) - Migrating from ged_io 0.17
+- [GEDCOM 5.5.1 and 7.0](docs/gedcom-7.md) - The differences between the versions, and how oxidged handles them
+- [CHANGELOG.md](CHANGELOG.md) - What changed, release by release
 - [ROADMAP.md](ROADMAP.md) - Project roadmap and planned features
+- [docs/extensions.md](docs/extensions.md) - The extension tags oxidged declares in GEDCOM 7.x headers
 - GEDCOM specifications (bundled in this repo):
   - [GEDCOM 7.0.18 Specification (PDF)](docs/FamilySearchGEDCOMv7.pdf), the latest 7.0 release
   - [GEDCOM 5.5.1 Specification (PDF)](docs/ged551.pdf)
@@ -876,24 +899,42 @@ them with the published 0.17.0.
 Contributions are welcome! Areas where help is appreciated:
 
 - Bug reports and feature requests
+- Exports of real programs (with fictitious data) to check the producer profiles against
 - Additional test cases and edge cases
 - Documentation improvements
 - Performance optimizations
 
-Please feel free to open issues or submit pull requests.
+Please open issues or pull requests on
+[github.com/trois-six/oxidged](https://github.com/trois-six/oxidged).
+
+---
+
+## Origin
+
+oxidged is a fork of [`ged_io`](https://github.com/ge3224/ged_io) 0.17.0
+(commit `08a055c`), redesigned: a new model, reader, writer, conversion,
+validation, producer profiles and streaming pipeline, published under a new
+name. ged_io was written by Robert Pirtle, Jacob Benison and its
+contributors, and itself began as a fork of
+[`pirtleshell/rust-gedcom`](https://github.com/pirtleshell/rust-gedcom); its
+history is kept in this repository. [MIGRATION.md](MIGRATION.md) maps the
+names and types of ged_io 0.17 to oxidged's.
 
 ---
 
 ## License
 
 This project is licensed under the [MIT License](license.md). The
-specification tables derived from FamilySearch/GEDCOM are Apache-2.0; see
-[NOTICE](NOTICE).
+specification tables derived from FamilySearch/GEDCOM are Apache-2.0, and
+the 5.5.1 tables derived from gedcom-go are MIT; see [NOTICE](NOTICE).
 
 ---
 
 ## Acknowledgments
 
-Originally forked from [`pirtleshell/rust-gedcom`](https://github.com/pirtleshell/rust-gedcom).
+Thanks to the authors and contributors of
+[`ged_io`](https://github.com/ge3224/ged_io) and
+[`rust-gedcom`](https://github.com/pirtleshell/rust-gedcom), on whose work
+oxidged is built.
 
 GEDCOM is a specification maintained by [FamilySearch](https://www.familysearch.org/).

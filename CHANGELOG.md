@@ -4,274 +4,266 @@ All notable changes to this project are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased] — 0.18.0
+## [0.1.0] — Unreleased
 
-A new model and a new reading and writing pipeline: reading never fails and
-keeps all data; writing is conformant to GEDCOM 5.5.1, 7.0 or 7.1.
+The first release of oxidged: a Rust library that reads any GEDCOM file
+leniently, without losing data and without warnings, and writes strictly
+conformant GEDCOM 5.5.1, 7.0 or 7.1, idempotently; with a command-line
+tool, `oxidged` (package `oxidged-cli`).
 
-### Added
+oxidged is a fork of [ged_io](https://github.com/ge3224/ged_io) 0.17.0
+(commit `08a055c`), redesigned and published under a new name. Everything
+below is relative to ged_io 0.17.0; [MIGRATION.md](MIGRATION.md) maps its
+names and types to oxidged's.
 
-- `ged_io::model`: a typed model of every structure of GEDCOM 5.5.1, 7.0
-  and 7.1 (`Dataset`, `Individual`, `Family`, `Source`, `Repository`,
-  `Multimedia`, `Submitter`, `Submission`, `SharedNote`, `Event`, `Name`,
-  `Citation`, `Place`, `Ordinance`, …). Each structure keeps what it has no
-  field for in `extra`, in place; enumerations keep unknown values
-  (`Unknown(Text)`) and 7.x `PHRASE`s (`Phrased`). Texts are spans of the
-  decoded input (`Text`, `Store`), identifiers interned (`XrefId`).
-- `Dataset::parse`, `Dataset::from_bytes`, `Dataset::new`, `Dataset::push`;
-  lookups `find*` by text or `XrefId`, in constant time; navigation
-  (`families_as_spouse`, `families_as_child`, `parents`, `children`,
-  `spouse`, `search_individuals`); `dangling_references()`.
-- Referential integrity and editing (`ged_io::model`, README "Editing"):
-  `Handle<T>` and `RecordHandle`, valid across every edit until their
-  record is removed (`handle`, `handles`, `handle_at`, `record_handle`,
-  `get`, `get_any`, `position`, `records_with_handles`); `add` (refuses a
-  duplicate identifier, pointers to no record and ids of another store;
-  gives a record without identifier a free one), `remove` with `Removal`
-  (`Refuse` while referenced, `Detach` the structures pointing to it,
-  `LeaveDangling`), `rename` (every pointer follows, in constant time),
-  `redirect`, `detach`; `link`/`unlink` of every pointer kind (`Link`:
-  family links, aliases, associations, citations, notes, media,
-  repositories, submitters, interests, the header's submission,
-  extension structures), `link_child`/`link_spouse` and their unlinks
-  both ways; `get_mut`, `get_mut_at`, `header_mut` and `edit_all` lend
-  records (`RecordMut`) whose pointers are counted again when the loan
-  ends; `references` (constant time), `referrers`, `pointer`;
-  `EditError`. The counts and handles are built the first time they are
-  asked for: reading and writing never pay for them.
-- `ged_io::tree`: a lossless tree of any file (`Tree`, `parse_tree`,
-  `TreeReader`, `Structure`, `Xref`, `Tag`).
-- `ged_io::spec`: the 5.5.1, 7.0 and 7.1 specification tables, a validator
-  (`validate`, `validate_text`, `validate_bytes`: every deviation with its
-  line) and a conformance repair (`conform`).
-- `ged_io::value`: date, age and time grammars of both versions, lenient
-  and strict, conversions between versions; `Date::to_version`,
-  `Date::normalize`, `Age::to_version`.
-- `GedcomBuilder::strict`: refuse input that does not follow its
-  specification, with every deviation (`GedcomError::NonConformant`).
-- `GedcomBuilder::build_from_reader`; GEDZIP read through the builder
-  (`GedzipReader::read_dataset`).
-- `GedcomStreamParser::nodes`; `Dataset: FromIterator<StreamedRecord> +
-  Extend<StreamedRecord>`.
-- `IndexedDataset`: constant-time lookups of the families of individuals
-  (records are found by the dataset itself); `data_mut` reindexes.
-- `GedcomWriter::write` to any `io::Write`, `write_tree`,
-  `write_structures`, `write_to_string_with_report`; `WriteReport` of the
-  repairs; `RepairPolicy`; `OutputEncoding` (5.5.1 in ANSEL, ASCII,
-  UTF-16); `Bom`; GEDCOM 7.1 as a write target.
-- `GedcomStreamWriter`: writes a header, then records one at a time (from a
-  `GedcomStreamParser` or a dataset), then the trailer, with the
-  conformance repair, conversion between version families and line rules
-  of `GedcomWriter` and memory bounded by one record; its documentation
-  lists where it differs from writing the whole dataset (identifiers,
-  pointers, stub submitter, relocations, records a conversion adds,
-  `HEAD.SCHMA` declarations).
-- Encodings: Windows-1252 (`ANSI`), IBM PC (cp437), Macintosh, UTF-16
-  without BOM; ANSEL composed to Unicode NFC; `DecodeReader` for streams;
-  decoding never fails.
-- Feature `serde`: `Serialize`/`Deserialize` for `Dataset` (texts and
-  identifiers as strings), `Serialize` for `StreamedRecord`.
-- 5.5.1 file formats (`FILE.FORM`) are an open list, by decision: any
-  word is accepted and written as given (`png`, `pdf`), a media type
-  (`image/png`) is written as its file format, and a missing `FORM` is
-  derived from the file's extension; the validator reports only a media
-  type there. 7.x keeps media types.
-- CLI: `ged-io --write <5.5.1|7.0|7.1>` writes a file conformant;
-  `--validate` reports every deviation with its line.
-- `ged_io::convert`: conversion between GEDCOM 5.5.1 and 7.x, run by the
-  writer when the target is of the other family, and as functions
-  (`convert_structures`, `convert_dataset`): multimedia links holding files
-  and source citations in words become records, `ASSO.RELA` the `ROLE` it
-  names (`FRIEND`, `GODP`, `NGHBR`, …, else `OTHER`) with a `PHRASE`,
-  `FONE`/`ROMN` `TRAN` with a language, language names BCP 47 tags, file
-  formats media types and file paths URIs, `RIN`/`AFN`/`RFN` `EXID`s of the
-  registered types, escapes in text calendar names, `AGE STILLBORN` a death
-  at `0y`; `SUBN`, `HEAD.FILE`, `HEAD.CHAR` and `GEDC.FORM` are left out; a
-  5.5.1 record named `@VOID@` is renamed with its pointers; extension tags
-  of known meaning are declared in `HEAD.SCHMA`. Each is reversed when
-  converting to 5.5.1. `ConversionOptions::keep_obsolete` (writer
-  `conversion`, CLI `--keep-obsolete`) keeps what 7.x drops as declared
-  extensions, restored in 5.5.1.
-- `GedzipError::ReservedName`.
-- GEDCOM 7.0.18, the latest 7.0 release (FamilySearch/GEDCOM v7.0.17 and
-  v7.0.18, February 2026): the 7.0 tables come from the release, and its
-  normative changes are implemented. The `URI`, `TagDef`, `Latitude` and
-  `Longitude` data types are validated by their grammars (`EXID.TYPE` an
-  RFC 3986 URI reference, relative ones included; `SCHMA.TAG` an extension
-  tag and a URI reference; at most two digits of latitude degrees, the
-  longitude ABNF as 7.0.18 corrected it); a file path is a WHATWG valid
-  URL string whose non-ASCII characters are URL code points. The pointer
-  rules between records are enforced: no `ALIA` to its own record, no
-  cycle of pointers between source and multimedia records or source and
-  shared note records (`DeviationKind::Cycle`, repaired as a plain
-  extension structure keeping its pointer: `RepairKind::Cycle`, by the
-  in-memory and the streaming writer alike). The repair writes a 7.x file
-  path that is no URL string percent-encoded (a local path as a `file`
-  URL) and a coordinate in its canonical form instead of making them
-  extensions. `GedzipWriter::add_media_file` takes a `FILE` payload and
-  stores the media under its decoded name, GEDZIP names not being
-  percent-escaped. GEDCOM 7.1 remains a draft target, generated from
-  FamilySearch's `v7.1` branch (`c451779`, its head).
+### Packaging
 
-- Producer profiles (`ged_io::profile`): 36 import profiles (`generic`,
-  `oxidged` for this crate's own exports, read as written, and 34
-  producers) and 25 export profiles (two generic, 23
-  importers), written as compile-checked data (`macro_rules!`), each rule
-  citing the row of the compatibility research it implements.
-  `Detection` scores the header (system identifier, name, version,
-  corporation, destination, character set, header extension tags) and
-  refines with a fingerprint of the extension tags the file uses; other
-  producers the tags point to are hints, whose unambiguous extension rules
-  apply. `interpret` rewrites a producer's conventions as the standard
-  says them without losing anything (`Interpretation::{None, Lossless,
-  BestEffort}`), keyed by producer, place and tag; `InterpretReport`
-  lists what was done, by rule and catalogue row. `Exporter` writes for an
-  importer (`ExportOptions` to leave out media, private records or change
-  dates on request) and returns an `ExportReport` of every fold, lossy or
-  not, and of the importer limits exceeded. `docs/extensions.md` documents
-  the extension tags declared in 7.x with oxidged's URIs.
-- `GedcomBuilder::interpretation` and `GedcomBuilder::profile`; reading
-  detects the producer, decodes `CHAR` as it means it and interprets its
-  conventions losslessly by default. `Dataset::producer` and
-  `Dataset::interpretation`; the writer interprets what only 7.x can say
-  when it converts such a dataset to 7.x.
-- Deferred report: `GedcomBuilder::build_from_bytes_with_report`,
+- The library is the crate `oxidged`; the command-line tool is the
+  package `oxidged-cli` (`cargo install oxidged-cli`), whose binary is
+  `oxidged` (ged_io's library package built the `ged_io` binary). The
+  repository is a workspace of both.
+- Features: `serde` (it was `json`; `serde_json` is no longer a
+  dependency), `gedzip`, `calendar`. None is on by default.
+- MSRV 1.88.
+- When the crate supplies `HEAD.SOUR` itself, it writes `oxidged`, its
+  version and `NAME oxidged`.
+
+### Reading
+
+- Reading never fails and keeps all data: CR, LF, CR LF, LF CR and mixed
+  terminators, blank lines, lines without a level, level jumps,
+  `CONT`/`CONC` anywhere, extension and unknown tags under any structure,
+  unknown records, repeated structures, identifiers on substructures,
+  unknown enumeration values and content after `TRLR` are read, every
+  line's data kept. What a type has no field for is kept in its `extra`,
+  in place, and written back. Repeated structures, `REFN` and `EXID` types,
+  every `PHRASE`, name pieces, contacts, notes, citations and the other
+  substructures 0.17 dropped or overwrote are kept; no `SURN` is derived
+  from a name.
+- `GedcomBuilder` returns a `Dataset`, takes `&self`, and reads from a
+  string, bytes, bytes in a given encoding, a reader or a GEDZIP archive
+  (`build_from_str`, `build_from_bytes`, `build_from_bytes_with_encoding`,
+  `build_from_reader`, `build_from_gedzip`); an owned `String` or UTF-8
+  `Vec<u8>` is kept as the dataset's text without a copy. Its options:
+  `strict` (refuse input that does not follow its specification, with
+  every deviation: `GedcomError::NonConformant`), `max_file_size`,
+  `interpretation` and `profile`. `ParserConfig` is gone.
+- Deferred report: `build_from_bytes_with_report`,
   `build_from_str_with_report` and `build_from_reader_with_report` return
   the dataset and a `ReadReport` (producer, encoding, every deviation from
   the specification, what was interpreted); the other methods say nothing.
-- `stream::Visitor` and `GedcomStreamParser::visit`: records by type, with
-  `ControlFlow` to stop.
-- `Credentials` (`WriterConfig::credentials`, `GedcomWriter::credentials`,
-  `ExportOptions::credentials`): whether the credentials a file holds are
-  written; see Changed.
-- `HeadSource` (`ExportOptions::source`): the system an export names in
-  `HEAD.SOUR`. By default (`Auto`) the program's, when it set the
-  dataset's `HEAD.SOUR` (the dataset was not read from a file, or the
-  program changed it), its `VERS`, `NAME` and `CORP` kept, with the crate
-  named beside it in `HEAD.SOUR._OXIDGED` (declared in a 7.x
-  `HEAD.SCHMA`); the crate's for a dataset read from a file, which the
-  producer of that file did not export (reported as a fold, as before).
-  `Library` and `Dataset` choose either always. The `oxidged` import
-  profile finds such exports by `_OXIDGED` too, and reading one back keeps
-  the program's `HEAD.SOUR` as the program's.
-- Encodings: Windows-1250, Windows-1251 and ISO-8859-2; the `CHAR` labels
-  `IBM`, `OEM` (code page 437) and `ISO8859` (Latin-1).
-- `ged-io --sanitize`, `--convert-encoding`, `--profile`, `--detect`,
-  `--list-profiles` and `--interpretation`.
-- Fuzz target `profiles`: any input read with any profile at any level, the
-  output conformant and idempotent in 5.5.1 and 7.0, and exported with
-  every export profile, conformant and idempotent.
-
-### Changed
-
-- Every writer leaves out the credentials a file may hold, unless asked
-  to write them (`Credentials::Written`): `_PASS`, and an `_USER` that is
-  encrypted (`_ENCR`) or a server login (under `_DBID`). The dataset keeps
-  them; an export reports them as a lossy fold.
-- A dataset keeps every structure but the header as a row of the table of
-  its type, its texts as 8-byte spans of the store and its pointers as
-  interned ids: reading allocates no structure on its own, and a dataset
-  takes about twice the size of its input (2.8 times before). Its
-  accessors give views: `View<'_, T>` (a `Copy` handle with a method per
-  field, detail fields included: `person.names()`, `event.date()`,
-  `person.refns()`), `Items<'_, T>` (a list: `len`, `get`, `first`,
-  `last`, iteration) and `TextRef` (a text that reads, compares with a
-  `&str` and prints without the store). `individuals()` and the other
-  accessors return `Items`; `find*`, `families_as_*`, `parents`,
-  `children`, `spouse`, `search_individuals` and `get` return views;
-  `RecordRef`'s variants are views (`HeaderRef` for the header);
-  `View::into_owned` and `RecordRef::into_owned` copy a structure out as its
-  owned type, which `add` and `push` store. `get_mut` lends a copy, stored
-  back as new rows when the loan ends (the rows it replaces are reclaimed
-  once they outnumber the others); a guard forgotten with `mem::forget`
-  changes nothing. `StreamedRecord` is a dataset of one record
-  (`dataset()`, `record()`, `into_parts()`), and
-  `GedcomStreamWriter::write_record` takes the record's view alone.
-- A dataset's records are read through accessors (`individuals()`,
-  `families()`, …, `extra()`, `header()`, `all::<T>()`) and changed
-  through its editing methods, which keep its references whole; its record
-  lists are no longer public fields.
-- Producer profiles run on the typed dataset: reading interprets a record
-  where it was read, in the reader's arena, and only a record a rule may
-  change; an export writes the dataset as it is, rewriting places and
-  citations as it writes them and looking at every structure written for
-  what another fold would change, and folds the whole dataset as drafts
-  only then. Each profile pipeline runs within about 1.5 times the
-  instructions of its plain pipeline (an export 1.5 times the write, 7
-  before; a 7.0 write of a PAF file 1.4 times the plain one, 5.3 before),
-  and peaks within its memory budget (an export at 4 times its input,
-  12 before). `tools/perf check` holds them to it.
-- `ThinVec` gains `remove`, `retain` and `retain_mut`.
-- A dataset whose identifiers are valid and unique is written without a
-  look at every record's identifier: its index vouches for them.
-- `GedcomBuilder` returns a `Dataset`, takes `&self` and has two options,
-  `strict` and `max_file_size`; `build_from_str` and `build_from_bytes`
-  keep an owned `String` or UTF-8 `Vec<u8>` as the dataset's text, without
-  a copy.
-- `GedcomStreamParser` yields `StreamedRecord`s, reads any encoding and line
-  terminator, and gives correct line numbers.
-- `GedcomError` is `#[non_exhaustive]`: `Io`, `FileTooLarge`,
-  `NonConformant`, `Gedzip`. `GedzipError` is `#[non_exhaustive]`: `Zip`,
-  `MissingGedcom`, `MissingMedia`, `EntryTooLarge`, `Io`, `Write`.
-- `GedcomWriter` writes a `Dataset`; its output is conformant to the target
-  version (lines, escapes, identifiers, header, structures, values) and
-  every repair is reported; `GedcomVersion` is an enum
-  (`V5_5_1`, `V7_0`, `V7_1`) with `VersionRules`.
-- `encoding::encode_to_bytes` is `encoding::encode`, failing with
+- Encodings, decoded by evidence (byte order mark, UTF-16 NUL pattern,
+  valid UTF-8, then `HEAD.CHAR`), in memory and streaming (`DecodeReader`),
+  never failing: UTF-8, UTF-16 LE/BE with or without BOM, ANSEL (composed to
+  Unicode NFC), ASCII, Windows-1250, Windows-1251, Windows-1252 (`ANSI`),
+  ISO-8859-1, ISO-8859-2, ISO-8859-15, IBM PC (cp437; also the labels
+  `IBM` and `OEM`), Macintosh; `ISO8859` is Latin-1.
+  `encoding::encode_to_bytes` is `encoding::encode`, failing with
   `EncodeError`.
-- The feature `json` is `serde`; `serde_json` is no longer a dependency.
-- The command-line binary is `ged-io` (it was `ged_io`, the library's name).
-- The JSON shape follows the new model.
-- MSRV 1.88.
+- `oxidged::tree`: a lossless tree of any file (`Tree`, `parse_tree`,
+  `TreeReader`, `Structure`, `Xref`, `Tag`), replacing the `tokenizer` and
+  `parser` modules.
+- `oxidged::value`: date, age and time grammars of GEDCOM 5.5.1 and 7.0,
+  lenient and strict, which never fail (wording they do not understand is
+  kept); conversions between versions (`Date::to_version`,
+  `Age::to_version`), `Date::normalize`; calendar arithmetic with the
+  `calendar` feature (Gregorian, Julian, Hebrew, French Republican: day
+  numbers, conversions, ordering, weekdays). A dual year converted to 7.x
+  takes the later year only from January to March and converts back to
+  the 5.5.1 date it came from. The grammars do not allocate to check a
+  value.
+- `GedcomError` is `#[non_exhaustive]`: `Io`, `FileTooLarge`,
+  `NonConformant`, `Gedzip`.
+- No panic or hang from any input (Hebrew dates, levels over 255, version
+  detection, …); every entry point is fuzzed.
 
-### Removed
+### Writing and conformance
 
-- The old model (`ged_io::types`, `GedcomData`, `UserDefinedTag`,
-  `HasEvents`), `Gedcom::new(…).parse_data()`, the `tokenizer` and `parser`
-  modules (`Tokenizer`, `StreamTokenizer`, `TokenizerTrait`, `StreamParser`,
-  `parse_subset`), `util`, the `Display` and `ImprovedDebug` impls,
-  `ParserConfig` (`strict_mode`, `validate_references`,
-  `ignore_unknown_tags`, `encoding_detection`, `date_validation`,
-  `preserve_formatting`), `GedcomData::stats`, `appears_to_be_v7`, and the
-  error variants `ParseError`, `InvalidFormat`, `EncodingError`,
-  `InvalidTag`, `UnexpectedLevel`, `MissingRequiredValue`,
-  `InvalidValueFormat`, `FileSizeLimitExceeded`, `IoError`.
-
-### Fixed
-
-- A web address (`https://…`) as a multimedia file path, written in 7.x,
-  has the characters a valid URL string does not permit (a space, `"`,
-  `<`, `>`, a second `#`, a `%` that starts no encoding, …)
-  percent-encoded, as local paths already had; its valid characters and
-  existing `%XX` encodings stay. It used to be left as it was, so the
-  repair made the `FILE` an extension and its `OBJE` record `_OBJE`.
-- Reading accepts CR, LF CR and mixed terminators, blank lines, lines
-  without a level, level jumps, `CONT`/`CONC` anywhere, extension tags under
-  any structure, unknown records, a second `HUSB`/`WIFE`, xrefs on
-  substructures, unknown enumeration values and content after `TRLR`,
-  keeping every line's data.
-- Repeated structures, `REFN` types, `EXID` types, every `PHRASE`, name
-  pieces, contacts, notes, citations and the other substructures 0.17
-  dropped or overwrote are kept; no `SURN` is derived from a name.
+- `GedcomWriter` writes a `Dataset` in its version or another (5.5.1, 7.0,
+  7.1), to any `io::Write` (`write`), a string (`write_to_string`,
+  `write_to_string_with_report`), a tree or structures (`write_tree`,
+  `write_structures`). The output is conformant to the target: line rules
+  (255 characters in 5.5.1, the whole line counted; `CONC` never splitting
+  before a combining mark; no `CONC` in 7.x), `@` escapes of each version,
+  valid and unique identifiers (never `@VOID@`), the header the version
+  requires, values in the target's grammar, terminated last line, no raw
+  control characters, no line break that injects a record.
+- Before the lines, structures are repaired for the target
+  (`spec::conform`): an enumeration value outside its set, text where a
+  pointer belongs, a value outside its grammar, a structure the version
+  does not permit or permits once, a missing required substructure, and
+  in 7.x an `ALIA` to its own record or a pointer closing a cycle of
+  source, multimedia and shared note records. Nothing is dropped: data
+  with no standard form becomes an extension structure, or 7.x
+  `OTHER`/`@VOID@` with a `PHRASE`. Every repair is reported
+  (`WriteReport`, `Repair`, `RepairKind`); `RepairPolicy::Error` makes the
+  writer fail instead.
 - Writing is idempotent: writing what was read back from written output
   gives the same bytes, in every version.
-- A 5.5.1 individual's `EVEN` keeps its descriptor as its payload (an
-  erratum of the specification's grammar line, p. 34 against p. 48).
-- The writer no longer writes `FORM`/`CHAR` in 7.0, `CONC` in 7.0, lines
-  over 255 characters in 5.5.1, lower-case 7.0 enumeration values, raw
-  control characters, duplicate or `@VOID@` record identifiers, text as
-  pointers, or a value whose line breaks inject records; the last line is
-  terminated.
-- The date, age and time grammars no longer allocate to check a value.
-- No panic or hang from any input (Hebrew dates, levels over 255, the
-  `Display` of notes, version detection).
-- A dual year converted to 7.x takes the later year only for a date from
-  January to March (`30 JAN 1648/49` is `30 JAN 1649`), keeps the year
-  written otherwise and before the common era, and converts back to the
-  5.5.1 date it came from.
-- A 5.5.1 note over 32K is split at line breaks into consecutive `NOTE`
-  records, so that every record it is moved out of fits.
-- GEDZIP: the dataset is always written as GEDCOM 7.x; `add_media_file`
-  refuses `gedcom.ged`, `META-INF/…` and `MANIFEST.MF`; directories are not
-  listed as media; `find_entry` prefers an exact, then a case-sensitive
-  decoded name.
+- Options: `OutputEncoding` (5.5.1 in UTF-8, UTF-16 LE, ANSEL or ASCII,
+  with a matching `CHAR`), `LineEnding`, `Bom`, `max_line_length`,
+  `Credentials` (the credentials a file may hold, `_PASS` and an encrypted
+  or server-login `_USER`, are left out unless asked for; the dataset keeps
+  them).
+- 5.5.1 file formats (`FILE.FORM`) are an open list, by decision: any word
+  is accepted and written as given, a media type is written as its file
+  format, a missing `FORM` is derived from the file's extension. 7.x keeps
+  media types.
+- `oxidged::spec`: the GEDCOM 5.5.1, 7.0 (release 7.0.18) and 7.1 (draft)
+  specification tables, generated and checked in; a validator
+  (`validate`, `validate_text`, `validate_bytes`: every deviation with its
+  line, `Deviation`, `DeviationKind`) and the conformance repair. The
+  GEDCOM 7.0.17 and 7.0.18 changes are implemented: the `URI`, `TagDef`,
+  `Latitude` and `Longitude` data types, file paths as URL strings, the
+  pointer rules between records.
+
+### Model and editing
+
+- `oxidged::model`: a type for every structure of GEDCOM 5.5.1, 7.0 and 7.1
+  (`Dataset`, `Header`, `Individual`, `Family`, `Source`, `Repository`,
+  `Multimedia`, `Submitter`, `Submission`, `SharedNote`, `Event`, `Name`,
+  `ChildLink`, `SpouseLink`, `Association`, `Citation`, `Note`, `Place`,
+  `Date`, `Age`, `Ordinance`, …), replacing `types`, `GedcomData`,
+  `UserDefinedTag` and `HasEvents`. Enumerations keep unknown values
+  (`Unknown(Text)`) and 7.x `PHRASE`s; values the crate returns are
+  `#[non_exhaustive]`.
+- A dataset keeps its decoded input once and every structure as a row of
+  the table of its type, texts as spans of the input (`Text`, `Store`),
+  identifiers and pointers interned (`XrefId`). Its accessors give views:
+  `View<'_, T>` (a `Copy` handle with a method per field), `Items<'_, T>`
+  (a list) and `TextRef` (a text that reads and compares without the
+  store); `RecordRef` is a view of any record; `into_owned` copies a
+  structure out as its owned type.
+- Lookups (`find`, `find_individual`, `find_family`, … by text or
+  `XrefId`) in constant time; navigation (`families_as_spouse`,
+  `families_as_child`, `parents`, `children`, `spouse`,
+  `search_individuals`); `dangling_references`. `IndexedDataset` finds the
+  families of individuals in constant time; `data_mut` reindexes.
+- Referential integrity and editing: `Handle<T>` and `RecordHandle`,
+  valid across every edit until their record is removed; `add` (refuses a
+  duplicate identifier and pointers to no record, gives a record without
+  identifier a free one), `push` (unchecked, as reading), `remove` with
+  `Removal` (`Refuse`, `Detach`, `LeaveDangling`), `rename`, `redirect`,
+  `detach`; `link`/`unlink` of every kind of pointer (`Link`),
+  `link_child`/`link_spouse` and their unlinks both ways; `get_mut`,
+  `get_mut_at`, `header_mut` and `edit_all` lend records (`RecordMut`)
+  whose pointers are counted again when the loan ends; `references`,
+  `referrers`; `EditError`. The counts and handles are built the first
+  time they are asked for: reading and writing never pay for them.
+- `serde` feature: `Serialize` and `Deserialize` for `Dataset` (texts and
+  identifiers as strings, nesting bounded so any dataset reads back within
+  `serde_json`'s limit), `Serialize` for `StreamedRecord`; the JSON shape
+  follows the new model.
+- Removed with the old model: `Gedcom::new(…).parse_data()`, `util`, the
+  `Display` and `ImprovedDebug` impls, `GedcomData::stats`,
+  `appears_to_be_v7`.
+
+### Conversion between GEDCOM 5.5.1 and 7.x
+
+- `oxidged::convert` (`convert_dataset`, `convert_structures`,
+  `ConversionOptions`), run by the writer when the target is of the other
+  family, as the FamilySearch migration guide says: multimedia links
+  holding files and source citations in words become records; `NOTE`
+  records `SNOTE`; `ASSO.RELA` the `ROLE` it names with a `PHRASE`;
+  `FONE`/`ROMN` `TRAN` with a language; language names BCP 47 tags; file
+  formats media types and file paths URIs (percent-encoded); `RIN`, `AFN`,
+  `RFN` and `_FSFTID` `EXID`s of the registered types; escapes in text
+  calendar names; `AGE STILLBORN` a death at `0y`; `SUBN`, `HEAD.FILE`,
+  `HEAD.CHAR` and `GEDC.FORM` left out; a 5.5.1 record named `@VOID@`
+  renamed with its pointers; extension tags of known meaning declared in
+  `HEAD.SCHMA`. Each is reversed when converting to 5.5.1.
+  `keep_obsolete` keeps what 7.x drops as declared extensions, restored in
+  5.5.1.
+- A 5.5.1 note over 32K is split at line breaks into consecutive records,
+  so that every record it is moved out of fits.
+
+### GEDZIP
+
+- `gedzip` feature: `GedzipReader` (`read_dataset` through the builder's
+  limits and strict mode, `media_files`, `read_media_file`, `find_entry`,
+  `max_entry_size`), `GedzipWriter`, `read_gedzip`, `write_gedzip`,
+  `write_gedzip_with_media`. An archive holds GEDCOM 7.x: a 5.5.1 dataset
+  is converted to 7.0. `add_media_file` refuses the names GEDZIP reserves
+  (`GedzipError::ReservedName`) and stores a `FILE` payload under its
+  decoded name; directories are not listed as media; `find_entry`
+  prefers an exact, then a decoded name. `GedzipError` is
+  `#[non_exhaustive]`.
+
+### Producer profiles
+
+- `oxidged::profile`: 36 import profiles (`generic`, `oxidged` for this
+  crate's own output, read as written, and 34 producers) and 25 export
+  profiles (two generic, 23 importers), written as compile-checked data,
+  each rule citing the row of the compatibility research it implements.
+- Reading detects the producer (`Detection`: the header scored, refined by
+  a fingerprint of the extension tags used), decodes `CHAR` as the
+  producer means it, and interprets its conventions without loss by
+  default (`Interpretation::{None, Lossless, BestEffort}`), keyed by
+  producer, place and tag; `InterpretReport` lists what was done.
+  `Dataset::producer`, `Dataset::interpretation`.
+- `Exporter` writes for an importer, always conformant (`ExportOptions`:
+  media, private records, change dates, credentials, `HeadSource`), and
+  returns an `ExportReport` of every fold, lossy or not, and of the
+  importer limits exceeded. An export names the program that wrote the
+  data in `HEAD.SOUR` when the program set it, with the crate beside it in
+  `HEAD.SOUR._OXIDGED`; the crate for a dataset read from a file.
+- Extension tags a profile keeps are declared in a 7.x `HEAD.SCHMA` with
+  their registered URI or the one oxidged documents in
+  [`docs/extensions.md`](docs/extensions.md).
+- The `oxidged` profile recognises the crate's output by `HEAD.SOUR
+  oxidged`, `HEAD.SOUR ged_io` (written by pre-release builds) or the
+  `_OXIDGED` marker.
+
+### Streaming
+
+- `GedcomStreamParser` yields `StreamedRecord`s (a dataset of one record:
+  `record()`, `dataset()`, `into_parts()`), reads any encoding and line
+  terminator the in-memory reader reads, decoding on the fly, gives correct
+  line numbers and stays in memory bounded by the largest record;
+  `nodes()` yields lossless structures; `Dataset` collects and extends
+  from streamed records.
+- `stream::Visitor` and `GedcomStreamParser::visit`: records by type,
+  `ControlFlow` to stop, the rest left unread.
+- `GedcomStreamWriter`: a header, then records one at a time, then the
+  trailer, with the conformance repair, conversion and line rules of
+  `GedcomWriter`, in memory bounded by one record and the identifiers
+  written; its documentation lists where it differs from writing the whole
+  dataset.
+
+### Performance
+
+- Reading is 1.5 to 3 times as fast as ged_io 0.17 and writing up to 4
+  times, measured with `tools/differential` (README, Performance).
+- A dataset takes about twice the size of its input (ged_io 0.17: about
+  23 times on an 82 MB file); reading makes a few hundred allocations,
+  not one or more per structure. Streaming reads in a few megabytes, any
+  encoding.
+- The specification tables and indexes are built at compile time; a
+  dataset whose identifiers are valid and unique is written without a
+  look at every record's identifier.
+- Producer profiles cost about 1.5 times the instructions of the plain
+  pipeline at most (an export 1.5 times the write, a 7.0 write of a PAF
+  file 1.4 times the plain one), within their memory budgets.
+
+### Tooling
+
+- A conformance suite (`tests/conformance`): vendored, written and
+  generated cases for 5.5.1, 7.0 and 7.1, with a known-gaps ratchet and
+  opt-in corpora (`tools/fetch-corpora.sh`, pinned by commit and SHA-256).
+- Fuzz targets (`fuzz/`, `cargo fuzz`) over every entry point, the
+  decoder and lexer, the writer, the validator and repair, the typed
+  model, the conversion, edit sequences and the producer profiles.
+- `tools/perf`: time, throughput and peak memory of every pipeline, with
+  the limits the CI checks (`tools/perf check`); `tools/differential`:
+  what this crate and the published ged_io 0.17.0 keep of the same files,
+  and their speed; `tools/spec-tables`: the generator of the
+  specification tables.
+- CI: tests on stable, beta and nightly, MSRV, each feature alone, Linux,
+  Windows and macOS, peak memory and throughput, security audit; nightly
+  fuzzing and corpora.
+- Command line (`oxidged`): a summary of a file, one individual,
+  individuals by name, `--validate` (lenient or strict), `--write <5.5.1|7.0|7.1>`
+  (`--keep-obsolete`), `--sanitize`, `--convert-encoding`, `--profile`,
+  `--detect`, `--list-profiles`, `--interpretation`.
+
+[0.1.0]: https://github.com/trois-six/oxidged/releases/tag/v0.1.0

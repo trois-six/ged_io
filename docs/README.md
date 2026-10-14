@@ -21,6 +21,9 @@
   corrected its longitude ABNF. GEDCOM 7.1 is not released: the crate
   follows FamilySearch's `v7.1` branch as a draft.
 - `ged551.pdf`: GEDCOM 5.5.1 (2019-11-15 release of the 1999 draft).
+- `gedcom-7.md`: the differences between GEDCOM 5.5.1 and 7.0, and how
+  oxidged reads and writes each (its examples are compiled and run as
+  documentation tests).
 - `extensions.md`: the producers' extension tags oxidged keeps and declares
   in GEDCOM 7.x headers, one anchor (the URI's fragment) per producer and
   tag; generated from the profiles (`tests/profiles.rs`).
