@@ -237,10 +237,10 @@ fingerprint, since files pass through several programs), then:
 Extension tags a profile knows and keeps are declared in a 7.x
 `HEAD.SCHMA`: with their registered URI when there is one, else with the
 URI oxidged publishes for them in [`docs/extensions.md`](docs/extensions.md).
-With `Interpretation::None`, reading costs nothing more than before; with
-the default, a file that holds none of the tags its producer's rules read
-costs nothing more either, and one whose conventions are rewritten is read
-twice over (see [Performance](#performance)).
+The file is read once either way: a record no rule may change is typed
+as it is read, one a rule changes is interpreted as it is read and typed
+from what the rules made of it, its texts still those of the input (see
+[Performance](#performance)).
 
 **Writing.** `profile::Exporter` writes a dataset for an importer: always
 conformant GEDCOM, its version, character set, line layout and limits
@@ -804,9 +804,12 @@ variants of them, wall time relative to reading without interpretation
 | Write as 7.0 a PAF file with an `_UID` in every individual (`UID` once converted) | 18× the plain write | 10.5× |
 | Export for Geneanet (27 folds) | 25× the plain write | 15× |
 
-A file a rule changes is lexed again as a tree, interpreted and typed again:
-for a large file that a producer's conventions fill, `Interpretation::None`
-reads in the time and memory of the table above's first line.
+Reading interprets each record a rule may change as it reads it, and only
+those: the others are typed as they are read, the records changed are typed
+where they stand from what the rules made of them, their texts left in the
+input (only the texts a rule writes are kept besides). A change that spans
+records (a pedigree said in a family, read where the child is) is made
+once every record is read, to the records it concerns only.
 
 A dataset keeps the decoded input once and every structure as a row of
 the table of its type, pointing into it: the rows take about two thirds

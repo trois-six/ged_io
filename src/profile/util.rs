@@ -1,76 +1,81 @@
 //! Small helpers over owned structures, shared by interpretation and
 //! export.
 
-use crate::tree::{Payload, Structure, Tag, Xref};
+use std::borrow::Cow;
 
-/// A structure with a text payload.
-pub(crate) fn text_node(tag: &str, text: &str) -> Structure {
-    Structure {
-        tag: Tag::new(tag),
+use super::draft::{Draft, DraftTag, Value};
+use crate::tree::Xref;
+
+/// A structure with a text payload (none when empty), the text copied.
+pub(crate) fn text_node<'s>(tag: &'static str, text: &str) -> Draft<'s> {
+    Draft {
+        tag: DraftTag::new(tag),
         payload: if text.is_empty() {
-            Payload::None
+            Value::None
         } else {
-            Payload::Text(text.into())
+            Value::Text(Cow::Owned(text.to_string()))
         },
-        ..Structure::default()
+        ..Draft::default()
     }
 }
 
 /// A structure with a pointer payload.
-pub(crate) fn pointer_node(tag: &str, xref: &Xref) -> Structure {
-    Structure {
-        tag: Tag::new(tag),
-        payload: Payload::Pointer(xref.clone()),
-        ..Structure::default()
+pub(crate) fn pointer_node<'s>(tag: &'static str, xref: &str) -> Draft<'s> {
+    Draft {
+        tag: DraftTag::new(tag),
+        payload: Value::Pointer(Cow::Owned(xref.to_string())),
+        ..Draft::default()
     }
 }
 
 /// Whether `s` has tag `tag`.
-pub(crate) fn is(s: &Structure, tag: &str) -> bool {
+#[inline]
+pub(crate) fn is(s: &Draft<'_>, tag: &str) -> bool {
     s.tag.as_str() == tag
 }
 
 /// The first substructure tagged `tag`.
-pub(crate) fn child<'a>(s: &'a Structure, tag: &str) -> Option<&'a Structure> {
+pub(crate) fn child<'a, 's>(s: &'a Draft<'s>, tag: &str) -> Option<&'a Draft<'s>> {
     s.substructures.iter().find(|c| is(c, tag))
 }
 
 /// The first substructure tagged `tag`, to change.
-pub(crate) fn child_mut<'a>(s: &'a mut Structure, tag: &str) -> Option<&'a mut Structure> {
+pub(crate) fn child_mut<'a, 's>(s: &'a mut Draft<'s>, tag: &str) -> Option<&'a mut Draft<'s>> {
     s.substructures.iter_mut().find(|c| is(c, tag))
 }
 
 /// The text of the first substructure tagged `tag`.
-pub(crate) fn child_text<'a>(s: &'a Structure, tag: &str) -> Option<&'a str> {
-    child(s, tag).and_then(Structure::text)
+pub(crate) fn child_text<'a>(s: &'a Draft<'_>, tag: &str) -> Option<&'a str> {
+    child(s, tag).and_then(Draft::text)
 }
 
 /// Whether `s` has a substructure tagged `tag`.
-pub(crate) fn has(s: &Structure, tag: &str) -> bool {
+pub(crate) fn has(s: &Draft<'_>, tag: &str) -> bool {
     child(s, tag).is_some()
 }
 
 /// Gives `s` another tag.
-pub(crate) fn retag(s: &mut Structure, tag: &str) {
-    s.tag = Tag::new(tag);
+pub(crate) fn retag(s: &mut Draft<'_>, tag: &'static str) {
+    s.tag = DraftTag::new(tag);
 }
 
-/// Sets the text payload of `s` (none when empty).
-pub(crate) fn set_text(s: &mut Structure, text: &str) {
+/// Sets the text payload of `s` (none when empty), the text copied.
+pub(crate) fn set_text(s: &mut Draft<'_>, text: &str) {
     s.payload = if text.is_empty() {
-        Payload::None
+        Value::None
     } else {
-        Payload::Text(text.into())
+        Value::Text(Cow::Owned(text.to_string()))
     };
 }
 
 /// The payload of `s` as text: its text, or its pointer.
-pub(crate) fn payload_str(s: &Structure) -> &str {
+#[inline]
+pub(crate) fn payload_str<'a>(s: &'a Draft<'_>) -> &'a str {
     s.payload.as_str().unwrap_or_default()
 }
 
 /// Whether `s` says yes: `Y`, `YES`, `1`, `TRUE` (any case).
-pub(crate) fn is_yes(s: &Structure) -> bool {
+pub(crate) fn is_yes(s: &Draft<'_>) -> bool {
     matches!(
         payload_str(s).trim().to_ascii_uppercase().as_str(),
         "Y" | "YES" | "1" | "TRUE" | "J" | "JA" | "O" | "OUI"
@@ -114,7 +119,7 @@ pub(crate) fn name_value(given: &str, surname: &str, suffix: &str) -> String {
 
 /// Inserts `new` into `parent` at `at`, unless a substructure equal to it
 /// is already there: whether it was inserted.
-pub(crate) fn insert_new(parent: &mut Structure, at: usize, new: Structure) -> bool {
+pub(crate) fn insert_new<'s>(parent: &mut Draft<'s>, at: usize, new: Draft<'s>) -> bool {
     if parent.substructures.contains(&new) {
         return false;
     }
@@ -124,7 +129,7 @@ pub(crate) fn insert_new(parent: &mut Structure, at: usize, new: Structure) -> b
 }
 
 /// Pushes `new` into `parent` unless an equal substructure is there.
-pub(crate) fn push_new(parent: &mut Structure, new: Structure) -> bool {
+pub(crate) fn push_new<'s>(parent: &mut Draft<'s>, new: Draft<'s>) -> bool {
     let at = parent.substructures.len();
     insert_new(parent, at, new)
 }

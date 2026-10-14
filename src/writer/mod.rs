@@ -618,7 +618,11 @@ impl GedcomWriter {
         let mut plain = self.clone().output_encoding(OutputEncoding::Utf8);
         plain.config.bom = Bom::Never;
         let (text, report) = plain.write_to_string_plain(data).ok()?;
-        let mut records = Tree::parse(text).to_structures();
+        let tree = Tree::parse(text);
+        let mut records: Vec<crate::profile::draft::Draft<'_>> = tree
+            .records()
+            .map(crate::profile::draft::Draft::of_ref)
+            .collect();
         let interpreted = crate::profile::interpret::interpret_with(&mut records, to, &rules);
         if !interpreted.changed() {
             return None;
@@ -1152,6 +1156,20 @@ pub(crate) fn drop_credentials(s: &mut Structure) -> usize {
     let mut dropped = before - s.substructures.len();
     for c in &mut s.substructures {
         dropped += drop_credentials(c);
+    }
+    dropped
+}
+
+/// [`drop_credentials`] of a draft ([`crate::profile`]).
+pub(crate) fn drop_draft_credentials(s: &mut crate::profile::draft::Draft<'_>) -> usize {
+    let login = s.tag == "_DBID";
+    let before = s.substructures.len();
+    s.substructures.retain(|c| {
+        !(c.tag == "_PASS" || (c.tag == "_USER" && (login || c.first("_ENCR").is_some())))
+    });
+    let mut dropped = before - s.substructures.len();
+    for c in &mut s.substructures {
+        dropped += drop_draft_credentials(c);
     }
     dropped
 }

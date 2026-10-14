@@ -27,11 +27,14 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::hash::BuildHasherDefault;
 
-use crate::tree::{Payload, Structure, Tag, TagHasher, Xref};
+use std::borrow::Cow;
+
+use crate::tree::{standard_index, PayloadRef, Structure, Tag, TagHasher, Xref, STANDARD_TAGS};
 use crate::value::DateValue;
 use crate::GedcomVersion;
 
 use super::detect::{Detection, Gate};
+use super::draft::{Draft, DraftTag, Value};
 use super::util::{
     child, child_mut, child_text, fresh_xref, given_part, has, insert_new, is, is_yes, long_form,
     name_value, payload_str, pointer_node, push_new, retag, set_text, suffix_part, surname_part,
@@ -92,7 +95,7 @@ pub(crate) enum NameKind {
 }
 
 impl NameKind {
-    fn type_node(self, v7: bool) -> Structure {
+    fn type_node<'s>(self, v7: bool) -> Draft<'s> {
         let (v7_word, v551) = match self {
             NameKind::Aka => ("AKA", "aka"),
             NameKind::Birth => ("BIRTH", "birth"),
@@ -448,6 +451,10 @@ impl InterpretReport {
     }
 }
 
+/// The pointer a link to a record that interpretation adds holds until
+/// the record is placed and named.
+pub(crate) const PLACEHOLDER: &str = "@\u{0}@";
+
 /// Tags whose meaning depends on the producer: never interpreted from a
 /// hint (REPORT §3, §6.2).
 const AMBIGUOUS: &[&str] = &[
@@ -459,13 +466,88 @@ const AMBIGUOUS: &[&str] = &[
 struct Applied {
     profile: &'static Profile,
     rule: &'static Rule,
+    /// Its context, parsed ([`RuleSet::contexts`]).
+    ctx: u16,
 }
 
 /// The rules that may apply to a file, by tag.
 pub(crate) struct RuleSet {
     by_tag: HashMap<&'static str, Vec<Applied>, BuildHasherDefault<TagHasher>>,
+    /// The rules of [`RuleSet::by_tag`] on standard tags, by the tag's
+    /// index among them: found without hashing the tag.
+    by_standard: Box<[Vec<Applied>]>,
     /// Rules on any tag (long forms, `_SCHEMA` facts).
     any: Vec<Applied>,
+    /// Those of [`RuleSet::any`] that may apply to a standard tag (not the
+    /// long forms, nor the tags in another case).
+    any_standard: Vec<Applied>,
+    /// The rules' contexts, parsed.
+    contexts: Vec<Context>,
+}
+
+/// A rule's context ([`Rule::ctx`]), parsed: alternatives of segments.
+#[derive(Debug)]
+struct Context(Box<[Box<[Segment]>]>);
+
+/// A segment of a [`Context`].
+#[derive(Debug)]
+enum Segment {
+    /// `*`: one tag.
+    One,
+    /// `**`: any number of tags.
+    Any,
+    /// `A|B`: one of these tags.
+    Tags(Box<[&'static str]>),
+}
+
+impl Context {
+    fn parse(ctx: &'static str) -> Self {
+        Self(
+            ctx.split(',')
+                .map(|alt| {
+                    if alt.is_empty() {
+                        return Box::default();
+                    }
+                    alt.split('.')
+                        .map(|seg| match seg {
+                            "*" => Segment::One,
+                            "**" => Segment::Any,
+                            tags => Segment::Tags(tags.split('|').collect()),
+                        })
+                        .collect()
+                })
+                .collect(),
+        )
+    }
+
+    /// Whether the tags `path` (from the record down) are in the context.
+    #[cfg(test)]
+    fn matches<T: AsRef<str>>(&self, path: &[T]) -> bool {
+        Self::matches_in(&self.0, path)
+    }
+
+    /// Whether the tags `path` are in the context of alternatives `alts`.
+    fn matches_in<T: AsRef<str>>(alts: &[Box<[Segment]>], path: &[T]) -> bool {
+        fn go<T: AsRef<str>>(segments: &[Segment], path: &[T]) -> bool {
+            match segments.split_first() {
+                None => path.is_empty(),
+                Some((Segment::Any, rest)) => {
+                    (0..=path.len()).any(|k| go(rest, path.get(k..).unwrap_or(&[])))
+                }
+                Some((seg, rest)) => match path.split_first() {
+                    None => false,
+                    Some((tag, tail)) => {
+                        let fits = match seg {
+                            Segment::Tags(tags) => tags.contains(&tag.as_ref()),
+                            _ => true,
+                        };
+                        fits && go(rest, tail)
+                    }
+                },
+            }
+        }
+        alts.iter().any(|alt| go(alt, path))
+    }
 }
 
 impl RuleSet {
@@ -474,7 +556,10 @@ impl RuleSet {
     pub(crate) fn of(detection: &Detection, level: Interpretation) -> Self {
         let mut set = RuleSet {
             by_tag: HashMap::default(),
+            by_standard: Box::default(),
             any: Vec::new(),
+            any_standard: Vec::new(),
+            contexts: Vec::new(),
         };
         if level == Interpretation::None {
             return set;
@@ -496,7 +581,9 @@ impl RuleSet {
                 if !rule.gate.open(detection) {
                     continue;
                 }
-                let applied = Applied { profile, rule };
+                let ctx = u16::try_from(set.contexts.len()).unwrap_or(u16::MAX);
+                set.contexts.push(Context::parse(rule.ctx));
+                let applied = Applied { profile, rule, ctx };
                 if rule.tag == "*" {
                     set.any.push(applied);
                 } else {
@@ -520,6 +607,21 @@ impl RuleSet {
         for &hint in detection.hints() {
             add(hint, true);
         }
+        let mut by_standard = vec![Vec::new(); STANDARD_TAGS.len()];
+        for (tag, rules) in &set.by_tag {
+            if let Some(slot) =
+                standard_index(tag).and_then(|i| by_standard.get_mut(usize::from(i)))
+            {
+                slot.clone_from(rules);
+            }
+        }
+        set.by_standard = by_standard.into_boxed_slice();
+        set.any_standard = set
+            .any
+            .iter()
+            .filter(|a| !matches!(a.rule.op, Op::LongForm | Op::CaseFold))
+            .copied()
+            .collect();
         set
     }
 
@@ -592,14 +694,132 @@ impl RuleSet {
     }
 
     /// The rules for `tag` under `path`, in order of precedence.
-    fn candidates<'s>(&'s self, tag: &str, path: &'s [Tag]) -> impl Iterator<Item = Applied> + 's {
-        self.by_tag
-            .get(tag)
-            .into_iter()
-            .flatten()
+    fn candidates<'a, T: AsRef<str>>(
+        &'a self,
+        tag: &str,
+        path: &'a [T],
+    ) -> impl Iterator<Item = Applied> + use<'a, T> {
+        self.rules_of(tag, standard_index(tag))
+            .iter()
             .chain(&self.any)
-            .filter(move |a| ctx_matches(a.rule.ctx, path))
+            .filter(move |a| Context::matches_in(self.context(a), path))
             .copied()
+    }
+
+    /// The rules on `tag` (whose index among the standard tags is
+    /// `standard`), the rules on any tag aside.
+    #[inline]
+    fn rules_of(&self, tag: &str, standard: Option<u16>) -> &[Applied] {
+        match standard {
+            Some(i) => self
+                .by_standard
+                .get(usize::from(i))
+                .map_or(&[], Vec::as_slice),
+            None => self.by_tag.get(tag).map_or(&[], Vec::as_slice),
+        }
+    }
+
+    #[inline]
+    fn context(&self, a: &Applied) -> &[Box<[Segment]>] {
+        self.contexts.get(usize::from(a.ctx)).map_or(&[], |c| &c.0)
+    }
+
+    /// Whether a rule may change a structure tagged `tag` (of index
+    /// `standard` among the standard tags) under the tags `path` (from the
+    /// record down), with `payload` and an identifier when `has_xref`: what
+    /// the record's interpretation would find, found without copying it.
+    /// Documented extensions, which are only kept, count only with
+    /// `known`.
+    #[allow(clippy::too_many_arguments)] // The parts of a node of any form.
+    pub(crate) fn may_rewrite<'p, T: AsRef<str>>(
+        &self,
+        tag: &str,
+        standard: Option<u16>,
+        path: &[T],
+        payload: impl Fn() -> PayloadRef<'p>,
+        has_xref: bool,
+        v7: bool,
+        known: bool,
+    ) -> bool {
+        let rules = self.rules_of(tag, standard);
+        // A standard tag is no long form, nor in another case.
+        let any = if standard.is_some() {
+            &self.any_standard
+        } else {
+            &self.any
+        };
+        if rules.is_empty() && any.is_empty() {
+            return false;
+        }
+        rules.iter().chain(any).any(|a| {
+            let op = a.rule.op;
+            // What only 7.x says, 5.5.1 leaves as it is (but a
+            // `FamilySearch` identifier, which is written `_FSFTID`).
+            let inert = op.v7_only()
+                && !v7
+                && !matches!(op, Op::Exid { uri, .. } if uri == super::FAMILYSEARCH_PERSON);
+            !inert
+                && (known || !matches!(op, Op::Known))
+                && Context::matches_in(self.context(a), path)
+                && op.may_apply_to_parts(tag, payload(), has_xref, path.is_empty(), v7)
+        })
+    }
+
+    /// Whether some rule may read a structure tagged `tag` (of index
+    /// `standard` among the standard tags), wherever it is: what
+    /// [`RuleSet::may_rewrite`] looks at further.
+    /// `record`: of a record, else of a substructure.
+    pub(crate) fn reads(
+        &self,
+        tag: &str,
+        standard: Option<u16>,
+        record: bool,
+        v7: bool,
+        known: bool,
+    ) -> bool {
+        let any = if standard.is_some() {
+            &self.any_standard
+        } else {
+            &self.any
+        };
+        self.rules_of(tag, standard).iter().chain(any).any(|a| {
+            let op = a.rule.op;
+            let inert = op.v7_only()
+                && !v7
+                && !matches!(op, Op::Exid { uri, .. } if uri == super::FAMILYSEARCH_PERSON);
+            let alts = self.context(a);
+            let placed = if record {
+                Context::matches_in::<&str>(alts, &[])
+            } else {
+                alts.iter().any(|alt| !alt.is_empty())
+            };
+            placed && !inert && (known || !matches!(op, Op::Known))
+        })
+    }
+
+    /// Whether some rule changes records other than the one it reads
+    /// (pedigrees, families' order, witnesses, adoptions).
+    pub(crate) fn spans_records(&self) -> bool {
+        self.by_tag.values().flatten().chain(&self.any).any(|a| {
+            matches!(
+                a.rule.op,
+                Op::Pedigree | Op::PreferFamily | Op::FamilyWitness | Op::Adoption
+            )
+        })
+    }
+
+    /// Whether some rule reads Family Tree Maker's `HEAD._SCHEMA` labels.
+    pub(crate) fn reads_schema(&self) -> bool {
+        self.by_tag.values().flatten().chain(&self.any).any(|a| {
+            matches!(
+                a.rule.op,
+                Op::SchemaFact
+                    | Op::Event {
+                        label: Label::Schema,
+                        ..
+                    }
+            )
+        })
     }
 }
 
@@ -640,20 +860,35 @@ fn lines_of<'a>(input: &'a str, tag: &'a str) -> impl Iterator<Item = &'a str> +
 impl Op {
     /// Whether the op may change `node` (under `path`): false only when it
     /// surely leaves it as it is, as the op itself would find.
-    fn may_apply_to(self, node: &Structure, path: &[Tag], v7: bool) -> bool {
+    fn may_apply_to(self, node: &Draft<'_>, path: &[DraftTag<'_>], v7: bool) -> bool {
+        self.may_apply_to_parts(
+            node.tag.as_str(),
+            node.payload.borrowed(),
+            node.xref.is_some(),
+            path.is_empty(),
+            v7,
+        )
+    }
+
+    /// [`Op::may_apply_to`] of a structure tagged `tag` with `payload`
+    /// and an identifier when `has_xref`, a record when `record`.
+    #[inline]
+    fn may_apply_to_parts(
+        self,
+        tag: &str,
+        payload: PayloadRef<'_>,
+        has_xref: bool,
+        record: bool,
+        v7: bool,
+    ) -> bool {
         match self {
-            Op::LongForm => long_form(node.tag.as_str()).is_some(),
+            Op::LongForm => long_form(tag).is_some(),
             Op::CaseFold => {
-                let tag = node.tag.as_str();
                 tag.bytes().any(|b| b.is_ascii_lowercase())
                     && Tag::new(&tag.to_ascii_uppercase()).is_standard()
             }
-            Op::RecordXref => {
-                matches!(node.payload, Payload::Pointer(_))
-                    && node.xref.is_none()
-                    && path.is_empty()
-            }
-            op => op.may_change(payload_str(node), v7),
+            Op::RecordXref => matches!(payload, PayloadRef::Pointer(_)) && !has_xref && record,
+            op => op.may_change(payload.as_str().unwrap_or_default(), v7),
         }
     }
 
@@ -695,34 +930,6 @@ impl Op {
     }
 }
 
-/// Whether context `ctx` matches the tags `path`: alternatives are
-/// separated by `,`, segments by `.`; a segment is `*` (one tag), `**` (any
-/// number) or tags separated by `|`.
-fn ctx_matches(ctx: &str, path: &[Tag]) -> bool {
-    fn go<'s>(mut segments: impl Iterator<Item = &'s str> + Clone, path: &[Tag]) -> bool {
-        match segments.next() {
-            None => path.is_empty(),
-            Some("**") => {
-                (0..=path.len()).any(|k| go(segments.clone(), path.get(k..).unwrap_or(&[])))
-            }
-            Some(seg) => match path.split_first() {
-                None => false,
-                Some((tag, tail)) => {
-                    (seg == "*" || seg.split('|').any(|alt| alt == tag.as_str()))
-                        && go(segments, tail)
-                }
-            },
-        }
-    }
-    ctx.split(',').any(|alt| {
-        if alt.is_empty() {
-            path.is_empty()
-        } else {
-            go(alt.split('.'), path)
-        }
-    })
-}
-
 /// Interprets records (header, records and trailer, as
 /// [`Tree::to_structures`](crate::tree::Tree::to_structures) gives them) in
 /// `version` with the rules `detection` and `level` select, and reports
@@ -734,11 +941,16 @@ pub fn interpret(
     level: Interpretation,
 ) -> InterpretReport {
     let rules = RuleSet::of(detection, level);
-    interpret_with(records, version, &rules)
+    let mut drafts: Vec<Draft<'_>> = records.iter().map(Draft::of_structure).collect();
+    let report = interpret_with(&mut drafts, version, &rules);
+    let interpreted: Vec<Structure> = drafts.iter().map(Draft::to_structure).collect();
+    drop(drafts);
+    *records = interpreted;
+    report
 }
 
 pub(crate) fn interpret_with(
-    records: &mut Vec<Structure>,
+    records: &mut Vec<Draft<'_>>,
     version: GedcomVersion,
     rules: &RuleSet,
 ) -> InterpretReport {
@@ -752,27 +964,200 @@ pub(crate) fn interpret_with(
         schema: schema_labels(records),
         peers: Vec::new(),
         settled: false,
+        defined: None,
+        promoted: false,
     };
     if rules.is_empty() {
         return cx.report;
     }
-    let mut root = Structure {
+    let mut root = Draft {
         substructures: std::mem::take(records),
-        ..Structure::default()
+        ..Draft::default()
     };
     let mut path = Vec::new();
     walk(&mut root, &mut path, &mut cx, true);
     *records = root.substructures;
     let deferred = std::mem::take(&mut cx.deferred);
-    apply_deferred(records, deferred, &mut cx);
+    apply_deferred(records, deferred, &mut cx.report, cx.v7, None);
     if cx.v7 && declare(records, &cx.declare) {
         cx.report.changed = true;
     }
     cx.report
 }
 
+/// Interpretation of a file one record at a time, as it is read: what
+/// goes from one record to the next (the report, the changes that span
+/// records, the extensions to declare). Each record is interpreted alone
+/// ([`Interpreter::record`]), as [`interpret_with`] interprets it among
+/// the file's records, but that a record is a structure of its own: no
+/// rule compares it with the others. The changes that span records wait
+/// for [`Interpreter::finish`].
+pub(crate) struct Interpreter<'r> {
+    rules: &'r RuleSet,
+    v7: bool,
+    report: InterpretReport,
+    deferred: Vec<(Applied, Deferred)>,
+    declare: BTreeSet<(Box<str>, String)>,
+    schema: Vec<(String, String, String)>,
+}
+
+/// What interpreting one record did ([`Interpreter::record`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Rewrite {
+    /// The record changed (it and what it lifted beside it are to be read
+    /// anew).
+    pub(crate) changed: bool,
+    /// It links to a record [`Interpreter::finish`] adds and names.
+    pub(crate) placeholder: bool,
+    /// It goes first among the records of its tag.
+    pub(crate) promoted: bool,
+}
+
+impl<'r> Interpreter<'r> {
+    /// Interpretation with `rules`, of a file of `version`.
+    pub(crate) fn new(rules: &'r RuleSet, version: GedcomVersion) -> Self {
+        Self {
+            rules,
+            v7: version.is_v7(),
+            report: InterpretReport::default(),
+            deferred: Vec::new(),
+            declare: BTreeSet::new(),
+            schema: Vec::new(),
+        }
+    }
+
+    /// The rules.
+    pub(crate) fn rules(&self) -> &'r RuleSet {
+        self.rules
+    }
+
+    /// Whether some change spans records, or some extension is to be
+    /// declared: what [`Interpreter::finish`] does.
+    pub(crate) fn has_pending(&self) -> bool {
+        !self.deferred.is_empty() || self.declares()
+    }
+
+    /// The identifiers of the records the changes that span records concern
+    /// (with repeats).
+    pub(crate) fn targets(&self) -> impl Iterator<Item = &str> {
+        self.deferred.iter().flat_map(|(_, d)| {
+            let (a, b): (Option<&Xref>, Option<&Xref>) = match d {
+                Deferred::Pedigree { child, .. } => (Some(child), None),
+                Deferred::FamilyFirst { person, .. } => (Some(person), None),
+                Deferred::Witness { family, .. } => (Some(family), None),
+                Deferred::Adopted { child, family } => (Some(child), Some(family)),
+                Deferred::Record(_) => (None, None),
+            };
+            a.into_iter().chain(b).map(Xref::as_str)
+        })
+    }
+
+    /// Interprets the record `records` holds, alone: it may become several
+    /// (what it lifted beside it). `defined`: whether a record before it
+    /// has an identifier.
+    pub(crate) fn record<'s>(
+        &mut self,
+        records: &mut Vec<Draft<'s>>,
+        defined: &dyn Fn(&str) -> bool,
+    ) -> Rewrite {
+        let changed = changes(&self.report);
+        let added = self.added_records();
+        #[cfg(debug_assertions)]
+        let before = records.clone();
+        let mut cx = Cx {
+            v7: self.v7,
+            rules: self.rules,
+            report: std::mem::take(&mut self.report),
+            deferred: std::mem::take(&mut self.deferred),
+            record: None,
+            declare: std::mem::take(&mut self.declare),
+            schema: std::mem::take(&mut self.schema),
+            peers: Vec::new(),
+            settled: false,
+            defined: Some(defined),
+            promoted: false,
+        };
+        let mut root = Draft {
+            substructures: std::mem::take(records),
+            ..Draft::default()
+        };
+        walk(&mut root, &mut Vec::new(), &mut cx, true);
+        *records = root.substructures;
+        self.report = cx.report;
+        self.deferred = cx.deferred;
+        self.declare = cx.declare;
+        self.schema = cx.schema;
+        let rewrite = Rewrite {
+            changed: changes(&self.report) != changed,
+            placeholder: self.added_records() != added,
+            promoted: cx.promoted,
+        };
+        // Every change is reported: a record nothing was reported of is as
+        // it was read.
+        #[cfg(debug_assertions)]
+        debug_assert!(rewrite.changed || *records == before, "{before:?}");
+        rewrite
+    }
+
+    /// Learns what a header says that interprets the records after it:
+    /// Family Tree Maker's `_SCHEMA` labels.
+    pub(crate) fn read_head(&mut self, head: &Draft<'_>) {
+        let labels = schema_labels(std::slice::from_ref(head));
+        self.schema.extend(labels);
+    }
+
+    fn added_records(&self) -> usize {
+        self.deferred
+            .iter()
+            .filter(|(_, d)| matches!(d, Deferred::Record(_)))
+            .count()
+    }
+
+    /// Makes the changes that span records in `records` — the first record
+    /// of each identifier [`Interpreter::targets`] names, and each record
+    /// that links to a record to add ([`Rewrite::placeholder`]), in the
+    /// file's order — adding the new records after them, and declares the
+    /// extensions kept in `head` (7.x). `taken`: whether a record of the
+    /// file has an identifier. What was done is reported.
+    pub(crate) fn finish<'s>(
+        mut self,
+        records: &mut Vec<Draft<'s>>,
+        head: Option<&mut Draft<'s>>,
+        taken: &dyn Fn(&str) -> bool,
+    ) -> InterpretReport {
+        let deferred = std::mem::take(&mut self.deferred);
+        apply_deferred(records, deferred, &mut self.report, self.v7, Some(taken));
+        if let Some(head) = head.filter(|_| self.v7) {
+            if declare(std::slice::from_mut(head), &self.declare) {
+                self.report.changed = true;
+            }
+        }
+        self.report
+    }
+
+    /// Whether extensions kept are to be declared in the header (7.x).
+    pub(crate) fn declares(&self) -> bool {
+        self.v7 && !self.declare.is_empty()
+    }
+
+    /// The report so far, when nothing is pending.
+    pub(crate) fn into_report(self) -> InterpretReport {
+        self.report
+    }
+}
+
+/// How many changes `report` reports (what is kept as it is aside).
+fn changes(report: &InterpretReport) -> usize {
+    report
+        .mappings
+        .iter()
+        .filter(|m| m.action != Action::Kept)
+        .map(|m| m.count)
+        .sum()
+}
+
 /// The state of an interpretation.
-struct Cx<'r> {
+struct Cx<'r, 's> {
     v7: bool,
     rules: &'r RuleSet,
     report: InterpretReport,
@@ -784,9 +1169,15 @@ struct Cx<'r> {
     schema: Vec<(String, String, String)>,
     /// The siblings of the structure being walked that what its
     /// substructures lift may repeat.
-    peers: Vec<Structure>,
+    peers: Vec<Draft<'s>>,
     /// Whether the rule just tried found its meaning said already.
     settled: bool,
+    /// One record at a time ([`Interpreter`]): whether a record before the
+    /// one interpreted has an identifier.
+    defined: Option<&'r dyn Fn(&str) -> bool>,
+    /// One record at a time: whether the record went first among the
+    /// records of its tag.
+    promoted: bool,
 }
 
 /// A change in another record, made once every record is read.
@@ -795,7 +1186,7 @@ enum Deferred {
     Pedigree {
         child: Xref,
         family: Xref,
-        pedigree: Structure,
+        pedigree: Draft<'static>,
     },
     /// The family first among a person's (`FAMS`, or `FAMC` as child).
     FamilyFirst {
@@ -804,25 +1195,25 @@ enum Deferred {
         as_child: bool,
     },
     /// A marriage witness in the family.
-    Witness { family: Xref, assoc: Structure },
+    Witness { family: Xref, assoc: Draft<'static> },
     /// The child of an adoptive family, linked both ways.
     Adopted { child: Xref, family: Xref },
     /// A new record.
-    Record(Structure),
+    Record(Draft<'static>),
 }
 
 /// What applying a rule to the substructure at an index did.
-struct Outcome {
+struct Outcome<'s> {
     /// How many structures now stand where it stood (it, its replacements
     /// and the siblings added after it).
     slot: usize,
     /// Structures for beside the parent.
-    lift: Vec<Structure>,
+    lift: Vec<Draft<'s>>,
     /// Whether the parent goes first among its like.
     promote: bool,
 }
 
-impl Outcome {
+impl Outcome<'_> {
     fn skip() -> Self {
         Self {
             slot: 1,
@@ -835,21 +1226,28 @@ impl Outcome {
 /// Interprets the substructures of `parent` (whose tags from the record
 /// down are `path`): returns what goes beside `parent`, and whether
 /// `parent` goes first among its like.
-fn walk(
-    parent: &mut Structure,
-    path: &mut Vec<Tag>,
-    cx: &mut Cx<'_>,
+fn walk<'s>(
+    parent: &mut Draft<'s>,
+    path: &mut Vec<DraftTag<'s>>,
+    cx: &mut Cx<'_, 's>,
     root: bool,
-) -> (Vec<Structure>, bool) {
+) -> (Vec<Draft<'s>>, bool) {
     let mut lifted_up = Vec::new();
     let mut promote_up = false;
     // The identifiers of the records before the one walked (those up to
     // `seen_upto`).
-    let mut seen: HashSet<Xref, BuildHasherDefault<TagHasher>> = HashSet::default();
+    let mut seen: HashSet<Cow<'s, str>, BuildHasherDefault<TagHasher>> = HashSet::default();
     let mut seen_upto = 0;
     let mut i = 0;
     while i < parent.substructures.len() {
-        if root {
+        if let (true, Some(defined)) = (root, cx.defined) {
+            cx.record = parent
+                .substructures
+                .get(i)
+                .and_then(|r| r.xref.as_deref())
+                .filter(|x| !defined(x))
+                .map(Xref::new);
+        } else if root {
             // A record whose identifier an earlier one has: the writer
             // renames it, so changes across records skip it (pointers name
             // the first).
@@ -862,8 +1260,9 @@ fn walk(
             cx.record = parent
                 .substructures
                 .get(i)
-                .and_then(|r| r.xref.clone())
-                .filter(|x| !seen.contains(x));
+                .and_then(|r| r.xref.as_deref())
+                .filter(|x| !seen.contains(*x))
+                .map(Xref::new);
         }
         // The siblings of the same tag, which what a substructure lifts
         // may repeat (names under a name).
@@ -894,6 +1293,7 @@ fn walk(
             }
         }
         if promote {
+            cx.promoted |= root && cx.defined.is_some();
             promote_child(parent, i);
         }
         let tag = match parent.substructures.get(i) {
@@ -903,8 +1303,8 @@ fn walk(
         // The first rule that applies wins; one that does not leaves no
         // trace in the report or the deferred changes.
         let mut outcome = Outcome::skip();
-        let candidates: Vec<Applied> = cx.rules.candidates(tag.as_str(), path).collect();
-        for applied in candidates {
+        let rules = cx.rules;
+        for applied in rules.candidates(tag.as_str(), path) {
             let before = (
                 cx.report.count(),
                 cx.report.mappings.len(),
@@ -932,7 +1332,7 @@ fn walk(
 }
 
 /// Moves the substructure at `i` before the first of its tag.
-fn promote_child(parent: &mut Structure, i: usize) {
+fn promote_child(parent: &mut Draft<'_>, i: usize) {
     let Some(tag) = parent.substructures.get(i).map(|c| c.tag.clone()) else {
         return;
     };
@@ -946,13 +1346,13 @@ fn promote_child(parent: &mut Structure, i: usize) {
 
 /// The rule's verdict on the structure at `i`: replace it by `new` when
 /// lossless, else add `new` after it (unless an equal one is there).
-fn place(
-    parent: &mut Structure,
+fn place<'s>(
+    parent: &mut Draft<'s>,
     i: usize,
-    new: Vec<Structure>,
+    new: Vec<Draft<'s>>,
     applied: Applied,
-    cx: &mut Cx<'_>,
-) -> Outcome {
+    cx: &mut Cx<'_, 's>,
+) -> Outcome<'s> {
     let lossless = applied.rule.fidelity == Fidelity::Lossless;
     let (tag, line) = match parent.substructures.get(i) {
         Some(c) => (c.tag.as_str().to_string(), c.line),
@@ -1007,13 +1407,13 @@ fn place(
 }
 
 /// Like [`place`], for structures that go beside the parent.
-fn lift(
-    parent: &mut Structure,
+fn lift<'s>(
+    parent: &mut Draft<'s>,
     i: usize,
-    new: Vec<Structure>,
+    new: Vec<Draft<'s>>,
     applied: Applied,
-    cx: &mut Cx<'_>,
-) -> Outcome {
+    cx: &mut Cx<'_, 's>,
+) -> Outcome<'s> {
     let (tag, line) = match parent.substructures.get(i) {
         Some(c) => (c.tag.as_str().to_string(), c.line),
         None => return Outcome::skip(),
@@ -1042,13 +1442,13 @@ fn lift(
 
 /// Edits the structure at `i` in place when lossless, else adds the edited
 /// copy after it.
-fn edit(
-    parent: &mut Structure,
+fn edit<'s>(
+    parent: &mut Draft<'s>,
     i: usize,
     applied: Applied,
-    cx: &mut Cx<'_>,
-    f: impl FnOnce(&mut Structure) -> bool,
-) -> Outcome {
+    cx: &mut Cx<'_, 's>,
+    f: impl FnOnce(&mut Draft<'s>) -> bool,
+) -> Outcome<'s> {
     let Some(mut copy) = parent.substructures.get(i).cloned() else {
         return Outcome::skip();
     };
@@ -1058,7 +1458,7 @@ fn edit(
     place(parent, i, vec![copy], applied, cx)
 }
 
-fn kept(parent: &Structure, i: usize, applied: Applied, cx: &mut Cx<'_>) -> Outcome {
+fn kept<'s>(parent: &Draft<'s>, i: usize, applied: Applied, cx: &mut Cx<'_, 's>) -> Outcome<'s> {
     if let Some(c) = parent.substructures.get(i) {
         let tag = c.tag.as_str().to_string();
         cx.report
@@ -1089,7 +1489,7 @@ pub fn docs_uri(profile: &str, tag: &str) -> String {
     format!("{EXTENSION_DOCS}#{profile}-{tag}")
 }
 
-fn noted(parent: &Structure, i: usize, applied: Applied, cx: &mut Cx<'_>, action: Action) {
+fn noted<'s>(parent: &Draft<'s>, i: usize, applied: Applied, cx: &mut Cx<'_, 's>, action: Action) {
     if let Some(c) = parent.substructures.get(i) {
         let tag = c.tag.as_str().to_string();
         cx.report
@@ -1098,13 +1498,13 @@ fn noted(parent: &Structure, i: usize, applied: Applied, cx: &mut Cx<'_>, action
 }
 
 #[allow(clippy::too_many_lines)]
-fn apply(
+fn apply<'s>(
     applied: Applied,
-    parent: &mut Structure,
+    parent: &mut Draft<'s>,
     i: usize,
-    path: &[Tag],
-    cx: &mut Cx<'_>,
-) -> Outcome {
+    path: &[DraftTag<'s>],
+    cx: &mut Cx<'_, 's>,
+) -> Outcome<'s> {
     let v7 = cx.v7;
     // What surely leaves the structure as it is, told before it is copied
     // (the rules on any tag look at every structure).
@@ -1156,11 +1556,11 @@ fn apply(
                 Label::Text(t) => Some(t.to_string()),
                 Label::Payload => {
                     let t = payload_str(&node).trim().to_string();
-                    new.payload = Payload::None;
+                    new.payload = Value::None;
                     (!t.is_empty()).then_some(t)
                 }
                 Label::Schema => {
-                    let record = path.first().map_or("", Tag::as_str);
+                    let record = path.first().map_or("", DraftTag::as_str);
                     cx.schema
                         .iter()
                         .find(|(r, t, _)| r == record && t == node.tag.as_str())
@@ -1179,7 +1579,7 @@ fn apply(
             if !matches!(tag, "EVEN" | "FACT") {
                 if let Some(t) = new.text().map(str::to_string) {
                     if !t.eq_ignore_ascii_case("y") {
-                        new.payload = Payload::None;
+                        new.payload = Value::None;
                         new.substructures.push(text_node("NOTE", &t));
                     }
                 }
@@ -1187,7 +1587,7 @@ fn apply(
             if tag == "FACT" && new.text().is_none() {
                 retag(&mut new, "EVEN");
             }
-            if y && matches!(new.payload, Payload::None) && new.substructures.is_empty() {
+            if y && matches!(new.payload, Value::None) && new.substructures.is_empty() {
                 set_text(&mut new, "Y");
             }
             place(parent, i, vec![new], applied, cx)
@@ -1204,7 +1604,7 @@ fn apply(
         }
         Op::PlaceEvent(label) => {
             let value = payload_str(&node).trim().to_string();
-            let mut even = Structure::new("EVEN");
+            let mut even = Draft::new("EVEN");
             even.substructures.push(text_node("TYPE", label));
             if !value.is_empty() && !has(&node, "PLAC") {
                 even.substructures.push(text_node("PLAC", &value));
@@ -1301,7 +1701,7 @@ fn apply(
             if let Some(c) = child_mut(parent, container) {
                 c.substructures.push(moved);
             } else {
-                let mut c = Structure::new(container);
+                let mut c = Draft::new(container);
                 c.substructures.push(moved);
                 parent.substructures.push(c);
             }
@@ -1322,12 +1722,17 @@ fn apply(
         }
         Op::CaseFold => {
             let tag = node.tag.as_str();
-            let upper = tag.to_ascii_uppercase();
-            if upper == tag || !Tag::new(&upper).is_standard() {
+            // The standard tag, as the table spells it.
+            let Some(upper) = standard_index(&tag.to_ascii_uppercase())
+                .and_then(|i| STANDARD_TAGS.get(usize::from(i)).copied())
+            else {
+                return Outcome::skip();
+            };
+            if upper == tag {
                 return Outcome::skip();
             }
             edit(parent, i, applied, cx, |s| {
-                retag(s, &upper);
+                retag(s, upper);
                 true
             })
         }
@@ -1353,19 +1758,20 @@ fn apply(
             Outcome::skip()
         }
         Op::SubmitterRecord => {
-            if !matches!(node.payload, Payload::None | Payload::Text(_))
+            if !matches!(node.payload, Value::None | Value::Text(_))
                 || node.substructures.is_empty()
             {
                 return Outcome::skip();
             }
             let mut record = node.clone();
-            if let Payload::Text(t) = &node.payload {
+            if let Value::Text(t) = &node.payload {
                 record.substructures.insert(0, text_node("NAME", t.trim()));
             }
-            record.payload = Payload::None;
-            let mut link = Structure::new("SUBM");
-            link.payload = Payload::Pointer(Xref::new("@\u{0}@"));
-            cx.deferred.push((applied, Deferred::Record(record)));
+            record.payload = Value::None;
+            let mut link = Draft::new("SUBM");
+            link.payload = Value::Pointer(Cow::Borrowed(PLACEHOLDER));
+            cx.deferred
+                .push((applied, Deferred::Record(record.into_owned())));
             place(parent, i, vec![link], applied, cx)
         }
         Op::Exid { uri, strip } => {
@@ -1415,12 +1821,12 @@ fn apply(
             if !v7 {
                 return Outcome::skip();
             }
-            let mut assoc = Structure::new("ASSO");
+            let mut assoc = Draft::new("ASSO");
             let mut role_node = text_node("ROLE", role);
             match &node.payload {
-                Payload::Pointer(p) => assoc.payload = Payload::Pointer(p.clone()),
-                Payload::Text(t) if !t.trim().is_empty() && !t.trim_start().starts_with('@') => {
-                    assoc.payload = Payload::Pointer(Xref::new(Xref::VOID));
+                Value::Pointer(p) => assoc.payload = Value::Pointer(p.clone()),
+                Value::Text(t) if !t.trim().is_empty() && !t.trim_start().starts_with('@') => {
+                    assoc.payload = Value::Pointer(Cow::Borrowed(Xref::VOID));
                     assoc.substructures.push(text_node("PHRASE", t.trim()));
                 }
                 _ => return Outcome::skip(),
@@ -1448,15 +1854,15 @@ fn apply(
             // A pointer the writer's repair kept as text (`@I9@` to no
             // record) stays as it is.
             if !v7
-                || matches!(node.payload, Payload::None)
+                || matches!(node.payload, Value::None)
                 || node.text().is_some_and(|t| t.trim_start().starts_with('@'))
             {
                 return Outcome::skip();
             }
             let mut assoc = node.clone();
             retag(&mut assoc, "ASSO");
-            if let Payload::Text(t) = &node.payload {
-                assoc.payload = Payload::Pointer(Xref::new(Xref::VOID));
+            if let Value::Text(t) = &node.payload {
+                assoc.payload = Value::Pointer(Cow::Borrowed(Xref::VOID));
                 assoc.substructures.insert(0, text_node("PHRASE", t.trim()));
             }
             // A 7.x role already (`ROLE WITN` + `PHRASE`) stays as it is.
@@ -1539,7 +1945,7 @@ fn apply(
             if !is_yes(&node) {
                 return Outcome::skip();
             }
-            let (Some(record), Some(Payload::Pointer(person))) =
+            let (Some(record), Some(Value::Pointer(person))) =
                 (cx.record.clone(), Some(parent.payload.clone()))
             else {
                 return Outcome::skip();
@@ -1548,7 +1954,7 @@ fn apply(
             cx.deferred.push((
                 applied,
                 Deferred::FamilyFirst {
-                    person,
+                    person: Xref::new(&*person),
                     family: record,
                     as_child,
                 },
@@ -1595,7 +2001,7 @@ fn apply(
             if let Some(t) = time {
                 date_node.substructures.push(text_node("TIME", &t));
             }
-            let mut chan = Structure::new("CHAN");
+            let mut chan = Draft::new("CHAN");
             chan.substructures.push(date_node);
             place(parent, i, vec![chan], applied, cx)
         }
@@ -1610,7 +2016,7 @@ fn apply(
             if let Some(t) = time {
                 date_node.substructures.push(text_node("TIME", &t));
             }
-            let mut crea = Structure::new("CREA");
+            let mut crea = Draft::new("CREA");
             crea.substructures.push(date_node);
             place(parent, i, vec![crea], applied, cx)
         }
@@ -1633,7 +2039,7 @@ fn apply(
         }
         Op::NoEvent(tag) => {
             if !v7
-                || matches!(node.payload, Payload::Text(ref t) if t.trim().eq_ignore_ascii_case("N"))
+                || matches!(node.payload, Value::Text(ref t) if t.trim().eq_ignore_ascii_case("N"))
             {
                 return Outcome::skip();
             }
@@ -1645,7 +2051,7 @@ fn apply(
             {
                 return Outcome::skip();
             }
-            if let Payload::Text(t) = &node.payload {
+            if let Value::Text(t) = &node.payload {
                 let t = t.to_ascii_uppercase();
                 if !(t.contains("NEVER")
                     || t.contains("NOT")
@@ -1682,7 +2088,7 @@ fn apply(
             })
         }
         Op::ToParentPayload => {
-            if !matches!(parent.payload, Payload::None) {
+            if !matches!(parent.payload, Value::None) {
                 return Outcome::skip();
             }
             let value = payload_str(&node).trim().to_string();
@@ -1724,7 +2130,7 @@ fn apply(
             if let Some(c) = child_mut(parent, container) {
                 c.substructures.push(moved);
             } else {
-                let mut c = Structure::new(container);
+                let mut c = Draft::new(container);
                 c.substructures.push(moved);
                 parent.substructures.push(c);
             }
@@ -1737,14 +2143,14 @@ fn apply(
         }
         Op::Up => lift(parent, i, vec![node], applied, cx),
         Op::Residence => {
-            let mut resi = Structure::new("RESI");
+            let mut resi = Draft::new("RESI");
             let mut addr = node.clone();
             retag(&mut addr, "ADDR");
             resi.substructures.push(addr);
             place(parent, i, vec![resi], applied, cx)
         }
         Op::PlaceAsValue => {
-            if !matches!(parent.payload, Payload::None) {
+            if !matches!(parent.payload, Value::None) {
                 return Outcome::skip();
             }
             let value = payload_str(&node).trim().to_string();
@@ -1762,7 +2168,7 @@ fn apply(
                 .filter(|c| is(c, "TYPE"))
                 .count();
             let first_type = parent.substructures.iter().position(|c| is(c, "TYPE"));
-            if types != 2 || !matches!(parent.payload, Payload::None) || first_type == Some(i) {
+            if types != 2 || !matches!(parent.payload, Value::None) || first_type == Some(i) {
                 return Outcome::skip();
             }
             let value = payload_str(&node).trim().to_string();
@@ -1781,7 +2187,7 @@ fn apply(
             let Some(&(_, tag)) = map.iter().find(|(w, _)| w.eq_ignore_ascii_case(ty)) else {
                 return Outcome::skip();
             };
-            if !matches!(node.payload, Payload::None) {
+            if !matches!(node.payload, Value::None) {
                 return Outcome::skip();
             }
             edit(parent, i, applied, cx, |s| {
@@ -1807,7 +2213,7 @@ fn apply(
             if !v7 {
                 return Outcome::skip();
             }
-            let (Some(Payload::Pointer(family)), Some(person)) =
+            let (Some(Value::Pointer(family)), Some(person)) =
                 (Some(node.payload.clone()), cx.record.clone())
             else {
                 return Outcome::skip();
@@ -1832,19 +2238,29 @@ fn apply(
                     .filter(|s| !matches!(s.tag.as_str(), "TYPE" | "RELA" | "ROLE"))
                     .cloned(),
             );
-            cx.deferred
-                .push((applied, Deferred::Witness { family, assoc }));
+            cx.deferred.push((
+                applied,
+                Deferred::Witness {
+                    family: Xref::new(&*family),
+                    assoc: assoc.into_owned(),
+                },
+            ));
             Outcome::skip()
         }
         Op::Adoption => {
             let (Some(child), Some(famc)) = (cx.record.clone(), child(&node, "FAMC")) else {
                 return Outcome::skip();
             };
-            let Payload::Pointer(family) = famc.payload.clone() else {
+            let Value::Pointer(family) = famc.payload.clone() else {
                 return Outcome::skip();
             };
-            cx.deferred
-                .push((applied, Deferred::Adopted { child, family }));
+            cx.deferred.push((
+                applied,
+                Deferred::Adopted {
+                    child,
+                    family: Xref::new(&*family),
+                },
+            ));
             Outcome::skip()
         }
         Op::NegativeYear => {
@@ -1941,23 +2357,24 @@ fn apply(
             place(parent, i, vec![text_node("NO", "MARR")], applied, cx)
         }
         Op::RepositoryRecord => {
-            let Payload::Text(name) = node.payload.clone() else {
+            let Value::Text(name) = node.payload.clone() else {
                 return Outcome::skip();
             };
             let name = name.trim().to_string();
             if name.is_empty() {
                 return Outcome::skip();
             }
-            let mut record = Structure::new("REPO");
+            let mut record = Draft::new("REPO");
             record.substructures.push(text_node("NAME", &name));
             // The identifier is given when the record is placed.
             let mut link = node.clone();
-            link.payload = Payload::Pointer(Xref::new("@\u{0}@"));
-            cx.deferred.push((applied, Deferred::Record(record)));
+            link.payload = Value::Pointer(Cow::Borrowed(PLACEHOLDER));
+            cx.deferred
+                .push((applied, Deferred::Record(record.into_owned())));
             place(parent, i, vec![link], applied, cx)
         }
         Op::RecordXref => {
-            let Payload::Pointer(x) = node.payload.clone() else {
+            let Value::Pointer(x) = node.payload.clone() else {
                 return Outcome::skip();
             };
             if node.xref.is_some() || !path.is_empty() {
@@ -1965,7 +2382,7 @@ fn apply(
             }
             edit(parent, i, applied, cx, |s| {
                 s.xref = Some(x);
-                s.payload = Payload::None;
+                s.payload = Value::None;
                 true
             })
         }
@@ -1979,7 +2396,7 @@ fn apply(
             })
         }
         Op::SchemaFact => {
-            let record = path.first().map_or("", Tag::as_str);
+            let record = path.first().map_or("", DraftTag::as_str);
             let Some(label) = cx
                 .schema
                 .iter()
@@ -2002,11 +2419,11 @@ fn apply(
 /// tags made extensions (`_NAME`), its values in the other version's case
 /// (`TYPE aka`, `TYPE AKA`), its substructures in another order, and
 /// perhaps with more substructures (a name holding its own `_AKA`).
-fn holds<'a>(list: impl IntoIterator<Item = &'a Structure>, s: &Structure) -> bool {
-    fn tag(t: &Tag) -> &str {
+fn holds<'a, 's: 'a>(list: impl IntoIterator<Item = &'a Draft<'s>>, s: &Draft<'_>) -> bool {
+    fn tag<'t>(t: &'t DraftTag<'_>) -> &'t str {
         t.as_str().trim_start_matches('_')
     }
-    fn similar(a: &Structure, b: &Structure) -> bool {
+    fn similar(a: &Draft<'_>, b: &Draft<'_>) -> bool {
         tag(&a.tag) == tag(&b.tag)
             && match (a.payload.as_str(), b.payload.as_str()) {
                 // A date the 5.5.1 writer made a phrase, `(…)`.
@@ -2043,32 +2460,32 @@ fn holds<'a>(list: impl IntoIterator<Item = &'a Structure>, s: &Structure) -> bo
 
 /// Whether `parent` holds a `tag`, or one the writer's repair made an
 /// extension of (`_CHAN` + `DATE`): applying again must not add another.
-fn said(parent: &Structure, tag: &str) -> bool {
+fn said(parent: &Draft<'_>, tag: &str) -> bool {
     parent.substructures.iter().any(|c| {
         is(c, tag) || (c.tag.as_str().strip_prefix('_') == Some(tag) && !c.substructures.is_empty())
     })
 }
 
-fn noted_tag(node: &Structure, applied: Applied, cx: &mut Cx<'_>, action: Action) {
+fn noted_tag<'s>(node: &Draft<'s>, applied: Applied, cx: &mut Cx<'_, 's>, action: Action) {
     let tag = node.tag.as_str().to_string();
     cx.report
         .note(&applied, &tag, action, node.line, cx.record.as_ref());
 }
 
 /// A name under `NAME` (or a name-like structure under `INDI`) as a `NAME`.
-fn name(
-    parent: &mut Structure,
+fn name<'s>(
+    parent: &mut Draft<'s>,
     i: usize,
     applied: Applied,
-    path: &[Tag],
-    cx: &mut Cx<'_>,
+    path: &[DraftTag<'s>],
+    cx: &mut Cx<'_, 's>,
     kind: NameKind,
     how: NameValue,
-) -> Outcome {
+) -> Outcome<'s> {
     let Some(node) = parent.substructures.get(i).cloned() else {
         return Outcome::skip();
     };
-    let Payload::Text(value) = &node.payload else {
+    let Value::Text(value) = &node.payload else {
         return Outcome::skip();
     };
     let value = value.trim();
@@ -2094,7 +2511,7 @@ fn name(
             }
         }
     };
-    let new: Vec<Structure> = values
+    let new: Vec<Draft<'s>> = values
         .iter()
         .map(|v| {
             let mut n = text_node("NAME", v);
@@ -2157,7 +2574,7 @@ fn role_of(word: &str) -> (&'static str, Option<String>) {
 }
 
 /// Rewrites the role of an association by a producer's words.
-fn role_words(assoc: &mut Structure, words: &[(&str, &str, &str)], v7: bool) -> bool {
+fn role_words(assoc: &mut Draft<'_>, words: &[(&str, &str, &str)], v7: bool) -> bool {
     if !v7 {
         return false;
     }
@@ -2211,7 +2628,7 @@ fn pedigree_word(word: &str, v7: bool) -> Option<(&'static str, bool)> {
     Some((if v7 { v7_word } else { v551 }, exact))
 }
 
-fn pedigree_of(word: &str, v7: bool) -> Option<Structure> {
+fn pedigree_of<'s>(word: &str, v7: bool) -> Option<Draft<'s>> {
     // A text of several lines is no pedigree word (the writer's repair of
     // a `PEDI` that was not one, kept as `_PEDI`).
     if word.contains('\n') {
@@ -2231,13 +2648,13 @@ fn pedigree_of(word: &str, v7: bool) -> Option<Structure> {
 }
 
 /// `_FREL`/`_MREL`: `PEDI` when both say the same.
-fn pedigree(
-    parent: &mut Structure,
+fn pedigree<'s>(
+    parent: &mut Draft<'s>,
     i: usize,
     applied: Applied,
-    path: &[Tag],
-    cx: &mut Cx<'_>,
-) -> Outcome {
+    path: &[DraftTag<'s>],
+    cx: &mut Cx<'_, 's>,
+) -> Outcome<'s> {
     let Some(node) = parent.substructures.get(i) else {
         return Outcome::skip();
     };
@@ -2254,7 +2671,7 @@ fn pedigree(
     let Some(pedi) = pedigree_of(f, cx.v7) else {
         return Outcome::skip();
     };
-    match path.last().map(Tag::as_str) {
+    match path.last().map(DraftTag::as_str) {
         Some("FAMC") => {
             if has(parent, "PEDI") {
                 return Outcome::skip();
@@ -2263,17 +2680,16 @@ fn pedigree(
             noted(parent, i, applied, cx, Action::Added);
         }
         Some("CHIL") => {
-            let (Some(family), Payload::Pointer(child)) =
-                (cx.record.clone(), parent.payload.clone())
+            let (Some(family), Value::Pointer(child)) = (cx.record.clone(), parent.payload.clone())
             else {
                 return Outcome::skip();
             };
             cx.deferred.push((
                 applied,
                 Deferred::Pedigree {
-                    child,
+                    child: Xref::new(&*child),
                     family,
-                    pedigree: pedi,
+                    pedigree: pedi.into_owned(),
                 },
             ));
         }
@@ -2283,11 +2699,16 @@ fn pedigree(
 }
 
 /// `_PHOTO @M1@`, `_WT_OBJE_SORT @M1@`: the multimedia links in that order.
-fn prefer_pointer(parent: &mut Structure, i: usize, applied: Applied, cx: &mut Cx<'_>) -> Outcome {
+fn prefer_pointer<'s>(
+    parent: &mut Draft<'s>,
+    i: usize,
+    applied: Applied,
+    cx: &mut Cx<'_, 's>,
+) -> Outcome<'s> {
     let Some(node) = parent.substructures.get(i).cloned() else {
         return Outcome::skip();
     };
-    let Payload::Pointer(target) = &node.payload else {
+    let Value::Pointer(target) = &node.payload else {
         return Outcome::skip();
     };
     // The order of the pointers of this tag before this one.
@@ -2343,7 +2764,12 @@ fn prefer_pointer(parent: &mut Structure, i: usize, applied: Applied, cx: &mut C
     finish_prefer(parent, i, applied, cx)
 }
 
-fn finish_prefer(parent: &mut Structure, i: usize, applied: Applied, cx: &mut Cx<'_>) -> Outcome {
+fn finish_prefer<'s>(
+    parent: &mut Draft<'s>,
+    i: usize,
+    applied: Applied,
+    cx: &mut Cx<'_, 's>,
+) -> Outcome<'s> {
     noted(parent, i, applied, cx, Action::Reordered);
     if cx.v7 && applied.rule.fidelity == Fidelity::Lossless {
         parent.substructures.remove(i);
@@ -2466,7 +2892,7 @@ fn stamp(text: &str, v7: bool) -> Option<(String, Option<String>)> {
 }
 
 /// A 7.x `CROP` from a producer's rectangle.
-fn crop_of(node: &Structure, form: CropForm) -> Option<Structure> {
+fn crop_of<'s>(node: &Draft<'s>, form: CropForm) -> Option<Draft<'s>> {
     let (left, top, width, height) = match form {
         CropForm::Ancestry => {
             let number =
@@ -2496,7 +2922,7 @@ fn crop_of(node: &Structure, form: CropForm) -> Option<Structure> {
             )
         }
     };
-    let mut crop = Structure::new("CROP");
+    let mut crop = Draft::new("CROP");
     for (tag, n) in [
         ("TOP", top),
         ("LEFT", left),
@@ -2627,7 +3053,9 @@ fn roman(word: &str) -> Option<u32> {
     (total > 0).then_some(total)
 }
 
-/// Words of the date grammar that no dialect rewrites.
+/// Words of the date grammar that no dialect rewrites ([`plain_date`]
+/// matches them).
+#[cfg(test)]
 const PLAIN_DATE_WORDS: &[&str] = &[
     "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC", "ABT",
     "AFT", "BEF", "BET", "AND", "FROM", "TO", "CAL", "EST",
@@ -2638,7 +3066,15 @@ const PLAIN_DATE_WORDS: &[&str] = &[
 /// (most dates: the quick answer).
 fn plain_date(date: &str) -> bool {
     date.split(' ').all(|w| {
-        !w.is_empty() && (w.bytes().all(|b| b.is_ascii_digit()) || PLAIN_DATE_WORDS.contains(&w))
+        !w.is_empty()
+            && (w.bytes().all(|b| b.is_ascii_digit())
+                // (The words of `PLAIN_DATE_WORDS`, without a search.)
+                || matches!(
+                    w,
+                    "JAN" | "FEB" | "MAR" | "APR" | "MAY" | "JUN" | "JUL" | "AUG" | "SEP"
+                        | "OCT" | "NOV" | "DEC" | "ABT" | "AFT" | "BEF" | "BET" | "AND"
+                        | "FROM" | "TO" | "CAL" | "EST"
+                ))
     })
 }
 
@@ -2685,13 +3121,13 @@ fn date_dialect(value: &str, v7: bool) -> Option<String> {
     (fixed != trimmed).then_some(fixed)
 }
 
-fn date_words(
-    parent: &mut Structure,
+fn date_words<'s>(
+    parent: &mut Draft<'s>,
     i: usize,
     applied: Applied,
-    path: &[Tag],
-    cx: &mut Cx<'_>,
-) -> Outcome {
+    path: &[DraftTag<'s>],
+    cx: &mut Cx<'_, 's>,
+) -> Outcome<'s> {
     let v7 = cx.v7;
     let Some(node) = parent.substructures.get(i).cloned() else {
         return Outcome::skip();
@@ -2799,7 +3235,7 @@ fn age_words(value: &str) -> Option<String> {
 
 /// Family Tree Maker for Windows' `HEAD._SCHEMA` labels: (record, tag,
 /// label).
-fn schema_labels(records: &[Structure]) -> Vec<(String, String, String)> {
+fn schema_labels(records: &[Draft<'_>]) -> Vec<(String, String, String)> {
     let mut out = Vec::new();
     for head in records.iter().filter(|r| is(r, "HEAD")) {
         for schema in head.substructures.iter().filter(|s| is(s, "_SCHEMA")) {
@@ -2820,10 +3256,16 @@ fn schema_labels(records: &[Structure]) -> Vec<(String, String, String)> {
 }
 
 /// The changes that span records.
+///
+/// `taken`, when the records are some of a file's only (the records the
+/// changes concern, read one at a time: [`Interpreter::finish`]), tells
+/// the identifiers the file's other records have.
 fn apply_deferred(
-    records: &mut Vec<Structure>,
+    records: &mut Vec<Draft<'_>>,
     deferred: Vec<(Applied, Deferred)>,
-    cx: &mut Cx<'_>,
+    report: &mut InterpretReport,
+    v7: bool,
+    taken: Option<&dyn Fn(&str) -> bool>,
 ) {
     let mut next = 0_u32;
     // Where each record is (the first of an identifier), and where the
@@ -2831,7 +3273,7 @@ fn apply_deferred(
     let mut index: HashMap<Xref, usize, BuildHasherDefault<TagHasher>> = HashMap::default();
     for (k, r) in records.iter().enumerate() {
         if let Some(x) = &r.xref {
-            index.entry(x.clone()).or_insert(k);
+            index.entry(Xref::new(&**x)).or_insert(k);
         }
     }
     let mut scan_from = 0;
@@ -2885,15 +3327,15 @@ fn apply_deferred(
             Deferred::Adopted { child, family } => {
                 let child_at = find(&index, &child);
                 let family_at = find(&index, &family);
-                adopt(records, child_at, family_at, &child, &family, cx.v7)
+                adopt(records, child_at, family_at, &child, &family, v7)
             }
             Deferred::Record(mut record) => {
                 let xref = fresh_xref(
-                    |x| index.contains_key(&Xref::new(x.to_string())),
+                    |x| index.contains_key(&Xref::new(x)) || taken.is_some_and(|t| t(x)),
                     "R",
                     &mut next,
                 );
-                record.xref = Some(xref.clone());
+                record.xref = Some(Cow::Owned(xref.as_str().to_string()));
                 // The link that waits for this identifier.
                 let placeholder = Xref::new("@\u{0}@");
                 let mut replaced = false;
@@ -2922,7 +3364,7 @@ fn apply_deferred(
         };
         if done {
             let tag = applied.rule.tag;
-            cx.report.note(&applied, tag, Action::Added, 0, None);
+            report.note(&applied, tag, Action::Added, 0, None);
         }
     }
 }
@@ -2931,7 +3373,7 @@ fn apply_deferred(
 /// adoptive family `family` (at `family_at`) both ways: `FAMC` + `PEDI
 /// adopted` and `CHIL`. Whether anything was added.
 fn adopt(
-    records: &mut [Structure],
+    records: &mut [Draft<'_>],
     child_at: Option<usize>,
     family_at: Option<usize>,
     child: &Xref,
@@ -2976,12 +3418,12 @@ fn adopt(
     linked || back
 }
 
-fn replace_pointer(s: &mut Structure, from: &Xref, to: &Xref, done: &mut bool) {
+fn replace_pointer(s: &mut Draft<'_>, from: &Xref, to: &Xref, done: &mut bool) {
     if *done {
         return;
     }
-    if s.pointer() == Some(from) {
-        s.payload = Payload::Pointer(to.clone());
+    if s.pointer() == Some(from.as_str()) {
+        s.payload = Value::Pointer(Cow::Owned(to.as_str().to_string()));
         *done = true;
         return;
     }
@@ -2992,7 +3434,7 @@ fn replace_pointer(s: &mut Structure, from: &Xref, to: &Xref, done: &mut bool) {
 
 /// Declares the extension tags kept in `HEAD.SCHMA` (7.x), unless the
 /// header declares them already.
-fn declare(records: &mut [Structure], tags: &BTreeSet<(Box<str>, String)>) -> bool {
+fn declare(records: &mut [Draft<'_>], tags: &BTreeSet<(Box<str>, String)>) -> bool {
     if tags.is_empty() {
         return false;
     }
@@ -3003,7 +3445,7 @@ fn declare(records: &mut [Structure], tags: &BTreeSet<(Box<str>, String)>) -> bo
     let schma_at = if let Some(at) = head.substructures.iter().position(|s| is(s, "SCHMA")) {
         at
     } else {
-        head.substructures.push(Structure::new("SCHMA"));
+        head.substructures.push(Draft::new("SCHMA"));
         head.substructures.len() - 1
     };
     let Some(schma) = head.substructures.get_mut(schma_at) else {
@@ -3034,8 +3476,12 @@ fn declare(records: &mut [Structure], tags: &BTreeSet<(Box<str>, String)>) -> bo
 mod tests {
     use super::*;
 
-    fn tags(path: &[&str]) -> Vec<Tag> {
-        path.iter().map(|t| Tag::new(t)).collect()
+    fn tags<'s>(path: &[&'s str]) -> Vec<DraftTag<'s>> {
+        path.iter().map(|t| DraftTag::new(t)).collect()
+    }
+
+    fn ctx_matches(ctx: &'static str, path: &[DraftTag<'_>]) -> bool {
+        Context::parse(ctx).matches(path)
     }
 
     #[test]
@@ -3051,6 +3497,16 @@ mod tests {
         assert!(ctx_matches("**", &tags(&["A", "B"])));
     }
 
+    /// What [`RuleSet::any_standard`] leaves out never applies to a
+    /// standard tag.
+    #[test]
+    fn standard_tags_are_neither_long_forms_nor_folded() {
+        for tag in STANDARD_TAGS {
+            assert!(long_form(tag).is_none(), "{tag}");
+            assert!(!Op::CaseFold.may_apply_to_parts(tag, PayloadRef::None, false, false, true));
+        }
+    }
+
     #[test]
     fn pedigree_words_are_one_line() {
         assert!(pedigree_of("adopted", false).is_some());
@@ -3059,6 +3515,9 @@ mod tests {
 
     #[test]
     fn plain_dates_are_no_dialect() {
+        for w in PLAIN_DATE_WORDS {
+            assert!(plain_date(w), "{w}");
+        }
         for w in PLAIN_DATE_WORDS {
             assert!(
                 DATE_WORDS.iter().all(|(from, to)| from != w || to == w),

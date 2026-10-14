@@ -56,6 +56,53 @@ pub(crate) struct Arena<'a> {
     pub joined: &'a [TextPiece],
     pub nodes: &'a [RawNode],
     pub xrefs: &'a [(u32, RawSpan)],
+    /// The store's input, which spans flagged [`Arena::INPUT`] are of.
+    pub input: &'a str,
+}
+
+impl<'a> Arena<'a> {
+    /// The flag of a span of the store's input, at an offset from its
+    /// start, in an arena whose text is another (a record rewritten as it
+    /// is read: [`crate::model::read`]), instead of a span of `text`.
+    pub(crate) const INPUT: u32 = 1 << 31;
+
+    /// The characters of `span`: of `text`, or of `input` (the store's
+    /// input) when flagged [`Arena::INPUT`].
+    #[inline]
+    pub(crate) fn get(&self, span: RawSpan) -> &'a str {
+        if span.start & Self::INPUT == 0 {
+            span.get(self.text)
+        } else {
+            let start = (span.start & !Self::INPUT) as usize;
+            self.input
+                .get(start..start + span.len as usize)
+                .unwrap_or_default()
+        }
+    }
+
+    /// The characters of a piece of a joined text: of `text`, or of
+    /// `input` when flagged [`Arena::INPUT`].
+    #[inline]
+    pub(crate) fn piece(&self, piece: TextPiece) -> &'a str {
+        let (text, start) = if piece.start() & Self::INPUT == 0 {
+            (self.text, piece.start())
+        } else {
+            (self.input, piece.start() & !Self::INPUT)
+        };
+        let start = start as usize;
+        text.get(start..start + piece.len() as usize)
+            .unwrap_or_default()
+    }
+
+    /// Where `span` starts in the store's text.
+    #[inline]
+    pub(crate) fn start(&self, span: RawSpan) -> usize {
+        if span.start & Self::INPUT == 0 {
+            self.base + span.start as usize
+        } else {
+            (span.start & !Self::INPUT) as usize
+        }
+    }
 }
 
 /// A node of the record arena, with its entry.
@@ -118,7 +165,7 @@ impl<'a> NodeRef<'a> {
         let text = self.arena.text;
         match raw.kind {
             RawKind::None | RawKind::Side => Cow::Borrowed(""),
-            RawKind::Pointer | RawKind::Text => Cow::Borrowed(raw.payload.get(text)),
+            RawKind::Pointer | RawKind::Text => Cow::Borrowed(self.arena.get(raw.payload)),
             RawKind::Escaped => {
                 let raw = raw.payload.get(text);
                 let mut out = String::with_capacity(raw.len());
@@ -131,11 +178,7 @@ impl<'a> NodeRef<'a> {
                     if piece.newline() {
                         out.push('\n');
                     }
-                    let start = piece.start() as usize;
-                    out.push_str(
-                        text.get(start..start + piece.len() as usize)
-                            .unwrap_or_default(),
-                    );
+                    out.push_str(self.arena.piece(*piece));
                 }
                 Cow::Owned(out)
             }
@@ -158,6 +201,39 @@ impl<'a> NodeRef<'a> {
             next: self.index + 1,
             end: raw.end,
         }
+    }
+
+    /// The tag's text: a standard tag's, else one of `others` (the tags of
+    /// the [`crate::tree::TagInterner`] the record was read with).
+    #[inline]
+    pub(crate) fn tag_text<'t>(self, others: &'t [Box<str>]) -> &'t str
+    where
+        'a: 't,
+    {
+        let id = self.tag_id() as usize;
+        match STANDARD_TAGS.get(id) {
+            Some(tag) => tag,
+            None => others.get(id - STANDARD_TAGS.len()).map_or("", |t| t),
+        }
+    }
+
+    /// The pieces of the input a joined payload is made of, and where the
+    /// text they are pieces of starts in the store's text.
+    pub(crate) fn joined_pieces(self) -> Option<(&'a [TextPiece], usize)> {
+        let raw = self.raw();
+        (raw.kind == RawKind::Joined).then(|| (self.joined(raw), self.arena.base))
+    }
+
+    /// The identifier, delimiters included.
+    #[inline]
+    pub(crate) fn xref_text(self) -> Option<&'a str> {
+        self.xref_span().map(|span| self.arena.get(span))
+    }
+
+    /// The 1-based source line (from the first line of the text read).
+    #[inline]
+    pub(crate) fn line(self) -> u32 {
+        self.raw().line
     }
 
     fn xref_span(self) -> Option<RawSpan> {
@@ -254,6 +330,24 @@ impl<'s> ReadCx<'s> {
         }
     }
 
+    /// The context of a text read instead of the store's, which starts at
+    /// `base` in the store's text: records rewritten as they are read,
+    /// whose text the store appends once read ([`StoreParts::with_text`]).
+    pub(crate) fn with_text<'x>(&'x mut self, text: &'x str, base: usize) -> ReadCx<'x> {
+        ReadCx {
+            parts: self.parts.with_text(text, base),
+            tables: self.tables,
+            scratch: self.scratch,
+            escaping: self.escaping,
+            version: self.version,
+        }
+    }
+
+    /// The id of identifier `text`, when one was read.
+    pub(crate) fn find_xref(&self, text: &str) -> Option<XrefId> {
+        self.parts.find_xref(text)
+    }
+
     /// The payload's characters (see [`NodeRef::payload_str`]).
     pub(crate) fn payload_str<'a>(&self, node: NodeRef<'a>) -> Cow<'a, str> {
         node.payload_str(self.escaping)
@@ -265,14 +359,14 @@ impl<'s> ReadCx<'s> {
     pub(crate) fn span(&mut self, node: NodeRef<'_>) -> Option<Span> {
         let raw = node.raw();
         let base = node.arena.base;
-        let start = base + raw.payload.start as usize;
+        let start = node.arena.start(raw.payload);
         match raw.kind {
             RawKind::None => Some(Span::EMPTY),
             RawKind::Pointer => None,
             // A date's validity is found once, as it is read.
             RawKind::Text if raw.tag == const { DATE_TAG } => {
                 let span = self.parts.span(start, raw.payload.len as usize);
-                let date = raw.payload.get(node.arena.text);
+                let date = node.arena.get(raw.payload);
                 let bits = if crate::spec::is_simple_date(date, true, false) {
                     SIMPLE_DATE | EXACT_DATE
                 } else if crate::spec::is_simple_date(date, false, false) {
@@ -307,10 +401,17 @@ impl<'s> ReadCx<'s> {
                 let at = self.parts.pieces.len();
                 let shift = u32::try_from(base).ok();
                 let mut fits = shift.is_some();
-                for piece in node.joined(raw) {
-                    let end = shift.and_then(|b| b.checked_add(piece.start() + piece.len()));
+                for &piece in node.joined(raw) {
+                    // A piece of the store's input, from a record rewritten
+                    // as it is read, is where it says.
+                    let (piece, by) = if piece.start() & Arena::INPUT == 0 {
+                        (piece, shift)
+                    } else {
+                        (piece.unflagged(Arena::INPUT), Some(0))
+                    };
+                    let end = by.and_then(|b| b.checked_add(piece.start() + piece.len()));
                     fits &= end.is_some();
-                    self.parts.pieces.push(piece.shifted(shift.unwrap_or(0)));
+                    self.parts.pieces.push(piece.shifted(by.unwrap_or(0)));
                 }
                 Some(self.finish_pieces(at, fits, node))
             }
@@ -359,7 +460,7 @@ impl<'s> ReadCx<'s> {
     }
 
     fn intern(&mut self, arena: &Arena<'_>, span: RawSpan) -> Option<XrefId> {
-        self.parts.xrefs.intern(span.get(arena.text))
+        self.parts.xrefs.intern(arena.get(span))
     }
 
     /// The payload of a node, as an untyped node keeps it: a pointer, a
@@ -400,10 +501,8 @@ impl<'s> ReadCx<'s> {
 
     fn span_of_pointer(&mut self, node: NodeRef<'_>) -> Span {
         let raw = node.raw();
-        self.parts.span(
-            node.arena.base + raw.payload.start as usize,
-            raw.payload.len as usize,
-        )
+        self.parts
+            .span(node.arena.start(raw.payload), raw.payload.len as usize)
     }
 
     /// The untyped substructures kept aside from `mark` on, as rows of the
@@ -474,11 +573,18 @@ impl<'s> ReadCx<'s> {
     /// A part of the payload of `node` as a span: of the input when the
     /// payload is the input's characters as they are, a copy otherwise.
     pub(crate) fn sub_span(&mut self, node: NodeRef<'_>, part: &str) -> Span {
-        let text = node.arena.text;
-        let (start, end) = (text.as_ptr() as usize, text.as_ptr() as usize + text.len());
-        let at = part.as_ptr() as usize;
-        if node.raw().kind == RawKind::Text && at >= start && at + part.len() <= end {
-            self.parts.span(node.arena.base + (at - start), part.len())
+        let within = |text: &str| {
+            let (start, end) = (text.as_ptr() as usize, text.as_ptr() as usize + text.len());
+            let at = part.as_ptr() as usize;
+            (at >= start && at + part.len() <= end).then(|| at - start)
+        };
+        if node.raw().kind != RawKind::Text {
+            return self.owned_span(part);
+        }
+        if let Some(at) = within(node.arena.text) {
+            self.parts.span(node.arena.base + at, part.len())
+        } else if let Some(at) = within(node.arena.input) {
+            self.parts.span(at, part.len())
         } else {
             self.owned_span(part)
         }
