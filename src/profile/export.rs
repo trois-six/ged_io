@@ -35,7 +35,7 @@ use crate::model::{Dataset, RecordRef};
 use std::borrow::Cow;
 
 use crate::spec::conform::{conform_records, Checked, Rec};
-use crate::tree::{Flat, Structure, Xref};
+use crate::tree::{standard_index, standard_index_const, Flat, Structure, Xref, STANDARD_TAGS};
 use crate::writer::{
     Bom, Credentials, GedcomWriter, LineEnding, OutputEncoding, Repair, WriteError, XrefIndex,
 };
@@ -1007,27 +1007,47 @@ const Y_EVENTS: &[&str] = &[
     "MARR", "MARS", "NATU", "ORDN", "PROB", "RETI", "WILL",
 ];
 
+/// The events and attributes of a person or family that are not
+/// [`Y_EVENTS`].
+const OTHER_EVENTS: &[&str] = &[
+    "EVEN", "FACT", "OCCU", "RESI", "EDUC", "RELI", "NATI", "TITL", "DSCR", "PROP", "CAST", "IDNO",
+    "NCHI", "NMR", "SSN",
+];
+
+/// Which standard tags (by their index) are among `tags`, all standard.
+const fn standard_set(tags: &[&[&str]]) -> [bool; STANDARD_TAGS.len()] {
+    let mut set = [false; STANDARD_TAGS.len()];
+    let mut i = 0;
+    while i < tags.len() {
+        let mut j = 0;
+        while j < tags[i].len() {
+            // (Every tag is standard: a test sees to it.)
+            if let Some(k) = standard_index_const(tags[i][j]) {
+                set[k as usize] = true;
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    set
+}
+
+/// Whether `tag` is one of `set` ([`standard_set`]).
+#[inline]
+fn in_set(set: &[bool; STANDARD_TAGS.len()], tag: &str) -> bool {
+    standard_index(tag).is_some_and(|i| set.get(usize::from(i)) == Some(&true))
+}
+
+/// Whether `tag` is one of [`Y_EVENTS`].
+fn is_y_event(tag: &str) -> bool {
+    const SET: [bool; STANDARD_TAGS.len()] = standard_set(&[Y_EVENTS]);
+    in_set(&SET, tag)
+}
+
 /// Whether `tag` is an event or attribute of a person or family.
 fn is_event(tag: &str) -> bool {
-    Y_EVENTS.contains(&tag)
-        || matches!(
-            tag,
-            "EVEN"
-                | "FACT"
-                | "OCCU"
-                | "RESI"
-                | "EDUC"
-                | "RELI"
-                | "NATI"
-                | "TITL"
-                | "DSCR"
-                | "PROP"
-                | "CAST"
-                | "IDNO"
-                | "NCHI"
-                | "NMR"
-                | "SSN"
-        )
+    const SET: [bool; STANDARD_TAGS.len()] = standard_set(&[Y_EVENTS, OTHER_EVENTS]);
+    in_set(&SET, tag)
 }
 
 /// The tags of family events that say a union.
@@ -1239,7 +1259,7 @@ impl Op {
             | Op::NamesInAka
             | Op::NamesWithSlashes => any(&["NAME"]),
             Op::NicknamesJoined => any(&["NICK"]),
-            Op::EventsSaidY => Y_EVENTS.contains(&tag),
+            Op::EventsSaidY => is_y_event(tag),
             Op::DeathSaidY => any(&["DEAT"]),
             Op::AsEven(map) => tag == "EVEN" || map.iter().any(|(t, _)| *t == tag),
             Op::AsFact(map) => any(&["FACT", "EVEN"]) || map.iter().any(|(t, _)| *t == tag),
@@ -1742,7 +1762,7 @@ fn run_on<'s>(
                 let x = r.xref.clone();
                 for e in &mut r.substructures {
                     let said = if v7 {
-                        Y_EVENTS.contains(&e.tag.as_str())
+                        is_y_event(e.tag.as_str())
                     } else {
                         matches!(e.tag.as_str(), "BIRT" | "CHR" | "DEAT" | "MARR")
                     };
@@ -1837,8 +1857,7 @@ fn run_on<'s>(
                             names.next().flatten().unwrap_or_else(|| p.to_string())
                         }
                         Value::Text(t)
-                            if Y_EVENTS.contains(&tag.as_str())
-                                && t.trim().eq_ignore_ascii_case("y") =>
+                            if is_y_event(tag.as_str()) && t.trim().eq_ignore_ascii_case("y") =>
                         {
                             String::new()
                         }
@@ -2069,7 +2088,7 @@ fn run_on<'s>(
                     if has(note, "MIME") {
                         return;
                     }
-                    if let Some(t) = note.text() {
+                    if let Some(t) = note.text().filter(|t| t.contains(['<', '&'])) {
                         let escaped = escape_markup(t);
                         if escaped != t {
                             set_text(note, &escaped);
@@ -2197,7 +2216,7 @@ fn run_on<'s>(
                     let Some(at) = e.substructures.iter().position(|s| is(s, "ADDR")) else {
                         continue;
                     };
-                    if !(Y_EVENTS.contains(&e.tag.as_str())
+                    if !(is_y_event(e.tag.as_str())
                         || matches!(
                             e.tag.as_str(),
                             "EVEN" | "RESI" | "OCCU" | "FACT" | "EDUC" | "PROP"
@@ -2993,7 +3012,7 @@ fn run_on<'s>(
             for r in records.iter_mut().filter(|r| is(r, "INDI") || is(r, "FAM")) {
                 let x = r.xref.clone();
                 for e in &mut r.substructures {
-                    let fact = Y_EVENTS.contains(&e.tag.as_str())
+                    let fact = is_y_event(e.tag.as_str())
                         || matches!(
                             e.tag.as_str(),
                             "EVEN"
@@ -3333,22 +3352,30 @@ fn impossible_date(d: &str) -> bool {
         ("NOV", 30),
         ("DEC", 31),
     ];
-    let words: Vec<&str> = d.split_whitespace().collect();
-    words.windows(3).any(|w| match w {
-        [day, month, year] => {
-            let (Ok(day), Ok(year)) = (day.parse::<u32>(), year.parse::<i64>()) else {
-                return false;
-            };
-            MONTHS
-                .iter()
-                .find(|(m, _)| m.eq_ignore_ascii_case(month))
-                .is_some_and(|&(m, max)| {
-                    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-                    day == 0 || day > if m == "FEB" && !leap { 28 } else { max }
-                })
+    let impossible = |day: &str, month: &str, year: &str| {
+        let (Ok(day), Ok(year)) = (day.parse::<u32>(), year.parse::<i64>()) else {
+            return false;
+        };
+        MONTHS
+            .iter()
+            .find(|(m, _)| m.eq_ignore_ascii_case(month))
+            .is_some_and(|&(m, max)| {
+                let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+                day == 0 || day > if m == "FEB" && !leap { 28 } else { max }
+            })
+    };
+    // Each three words in a row.
+    let mut words = d.split_whitespace();
+    let (Some(mut day), Some(mut month)) = (words.next(), words.next()) else {
+        return false;
+    };
+    for year in words {
+        if impossible(day, month, year) {
+            return true;
         }
-        _ => false,
-    })
+        (day, month) = (month, year);
+    }
+    false
 }
 
 /// `<` and a bare `&` escaped as HTML entities.
@@ -3476,7 +3503,7 @@ fn address_text(addr: &Draft<'_>) -> String {
 /// of a person or family, the place of such an event, a citation.
 fn takes_note(path: &[&str]) -> bool {
     let event_like = |t: &str| {
-        Y_EVENTS.contains(&t)
+        is_y_event(t)
             || matches!(
                 t,
                 "EVEN"
@@ -5014,6 +5041,16 @@ fn conform_drafts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_event_tags_are_standard() {
+        for tag in Y_EVENTS.iter().chain(OTHER_EVENTS) {
+            assert!(standard_index(tag).is_some(), "{tag}");
+            assert!(is_event(tag));
+        }
+        assert!(Y_EVENTS.iter().all(|t| is_y_event(t)));
+        assert!(!is_event("NAME") && !is_y_event("EVEN") && !is_event("_MILT"));
+    }
 
     #[test]
     fn paf_checksums() {
