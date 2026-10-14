@@ -197,10 +197,6 @@ Facts come from the compatibility research (catalogue rows in brackets); every e
 - Meaning: Ancestry record pointer: 1,<collection db id>::<record id>; ::0 = whole collection [VD-077]
 - Declared as `TAG _APID https://github.com/trois-six/oxidged/blob/main/docs/extensions.md#ancestry-_APID`
 
-<a id="ancestry-_APID"></a>
-
-### `_APID` (ancestry)
-
 - Where: `SOUR`
 - Meaning: Ancestry database id + record id of the cited online record (a link back to Ancestry) [X-005]
 - Declared as `TAG _APID https://github.com/trois-six/oxidged/blob/main/docs/extensions.md#ancestry-_APID`
@@ -776,10 +772,6 @@ Facts come from the compatibility research (catalogue rows in brackets); every e
 - Meaning: root person, named lists, file GUID, GEDCOM variant marker [X-125]
 - Meaning: Named list of record ids (comma list without @) [VD-015]
 - Declared as `TAG _LIST https://github.com/trois-six/oxidged/blob/main/docs/extensions.md#family-historian-_LIST`
-
-<a id="family-historian-_USED"></a>
-
-### `_USED` (family-historian)
 
 - Where: `HEAD`
 - Meaning: Last-used record ids per type [VD-011]

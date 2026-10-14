@@ -1221,14 +1221,21 @@ fn extension_docs_are_current() {
             continue;
         }
         doc.push_str(&format!("\n## {} (`{}`)\n", p.label(), p.id()));
+        let mut anchored = BTreeSet::new();
         for t in tags {
-            doc.push_str(&format!(
-                "\n<a id=\"{}-{}\"></a>\n\n### `{}` ({})\n\n",
-                p.id(),
-                t.tag,
-                t.tag,
-                p.id()
-            ));
+            // One anchor per producer and tag: a tag documented in several
+            // places lists each under the first.
+            if anchored.insert(t.tag) {
+                doc.push_str(&format!(
+                    "\n<a id=\"{}-{}\"></a>\n\n### `{}` ({})\n\n",
+                    p.id(),
+                    t.tag,
+                    t.tag,
+                    p.id()
+                ));
+            } else {
+                doc.push('\n');
+            }
             doc.push_str(&format!(
                 "- Where: `{}`\n",
                 if t.context.is_empty() {
@@ -1271,11 +1278,13 @@ fn extension_docs_are_current() {
     let want = std::fs::read_to_string(&path).unwrap_or_default();
     assert!(want == doc, "docs/extensions.md is stale: run with BLESS=1");
     // Every URI a profile declares with resolves to an anchor of the page.
+    assert_eq!(doc.matches("<a id=\"oxidged-_OXIDGED\"></a>").count(), 1);
     for p in import_profiles() {
         for t in p.documented_tags().filter(|t| !t.registered) {
             let fragment = t.uri.split_once('#').map(|(_, f)| f).unwrap();
-            assert!(
-                doc.contains(&format!("<a id=\"{fragment}\"></a>")),
+            assert_eq!(
+                doc.matches(&format!("<a id=\"{fragment}\"></a>")).count(),
+                1,
                 "{}",
                 t.uri
             );
