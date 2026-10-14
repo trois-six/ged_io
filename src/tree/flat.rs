@@ -819,9 +819,13 @@ impl<'s> Flat<'s> {
             FlatPayload::Text(t, special) => special_of(t, *special),
             FlatPayload::None | FlatPayload::Pointer(..) => 0,
         };
-        let node = (tag, standard, &payload, special);
         if let Some(w) = st.watch.as_deref() {
-            if rewrites(w, &st.open, node, xref.is_some(), depth == 0) {
+            let (kind, len) = match &payload {
+                FlatPayload::None => (crate::convert::NONE, 0),
+                FlatPayload::Text(t, _) => (crate::convert::TEXT, t.len()),
+                FlatPayload::Pointer(..) => (crate::convert::POINTER, 0),
+            };
+            if w.may_apply(standard, kind, len, special) && watched(w, st, tag, &payload) {
                 st.converts = true;
                 st.spoiled = true;
                 return;
@@ -1134,32 +1138,27 @@ fn size_bound(
     8 + tag + xref.map_or(0, str::len) + 13 * payload
 }
 
-/// Whether a conversion or an interpretation `w` watches for may rewrite
-/// the structure `node` (its tag, standard index, payload and special
-/// bytes) under the structures `open`: a record with an identifier when
-/// `xref`, at the top when `record`.
-fn rewrites(
-    w: &Watch,
-    open: &[Open],
-    node: (&str, Option<u16>, &FlatPayload<'_>, u8),
-    xref: bool,
-    record: bool,
-) -> bool {
-    let (tag, standard, payload, special) = node;
-    let (kind, len) = match payload {
-        FlatPayload::None => (crate::convert::NONE, 0),
-        FlatPayload::Text(t, _) => (crate::convert::TEXT, t.len()),
-        FlatPayload::Pointer(..) => (crate::convert::POINTER, 0),
-    };
-    (w.may_apply(standard, kind, len, special) && watched(w, open, tag, payload))
-        || w.interprets_node(tag, standard, payload_ref(payload), xref, record)
-}
-
 /// Whether `watch` says that a typed structure tagged `tag` with
-/// `payload`, under the structures `open`, needs converting
-/// ([`Watch::typed`]). Apart, so that stream mode stays small.
+/// `payload`, under the structures open in `st`, needs converting
+/// ([`Watch::typed`]) or interpreting ([`Watch::interprets_node`]), once
+/// [`Watch::may_apply`] says it may. Apart, so that stream mode stays small
+/// (and the same size: more arguments make the compiler outline what each
+/// structure written calls).
 #[inline(never)]
-fn watched(watch: &Watch, open: &[Open], tag: &str, payload: &FlatPayload<'_>) -> bool {
+fn watched(watch: &Watch, st: &Stream<'_>, tag: &str, payload: &FlatPayload<'_>) -> bool {
+    let open = &st.open;
+    // Only a record has an identifier, there.
+    let record = open.is_empty();
+    let standard = super::standard_index(tag);
+    if watch.interprets_node(
+        tag,
+        standard,
+        payload_ref(payload),
+        record && st.xref.is_some(),
+        record,
+    ) {
+        return true;
+    }
     let n = open.len();
     let tag_at = |i: Option<usize>| {
         i.and_then(|i| open.get(i))

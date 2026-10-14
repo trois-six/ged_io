@@ -703,6 +703,13 @@ impl Watch {
 
     /// Interprets each record written with `rules` too.
     pub(crate) fn interpreting(&mut self, rules: crate::profile::RuleSet) {
+        // The filter of the stream lets through every structure of a tag a
+        // rule may rewrite ([`Watch::may_apply`]).
+        for (i, kinds) in (0_u16..).zip(self.tags.iter_mut()) {
+            if rules.may_rewrite_standard(i) {
+                *kinds = rules::NONE | rules::TEXT | rules::POINTER;
+            }
+        }
         self.interp = Some(rules);
     }
 
