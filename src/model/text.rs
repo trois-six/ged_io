@@ -397,7 +397,7 @@ impl Span {
 
     /// A span of `input`, which the caller knows to be at most
     /// [`Span::MAX_LEN`] long and within 32 bits, with its special bytes.
-    #[inline]
+    #[cfg(test)]
     pub(crate) fn of_input(input: &str, start: u32, len: u32) -> Self {
         if len == 0 {
             return Self::EMPTY;
@@ -1031,34 +1031,66 @@ pub struct Store {
 /// The parts of a [`Store`] that reading fills: the text read (borrowed),
 /// the pieces, the identifiers and the big texts.
 pub(crate) struct StoreParts<'s> {
+    /// The text read, which starts at `base` in the store's text.
     pub(crate) text: &'s str,
+    base: usize,
+    /// The store's input, which the store's text starts with.
+    input: &'s str,
     pub(crate) pieces: &'s mut Vec<TextPiece>,
     pub(crate) xrefs: &'s mut XrefTable,
     pub(crate) big: &'s mut Vec<Box<str>>,
 }
 
-impl StoreParts<'_> {
-    /// A span of the text from `start` (an offset that may not fit in 32
-    /// bits), `len` long: a span, one piece when it is long, or a big text
-    /// past 32 bits.
+impl<'s> StoreParts<'s> {
+    /// The parts with `text` read instead, which starts at `base` in the
+    /// store's text: the text of records the store appends once they are
+    /// read ([`Store::append_text`]), as reading rewrites records it reads.
+    pub(crate) fn with_text<'x>(&'x mut self, text: &'x str, base: usize) -> StoreParts<'x> {
+        StoreParts {
+            text,
+            base,
+            input: self.input,
+            pieces: self.pieces,
+            xrefs: self.xrefs,
+            big: self.big,
+        }
+    }
+
+    /// The characters at `start` in the store's text, `len` long, of the
+    /// text read.
+    #[inline]
+    fn local(&self, start: usize, len: usize) -> &'s str {
+        let (text, start) = match start.checked_sub(self.base) {
+            Some(start) => (self.text, start),
+            None => (self.input, start),
+        };
+        text.get(start..start.saturating_add(len))
+            .unwrap_or_default()
+    }
+
+    /// The identifier `text`'s id, if one was read.
+    pub(crate) fn find_xref(&self, text: &str) -> Option<XrefId> {
+        self.xrefs.find(text)
+    }
+
+    /// A span of the text from `start` (an offset in the store's text that
+    /// may not fit in 32 bits), `len` long: a span, one piece when it is
+    /// long, or a big text past 32 bits.
     pub(crate) fn span(&mut self, start: usize, len: usize) -> Span {
         if len == 0 {
             return Span::EMPTY;
         }
         match (u32::try_from(start), u32::try_from(len)) {
             (Ok(s), Ok(l)) if s.checked_add(l).is_some() => {
+                let special = special_bytes(self.local(start, len));
                 if l <= Span::MAX_LEN {
-                    Span::of_input(self.text, s, l)
+                    Span::new(Span::INPUT, s, l, special)
                 } else {
-                    let special = special_bytes(span(self.text, s, l));
-                    long_piece(self.pieces, self.big, self.text, s, l, special)
+                    long_span(self.pieces, self.big, self.local(start, len), s, l, special)
                 }
             }
             _ => {
-                let text = self
-                    .text
-                    .get(start..start.saturating_add(len))
-                    .unwrap_or_default();
+                let text = self.local(start, len);
                 push_big(self.big, text.into(), special_bytes(text))
             }
         }
@@ -1078,14 +1110,20 @@ impl StoreParts<'_> {
             Some(run) => {
                 let special = run.iter().fold(0, |f, p| {
                     let newline = if p.newline() { LINE_FEED } else { 0 };
-                    f | newline | special_bytes(span(self.text, p.start(), p.len()))
+                    f | newline | special_bytes(self.local(p.start() as usize, p.len() as usize))
                 });
                 match (u32::try_from(at), u32::try_from(run.len())) {
                     (Ok(start), Ok(count)) if count <= Span::MAX_LEN => {
                         Span::of_pieces(start, count, special)
                     }
                     _ => {
-                        let text = join(self.text, run);
+                        let mut text = String::new();
+                        for p in run {
+                            if p.newline() {
+                                text.push('\n');
+                            }
+                            text.push_str(self.local(p.start() as usize, p.len() as usize));
+                        }
                         self.pieces.truncate(at);
                         push_big(self.big, text.into(), special)
                     }
@@ -1110,6 +1148,24 @@ fn long_piece(
             Span::of_pieces(at, 1, special)
         }
         _ => push_big(big, span(text, start, len).into(), special),
+    }
+}
+
+/// [`long_piece`] of the span at `start` whose characters are `chars`.
+fn long_span(
+    pieces: &mut Vec<TextPiece>,
+    big: &mut Vec<Box<str>>,
+    chars: &str,
+    start: u32,
+    len: u32,
+    special: u8,
+) -> Span {
+    match u32::try_from(pieces.len()) {
+        Ok(at) if len < (1 << 31) => {
+            pieces.push(TextPiece::new(start, len, false));
+            Span::of_pieces(at, 1, special)
+        }
+        _ => push_big(big, chars.into(), special),
     }
 }
 
@@ -1155,14 +1211,28 @@ impl Store {
     pub(crate) fn parts_mut(&mut self) -> StoreParts<'_> {
         StoreParts {
             text: &self.text,
+            base: 0,
+            input: &self.text,
             pieces: &mut self.pieces,
             xrefs: &mut self.xrefs,
             big: &mut self.big,
         }
     }
 
+    /// Appends `text` to the store's text, where the spans of the records
+    /// read from it point ([`StoreParts::with_text`]).
+    pub(crate) fn append_text(&mut self, text: &str) {
+        self.text.push_str(text);
+    }
+
     pub(crate) fn set_tags(&mut self, tags: Vec<Box<str>>) {
         self.tags = tags;
+    }
+
+    /// The tags that are not standard, taken out (to read more records
+    /// into the store, [`Store::set_tags`] gives them back).
+    pub(crate) fn take_tags(&mut self) -> Vec<Box<str>> {
+        std::mem::take(&mut self.tags)
     }
 
     /// The tags read that are not standard, once each.

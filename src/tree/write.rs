@@ -11,7 +11,7 @@ use super::PayloadRef;
 ///
 /// A structure with neither tag nor identifier came from a line without a
 /// level number, and is written back as that bare line.
-pub(super) fn line(
+pub(crate) fn line(
     out: &mut String,
     level: usize,
     xref: Option<&str>,

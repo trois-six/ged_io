@@ -312,6 +312,78 @@ fn test_text(test: Test) -> &'static str {
     }
 }
 
+/// The tags the profiles' fingerprints look for, as they spell them: the
+/// only tags of a file [`Detection::refine`] reads.
+pub(crate) fn fingerprint_tags() -> &'static [&'static str] {
+    static TAGS: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    TAGS.get_or_init(|| {
+        let mut tags: Vec<&'static str> = super::import_profiles()
+            .iter()
+            .flat_map(|p| p.detect.iter())
+            .filter(|s| s.field == Field::Tag)
+            .map(|s| test_text(s.test))
+            .collect();
+        tags.sort_unstable();
+        tags.dedup();
+        tags
+    })
+}
+
+/// The fingerprint tag `tag` is (ASCII case ignored), as the fingerprint
+/// spells it.
+pub(crate) fn fingerprint(tag: &str) -> Option<&'static str> {
+    if !tag.starts_with('_') {
+        return None;
+    }
+    fingerprint_tags()
+        .iter()
+        .copied()
+        .find(|t| t.eq_ignore_ascii_case(tag))
+}
+
+/// The fingerprint tags the lines of `text` have as tags, once each, as
+/// far as a quick look tells: the lines with an `_` where the lexer finds
+/// a tag (what [`Detection::refine`] reads, without lexing the file).
+pub(crate) fn fingerprints_in(text: &str) -> Vec<&'static str> {
+    let bytes = text.as_bytes();
+    let eol = |b: &u8| matches!(b, b'\n' | b'\r');
+    let mut found: Vec<&'static str> = Vec::new();
+    // The last tag looked at, and what it is: files repeat their tags.
+    let mut last: Option<(&str, Option<&'static str>)> = None;
+    let mut from = 0;
+    while let Some(at) = text
+        .get(from..)
+        .and_then(|rest| rest.find('_'))
+        .map(|p| from + p)
+    {
+        let start = bytes
+            .get(..at)
+            .and_then(|before| before.iter().rposition(eol))
+            .map_or(0, |p| p + 1);
+        let end = bytes
+            .get(at..)
+            .and_then(|after| after.iter().position(eol))
+            .map_or(bytes.len(), |p| at + p);
+        if let Some(line) = text.get(start..end) {
+            if let crate::tree::Line::Structure { tag, .. } = crate::tree::lex_line(line) {
+                if tag.0 == at - start {
+                    let tag = line.get(tag.0..tag.1).unwrap_or_default();
+                    let print = match last {
+                        Some((t, print)) if t == tag => print,
+                        _ => fingerprint(tag),
+                    };
+                    last = Some((tag, print));
+                    if let Some(print) = print.filter(|p| !found.contains(p)) {
+                        found.push(print);
+                    }
+                }
+            }
+        }
+        from = end.max(at + 1);
+    }
+    found
+}
+
 /// A producer version: up to three numbers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProducerVersion(pub u32, pub u32, pub u32);

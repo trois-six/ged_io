@@ -111,6 +111,14 @@ impl TextPiece {
         self.len_newline & Self::NEWLINE != 0
     }
 
+    /// The same piece, its start without the bits of `flag`.
+    pub(crate) fn unflagged(self, flag: u32) -> Self {
+        Self {
+            start: self.start & !flag,
+            ..self
+        }
+    }
+
     /// The same piece, `by` bytes further.
     pub(crate) fn shifted(self, by: u32) -> Self {
         Self {
@@ -171,6 +179,29 @@ impl Hasher for TagHasher {
 }
 
 impl TagInterner {
+    /// Rebuilds the lookup of [`TagInterner::others`], set from elsewhere
+    /// (the tags of a dataset's store, to read more records into it).
+    pub(crate) fn reindex(&mut self) {
+        self.map.clear();
+        for (i, tag) in self.others.iter().enumerate() {
+            let id = u32::try_from(STANDARD_TAGS.len() + i).unwrap_or(u32::MAX);
+            self.map.insert(tag.clone(), id);
+        }
+    }
+
+    /// The id of `tag` when it is interned (or standard).
+    pub(crate) fn find(&self, tag: &str) -> Option<u32> {
+        match standard_index(tag) {
+            Some(i) => Some(u32::from(i)),
+            None => self.map.get(tag).copied(),
+        }
+    }
+
+    /// The id the next tag interned takes.
+    pub(crate) fn next_id(&self) -> u32 {
+        u32::try_from(STANDARD_TAGS.len() + self.others.len()).unwrap_or(u32::MAX)
+    }
+
     pub(crate) fn intern(&mut self, tag: &str) -> u32 {
         if let Some(i) = standard_index(tag) {
             return u32::from(i);
@@ -695,7 +726,7 @@ impl Builder {
         &mut self,
         text: &str,
         tags: &mut TagInterner,
-        mut record: impl FnMut(&Self, &TagInterner),
+        mut record: impl FnMut(&Self, &mut TagInterner),
     ) {
         let mut lines = Lines::new(text);
         while let Some((start, end)) = lines.next() {

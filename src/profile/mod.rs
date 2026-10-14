@@ -79,7 +79,8 @@
 //! follow published and observed importer behaviour, much of it dated:
 //! they are to be re-verified against recent imports ([`Verification`]).
 
-mod detect;
+pub(crate) mod detect;
+pub(crate) mod draft;
 mod dsl;
 mod export;
 mod export_data;
@@ -100,7 +101,6 @@ pub(crate) use interpret::RuleSet;
 pub(crate) use util::long_form;
 
 use crate::encoding::GedcomEncoding;
-use crate::tree::Structure;
 use crate::GedcomVersion;
 
 /// Where oxidged documents the producers' extension tags it writes in
@@ -467,8 +467,7 @@ pub(crate) fn interpret_text(
     rules: &RuleSet,
 ) -> (Option<String>, InterpretReport) {
     let tree = crate::tree::Tree::parse(text);
-    let mut records: Vec<Structure> = tree.to_structures();
-    drop(tree);
+    let mut records: Vec<draft::Draft<'_>> = tree.records().map(draft::Draft::of_ref).collect();
     let report = interpret::interpret_with(&mut records, version, rules);
     if !report.changed() {
         return (None, report);
@@ -483,16 +482,81 @@ pub(crate) fn interpret_text(
 /// Reads decoded text as `detection`'s producer meant it, at `level`: the
 /// dataset (which remembers its producer) and what was interpreted.
 /// `report`: whether the documented extensions kept are reported too.
+///
+/// The file is read once: each record a rule may change is interpreted as
+/// it is read, the others are typed as they are
+/// ([`crate::model::read::read_interpreting`]). Detection reads the
+/// fingerprint tags of the file first, by a quick look at its lines, which
+/// the records read then confirm. When they do not, or when a record's
+/// interpretation would reorder the file's records, the file is read and
+/// interpreted whole ([`read_whole`]).
 pub(crate) fn read_interpreted(
     text: String,
     detection: &mut Detection,
     level: Interpretation,
     report: bool,
 ) -> (crate::Dataset, InterpretReport) {
-    let mut data = crate::Dataset::parse(text);
     if level == Interpretation::None {
-        return (data, InterpretReport::default());
+        return (crate::Dataset::parse(text), InterpretReport::default());
     }
+    let before = detection.clone();
+    let mut prints = detect::fingerprints_in(&text);
+    prints.sort_unstable();
+    detection.refine(prints.iter().copied());
+    match read_once(text, detection, level, report, &prints) {
+        Ok(read) => read,
+        Err(text) => {
+            *detection = before;
+            read_whole(text, detection, level, report)
+        }
+    }
+}
+
+/// [`read_interpreted`] in one pass, with the fingerprint tags `prints`
+/// (sorted) found: the text back when the file reads otherwise.
+fn read_once(
+    text: String,
+    detection: &Detection,
+    level: Interpretation,
+    report: bool,
+    prints: &[&'static str],
+) -> Result<(crate::Dataset, InterpretReport), String> {
+    let version = crate::tree::head_version(&text)
+        .as_deref()
+        .map_or(GedcomVersion::V5_5_1, GedcomVersion::from_version_str);
+    let rules = RuleSet::of(detection, level);
+    let len = text.len();
+    let mut read = Vec::new();
+    let (mut data, interpreted) = if rules.is_empty() {
+        let data = crate::Dataset::parse(text);
+        read.extend(data.store().other_tags().filter_map(detect::fingerprint));
+        (data, InterpretReport::default())
+    } else {
+        let interp = interpret::Interpreter::new(&rules, version);
+        let known = report || version.is_v7();
+        crate::model::read::read_interpreting(text, interp, known, &mut read)?
+    };
+    read.sort_unstable();
+    read.dedup();
+    if read != prints {
+        let mut text = std::mem::take(&mut data).store.into_input();
+        text.truncate(len);
+        return Err(text);
+    }
+    data.set_producer(detection.clone(), level);
+    Ok((data, interpreted))
+}
+
+/// [`read_interpreted`] of the whole file at once: read, its producer
+/// detected from every tag it has, then, when a rule may apply, every
+/// record interpreted ([`interpret_text`]) and the result read again.
+fn read_whole(
+    text: String,
+    detection: &mut Detection,
+    level: Interpretation,
+    report: bool,
+) -> (crate::Dataset, InterpretReport) {
+    let mut data = crate::Dataset::parse(text);
     detection.refine(data.store().other_tags());
     let rules = RuleSet::of(detection, level);
     let untyped = data

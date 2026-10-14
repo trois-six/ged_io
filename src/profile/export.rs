@@ -23,12 +23,15 @@ use std::io;
 
 use crate::convert::{convert_structures, ConversionOptions};
 use crate::model::Dataset;
-use crate::tree::{Payload, Structure, Xref};
+use std::borrow::Cow;
+
+use crate::tree::{Structure, Xref};
 use crate::writer::{
     Bom, Credentials, GedcomWriter, LineEnding, OutputEncoding, Repair, WriteError,
 };
 use crate::GedcomVersion;
 
+use super::draft::{Draft, Value};
 use super::util::{
     child, child_mut, child_text, given_part, has, is, name_value, payload_str, pointer_node,
     retag, set_text, suffix_part, surname_part, text_node,
@@ -577,17 +580,21 @@ impl Exporter {
     /// conformance repair, and what was folded.
     #[must_use]
     pub fn structures(&self, data: &Dataset) -> (Vec<Structure>, ExportReport) {
-        let (records, report) = self.folded(data);
-        (Self::typed(records).to_structures(), report)
+        let (text, report) = self.folded(data, false);
+        (Dataset::parse(text).to_structures(), report)
     }
 
     /// The records the profile writes for `data`, in the order the folds
-    /// leave them, and what was folded.
-    fn folded(&self, data: &Dataset) -> (Vec<Structure>, ExportReport) {
+    /// leave them, as text to type again (so that the writer writes them in
+    /// the model's order, what reading the output back gives: exporting is
+    /// idempotent), and what was folded; with the importer's limits on the
+    /// records when `limits`.
+    fn folded(&self, data: &Dataset, limits: bool) -> (String, ExportReport) {
         let to = self.version();
-        let mut records = data.to_structures();
+        let mut structures = data.to_structures();
         let options = ConversionOptions::default();
-        convert_structures(&mut records, data.version(), to, &options);
+        convert_structures(&mut structures, data.version(), to, &options);
+        let mut records: Vec<Draft<'_>> = structures.iter().map(Draft::of_structure).collect();
         if to.is_v7() && !data.version().is_v7() {
             if let Some(producer) = data.producer() {
                 let rules = super::RuleSet::of(producer, data.interpretation());
@@ -633,7 +640,7 @@ impl Exporter {
             .filter(|s| round(s) == 1)
             .collect();
         if !later.is_empty() {
-            let repairs = crate::spec::conform(&mut records, to);
+            let repairs = conform_drafts(&mut records, to);
             cx.report.repairs.extend(repairs);
             for step in later {
                 run(step, &mut records, &mut cx);
@@ -646,17 +653,14 @@ impl Exporter {
         if let Some(style) = cx.place_style {
             // As the writer repairs them: the places of what conformance
             // makes extensions are not the format's.
-            let repairs = crate::spec::conform(&mut records, to);
+            let repairs = conform_drafts(&mut records, to);
             cx.report.repairs.extend(repairs);
             place_form(&mut records, style);
         }
-        (records, cx.report)
-    }
-
-    /// Records typed again, so that the writer writes them in the model's
-    /// order (what reading the output back gives): exporting is
-    /// idempotent.
-    fn typed(records: Vec<Structure>) -> Dataset {
+        let mut report = cx.report;
+        if limits {
+            self.limits(&records, &mut report);
+        }
         // `@` escaped as the header says: the version the text is read in
         // (the writer converts to the target's).
         let version = records
@@ -666,18 +670,17 @@ impl Exporter {
             .and_then(|g| child_text(g, "VERS"))
             .map_or(GedcomVersion::V5_5_1, GedcomVersion::from_version_str);
         let mut text = String::new();
-        for r in records {
+        for r in &records {
             r.write_gedcom(&mut text, 0, version);
         }
-        Dataset::parse(text)
+        (text, report)
     }
 
     /// The dataset to write for `data`, and the report so far (what was
     /// folded, the limits but the size).
     fn prepared(&self, data: &Dataset) -> (Dataset, ExportReport) {
-        let (records, mut report) = self.folded(data);
-        self.limits(&records, &mut report);
-        (Self::typed(records), report)
+        let (text, report) = self.folded(data, true);
+        (Dataset::parse(text), report)
     }
 
     /// Writes `data` for the importer to `writer`.
@@ -741,7 +744,7 @@ impl Exporter {
     }
 
     /// The importer's limits on the records.
-    fn limits(&self, records: &[Structure], report: &mut ExportReport) {
+    fn limits(&self, records: &[Draft<'_>], report: &mut ExportReport) {
         let t = &self.profile.target;
         if let Some(max) = t.max_individuals {
             let n = records.iter().filter(|r| is(r, "INDI")).count();
@@ -759,7 +762,7 @@ impl Exporter {
                 if depth > max {
                     report.limits.push(Limit {
                         rows: t.rows,
-                        record: r.xref.clone(),
+                        record: r.xref.as_deref().map(Xref::new),
                         detail: format!(
                             "structures {depth} levels deep, over the importer's {max}"
                         ),
@@ -774,7 +777,7 @@ impl Exporter {
                     if len > max {
                         report.limits.push(Limit {
                             rows: t.rows,
-                            record: r.xref.clone(),
+                            record: r.xref.as_deref().map(Xref::new),
                             detail: format!(
                                 "a name of {len} characters, over the importer's {max}"
                             ),
@@ -789,7 +792,7 @@ impl Exporter {
                 if n > max {
                     report.limits.push(Limit {
                         rows: t.rows,
-                        record: r.xref.clone(),
+                        record: r.xref.as_deref().map(Xref::new),
                         detail: format!("{n} children, over the importer's {max}"),
                     });
                 }
@@ -816,7 +819,7 @@ impl<W: io::Write> io::Write for Counter<W> {
     }
 }
 
-fn depth(s: &Structure) -> usize {
+fn depth(s: &Draft<'_>) -> usize {
     s.substructures
         .iter()
         .map(|c| 1 + depth(c))
@@ -841,14 +844,14 @@ impl Cx<'_> {
         rows: &'static [&'static str],
         kind: FoldKind,
         lossy: bool,
-        record: Option<&Xref>,
+        record: Option<&str>,
         detail: impl Into<String>,
     ) {
         self.report.folds.push(Fold {
             rows,
             kind,
             lossy,
-            record: record.cloned(),
+            record: record.map(Xref::new),
             detail: detail.into(),
         });
     }
@@ -856,12 +859,12 @@ impl Cx<'_> {
     fn limit(
         &mut self,
         rows: &'static [&'static str],
-        record: Option<&Xref>,
+        record: Option<&str>,
         detail: impl Into<String>,
     ) {
         self.report.limits.push(Limit {
             rows,
-            record: record.cloned(),
+            record: record.map(Xref::new),
             detail: detail.into(),
         });
     }
@@ -906,15 +909,16 @@ const UNION_EVENTS: &[&str] = &[
 /// What the folds read of other records, and where each is: the records,
 /// a person or a family only with what the folds read of them (names
 /// without their parts, sex, family links), which keeps the copy small.
-fn lookup(records: &[Structure]) -> (Vec<Structure>, HashMap<String, usize>) {
-    let shallow = |s: &Structure| Structure {
+fn lookup<'s>(records: &[Draft<'s>]) -> (Vec<Draft<'s>>, HashMap<String, usize>) {
+    let shallow = |s: &Draft<'s>| Draft {
         tag: s.tag.clone(),
         xref: s.xref.clone(),
         payload: s.payload.clone(),
         substructures: Vec::new(),
         line: s.line,
+        joined: None,
     };
-    let slim: Vec<Structure> = records
+    let slim: Vec<Draft<'s>> = records
         .iter()
         .map(|r| {
             if !(is(r, "INDI") || is(r, "FAM")) {
@@ -937,16 +941,16 @@ fn lookup(records: &[Structure]) -> (Vec<Structure>, HashMap<String, usize>) {
     (slim, idx)
 }
 
-fn index(records: &[Structure]) -> HashMap<String, usize> {
+fn index(records: &[Draft<'_>]) -> HashMap<String, usize> {
     records
         .iter()
         .enumerate()
-        .filter_map(|(i, r)| r.xref.as_ref().map(|x| (x.as_str().to_string(), i)))
+        .filter_map(|(i, r)| r.xref.as_ref().map(|x| (x.to_string(), i)))
         .collect()
 }
 
 /// A person's name for text: the first name, slashes out.
-fn person_name(records: &[Structure], idx: &HashMap<String, usize>, x: &str) -> Option<String> {
+fn person_name(records: &[Draft<'_>], idx: &HashMap<String, usize>, x: &str) -> Option<String> {
     let r = records.get(*idx.get(x)?)?;
     let name = child_text(r, "NAME")?;
     Some(
@@ -957,18 +961,18 @@ fn person_name(records: &[Structure], idx: &HashMap<String, usize>, x: &str) -> 
     )
 }
 
-fn person_sex(records: &[Structure], idx: &HashMap<String, usize>, x: &str) -> Option<String> {
+fn person_sex(records: &[Draft<'_>], idx: &HashMap<String, usize>, x: &str) -> Option<String> {
     let r = records.get(*idx.get(x)?)?;
     child_text(r, "SEX").map(|s| s.trim().to_ascii_uppercase())
 }
 
 /// Whether `s` has nothing but a payload.
-fn bare(s: &Structure) -> bool {
+fn bare(s: &Draft<'_>) -> bool {
     s.substructures.is_empty()
 }
 
 #[allow(clippy::too_many_lines)]
-fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
+fn run<'s>(step: &Step, records: &mut Vec<Draft<'s>>, cx: &mut Cx<'_>) {
     let rows = step.rows;
     match step.fold {
         Op::OccupationsMerged => {
@@ -1003,7 +1007,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                     rows,
                     FoldKind::Merged,
                     true,
-                    x.as_ref(),
+                    x.as_deref(),
                     format!("{} occupations made one", plain.len()),
                 );
             }
@@ -1022,7 +1026,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                             rows,
                             FoldKind::Relabelled,
                             false,
-                            x.as_ref(),
+                            x.as_deref(),
                             "a profession fact as an occupation",
                         );
                     }
@@ -1090,7 +1094,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                     rows,
                     FoldKind::Merged,
                     true,
-                    x.as_ref(),
+                    x.as_deref(),
                     format!(
                         "{} surname-only names in the primary SURN list",
                         packed.len()
@@ -1120,7 +1124,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                             rows,
                             FoldKind::Recoded,
                             false,
-                            x.as_ref(),
+                            x.as_deref(),
                             "the surname prefix inside the slashes",
                         );
                     }
@@ -1165,7 +1169,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                     rows,
                     FoldKind::Merged,
                     count > 1,
-                    x.as_ref(),
+                    x.as_deref(),
                     format!("{count} nicknames in one NICK of the primary name"),
                 );
             }
@@ -1214,7 +1218,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                         rows,
                         FoldKind::Recoded,
                         false,
-                        x.as_ref(),
+                        x.as_deref(),
                         "the usual given name in double quotes",
                     );
                 }
@@ -1231,7 +1235,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                             rows,
                             FoldKind::Recoded,
                             true,
-                            x.as_ref(),
+                            x.as_deref(),
                             "':' left out of a name",
                         );
                     }
@@ -1249,13 +1253,13 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                     } else {
                         matches!(e.tag.as_str(), "BIRT" | "CHR" | "DEAT" | "MARR")
                     };
-                    if said && bare(e) && matches!(e.payload, Payload::None) {
+                    if said && bare(e) && matches!(e.payload, Value::None) {
                         set_text(e, "Y");
                         cx.fold(
                             rows,
                             FoldKind::Recoded,
                             false,
-                            x.as_ref(),
+                            x.as_deref(),
                             format!("{} said Y", e.tag),
                         );
                     }
@@ -1278,7 +1282,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                     rows,
                     FoldKind::Added,
                     false,
-                    x.as_ref(),
+                    x.as_deref(),
                     "a death said Y for a person buried or cremated",
                 );
             }
@@ -1291,7 +1295,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                 let x = r.xref.clone();
                 cx.limit(
                     rows,
-                    x.as_ref(),
+                    x.as_deref(),
                     "a baptism and a christening: the importer reads one",
                 );
             }
@@ -1303,7 +1307,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                 .filter(|r| is(r, "INDI") || is(r, "FAM"))
                 .flat_map(|r| &r.substructures)
                 .any(|c| {
-                    matches!(c.payload, Payload::Pointer(_))
+                    matches!(c.payload, Value::Pointer(_))
                         && map.iter().any(|(t, _)| *t == c.tag.as_str())
                 });
             let names: HashMap<String, String> = if pointed {
@@ -1322,11 +1326,10 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                     };
                     let tag = c.tag.as_str().to_string();
                     let value = match &c.payload {
-                        Payload::Pointer(p) => names
-                            .get(p.as_str())
-                            .cloned()
-                            .unwrap_or_else(|| p.as_str().to_string()),
-                        Payload::Text(t)
+                        Value::Pointer(p) => {
+                            names.get(&**p).cloned().unwrap_or_else(|| p.to_string())
+                        }
+                        Value::Text(t)
                             if Y_EVENTS.contains(&tag.as_str())
                                 && t.trim().eq_ignore_ascii_case("y") =>
                         {
@@ -1348,7 +1351,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                         rows,
                         FoldKind::Relabelled,
                         true,
-                        x.as_ref(),
+                        x.as_deref(),
                         format!("{tag} as EVEN + TYPE {label}"),
                     );
                 }
@@ -1376,7 +1379,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                         rows,
                         FoldKind::Relabelled,
                         true,
-                        x.as_ref(),
+                        x.as_deref(),
                         format!("{tag} as {to} + TYPE {label}"),
                     );
                 }
@@ -1387,20 +1390,26 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                 let x = r.xref.clone();
                 for c in r.substructures.iter_mut().filter(|c| is(c, "FACT")) {
                     retag(c, "EVEN");
-                    cx.fold(rows, FoldKind::Relabelled, true, x.as_ref(), "FACT as EVEN");
+                    cx.fold(
+                        rows,
+                        FoldKind::Relabelled,
+                        true,
+                        x.as_deref(),
+                        "FACT as EVEN",
+                    );
                 }
             }
         }
         Op::UnionType => {
             for r in records.iter_mut().filter(|r| is(r, "FAM")) {
                 let x = r.xref.clone();
-                let unmarried = |c: &Structure| {
+                let unmarried = |c: &Draft<'s>| {
                     (is(c, "NO") && payload_str(c).trim() == "MARR")
                         || (is(c, "_NO") && payload_str(c).trim() == "MARR")
                         || is(c, "_NMR")
                 };
                 if let Some(at) = r.substructures.iter().position(unmarried) {
-                    let mut even = Structure::new("EVEN");
+                    let mut even = Draft::new("EVEN");
                     even.substructures.push(text_node("TYPE", "unmarried"));
                     if let Some(old) = r.substructures.get(at) {
                         even.substructures.extend(
@@ -1416,7 +1425,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                         rows,
                         FoldKind::Relabelled,
                         false,
-                        x.as_ref(),
+                        x.as_deref(),
                         "never married said as EVEN TYPE unmarried",
                     );
                     continue;
@@ -1433,7 +1442,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                 });
                 let couple = has(r, "HUSB") || has(r, "WIFE");
                 if !said && couple {
-                    let mut even = Structure::new("EVEN");
+                    let mut even = Draft::new("EVEN");
                     even.substructures.push(text_node("TYPE", "nomen"));
                     let at = r
                         .substructures
@@ -1445,7 +1454,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                         rows,
                         FoldKind::Added,
                         false,
-                        x.as_ref(),
+                        x.as_deref(),
                         "an unknown union said as EVEN TYPE nomen",
                     );
                 }
@@ -1462,7 +1471,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                         let x = r.xref.clone();
                         cx.limit(
                             rows,
-                            x.as_ref(),
+                            x.as_deref(),
                             "a PACS with no date, place or note, which the importer drops",
                         );
                     }
@@ -1483,17 +1492,16 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                             && child_text(c, "PEDI")
                                 .is_some_and(|p| p.trim().eq_ignore_ascii_case(adopted))
                     })
-                    .filter_map(|c| c.pointer().cloned())
+                    .filter_map(|c| c.pointer().map(Xref::new))
                     .collect();
                 for family in links {
                     let already = r.substructures.iter().any(|c| {
-                        is(c, "ADOP")
-                            && child(c, "FAMC").and_then(Structure::pointer) == Some(&family)
+                        is(c, "ADOP") && child(c, "FAMC").and_then(Draft::pointer) == Some(&family)
                     });
                     if already {
                         continue;
                     }
-                    let mut adop = Structure::new("ADOP");
+                    let mut adop = Draft::new("ADOP");
                     let mut famc = pointer_node("FAMC", &family);
                     famc.substructures.push(text_node("ADOP", "BOTH"));
                     adop.substructures.push(famc);
@@ -1502,7 +1510,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                         rows,
                         FoldKind::Added,
                         false,
-                        x.as_ref(),
+                        x.as_deref(),
                         "an adoption as ADOP + FAMC + ADOP BOTH",
                     );
                 }
@@ -1527,7 +1535,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                             rows,
                             FoldKind::Reordered,
                             false,
-                            x.as_ref(),
+                            x.as_deref(),
                             "the birth family first",
                         );
                     }
@@ -1565,7 +1573,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                         rows,
                         FoldKind::Recoded,
                         false,
-                        x.as_ref(),
+                        x.as_deref(),
                         format!("{n} notes with < and & escaped"),
                     );
                 }
@@ -1592,7 +1600,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                         rows,
                         FoldKind::Recoded,
                         true,
-                        x.as_ref(),
+                        x.as_deref(),
                         format!("{n} notes stripped of their markup"),
                     );
                 }
@@ -1640,7 +1648,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                 let x = r.xref.clone();
                 let mut texts = Vec::new();
                 for famc in r.substructures.iter_mut().filter(|c| is(c, "FAMC")) {
-                    let sources: Vec<Structure> = famc
+                    let sources: Vec<Draft<'s>> = famc
                         .substructures
                         .iter()
                         .filter(|s| is(s, "SOUR"))
@@ -1661,7 +1669,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                         rows,
                         FoldKind::AsText,
                         true,
-                        x.as_ref(),
+                        x.as_deref(),
                         format!("{n} citations of a child link as a note"),
                     );
                 }
@@ -1705,7 +1713,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                         rows,
                         FoldKind::AsText,
                         true,
-                        x.as_ref(),
+                        x.as_deref(),
                         format!("an address of {} as text", e.tag),
                     );
                 }
@@ -1723,7 +1731,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                 for d in bad {
                     cx.limit(
                         rows,
-                        x.as_ref(),
+                        x.as_deref(),
                         format!("impossible date {d}: the importer keeps part of it"),
                     );
                 }
@@ -1743,7 +1751,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                             FoldKind::Omitted
                         },
                         true,
-                        x.as_ref(),
+                        x.as_deref(),
                         format!(
                             "extension {tag} {}",
                             if kept { "as a note" } else { "left out" }
@@ -1769,7 +1777,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                         rows,
                         FoldKind::Relabelled,
                         true,
-                        x.as_ref(),
+                        x.as_deref(),
                         format!("extension {tag} as EVEN"),
                     );
                 }
@@ -1825,7 +1833,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                             rows,
                             FoldKind::AsText,
                             true,
-                            x.as_ref(),
+                            x.as_deref(),
                             format!("{n} fields of {} in its note", e.tag),
                         );
                     }
@@ -1848,7 +1856,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                             rows,
                             FoldKind::AsText,
                             true,
-                            x.as_ref(),
+                            x.as_deref(),
                             format!("the cause of {} in its note", e.tag),
                         );
                     }
@@ -1858,7 +1866,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
         Op::RecordNotesAsEvent(label) => {
             for r in records.iter_mut().filter(|r| is(r, "INDI") || is(r, "FAM")) {
                 let x = r.xref.clone();
-                let notes: Vec<Structure> = r
+                let notes: Vec<Draft<'s>> = r
                     .substructures
                     .iter()
                     .filter(|c| is(c, "NOTE"))
@@ -1868,7 +1876,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                     continue;
                 }
                 r.substructures.retain(|c| !is(c, "NOTE"));
-                let mut even = Structure::new("EVEN");
+                let mut even = Draft::new("EVEN");
                 even.substructures.push(text_node("TYPE", label));
                 even.substructures.extend(notes);
                 r.substructures.push(even);
@@ -1876,7 +1884,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                     rows,
                     FoldKind::Moved,
                     true,
-                    x.as_ref(),
+                    x.as_deref(),
                     format!("record notes on an EVEN TYPE {label}"),
                 );
             }
@@ -1884,7 +1892,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
         Op::RecordCitationsOnEvent(label) => {
             for r in records.iter_mut().filter(|r| is(r, "INDI") || is(r, "FAM")) {
                 let x = r.xref.clone();
-                let sources: Vec<Structure> = r
+                let sources: Vec<Draft<'s>> = r
                     .substructures
                     .iter()
                     .filter(|c| is(c, "SOUR"))
@@ -1894,7 +1902,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                     continue;
                 }
                 r.substructures.retain(|c| !is(c, "SOUR"));
-                let mut even = Structure::new("EVEN");
+                let mut even = Draft::new("EVEN");
                 even.substructures.push(text_node("TYPE", label));
                 even.substructures.extend(sources);
                 r.substructures.push(even);
@@ -1902,7 +1910,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                     rows,
                     FoldKind::Moved,
                     true,
-                    x.as_ref(),
+                    x.as_deref(),
                     format!("record citations on an EVEN TYPE {label}"),
                 );
             }
@@ -1932,7 +1940,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                         rows,
                         FoldKind::AsText,
                         true,
-                        x.as_ref(),
+                        x.as_deref(),
                         "source fields in its note",
                     );
                 }
@@ -1966,7 +1974,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                         rows,
                         FoldKind::AsText,
                         true,
-                        x.as_ref(),
+                        x.as_deref(),
                         "repository contacts in its note",
                     );
                 }
@@ -1980,7 +1988,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                     if has(c, "_FREL") || has(c, "_MREL") {
                         continue;
                     }
-                    let Some(child_x) = c.pointer().cloned() else {
+                    let Some(child_x) = c.pointer().map(Xref::new) else {
                         continue;
                     };
                     let pedi = idx
@@ -2023,7 +2031,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                     .substructures
                     .iter()
                     .find(|c| is(c, "OBJE"))
-                    .and_then(|c| c.pointer().cloned())
+                    .and_then(|c| c.pointer().map(str::to_string))
                 else {
                     continue;
                 };
@@ -2033,7 +2041,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                     rows,
                     FoldKind::Added,
                     false,
-                    x.as_ref(),
+                    x.as_deref(),
                     "_PHOTO for the preferred image",
                 );
             }
@@ -2056,7 +2064,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                                 rows,
                                 FoldKind::Added,
                                 false,
-                                x.as_ref(),
+                                x.as_deref(),
                                 format!("{} on the preferred image", flags.join(", ")),
                             );
                         }
@@ -2108,7 +2116,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                         rows,
                         FoldKind::Moved,
                         true,
-                        x.as_ref(),
+                        x.as_deref(),
                         "the name prefix as a title",
                     );
                 }
@@ -2133,7 +2141,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                             rows,
                             FoldKind::Recoded,
                             false,
-                            x.as_ref(),
+                            x.as_deref(),
                             "a name value made from its pieces",
                         );
                         continue;
@@ -2168,7 +2176,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                         rows,
                         FoldKind::AsText,
                         true,
-                        x.as_ref(),
+                        x.as_deref(),
                         "name pieces that disagree with the name in a note",
                     );
                 }
@@ -2206,7 +2214,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                                 FoldKind::AsText
                             },
                             true,
-                            x.as_ref(),
+                            x.as_deref(),
                             "the usual given name",
                         );
                     }
@@ -2235,7 +2243,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                         rows,
                         FoldKind::AsText,
                         true,
-                        x.as_ref(),
+                        x.as_deref(),
                         "identifiers in a note",
                     );
                 }
@@ -2262,7 +2270,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                         rows,
                         FoldKind::AsText,
                         true,
-                        x.as_ref(),
+                        x.as_deref(),
                         "an interpreted date's phrase in the note",
                     );
                 }
@@ -2305,7 +2313,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                         rows,
                         FoldKind::Recoded,
                         false,
-                        x.as_ref(),
+                        x.as_deref(),
                         "_UID in the PAF form",
                     );
                 }
@@ -2325,7 +2333,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                             rows,
                             FoldKind::Relabelled,
                             false,
-                            x.as_ref(),
+                            x.as_deref(),
                             format!("{from} as {to}"),
                         );
                     }
@@ -2335,7 +2343,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
         Op::MarriageStatus => {
             for r in records.iter_mut().filter(|r| is(r, "FAM")) {
                 let x = r.xref.clone();
-                let never = |c: &Structure| {
+                let never = |c: &Draft<'s>| {
                     (is(c, "NO") || is(c, "_NO")) && payload_str(c).trim() == "MARR"
                 };
                 let mut k = 0;
@@ -2362,7 +2370,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                         rows,
                         FoldKind::Relabelled,
                         false,
-                        x.as_ref(),
+                        x.as_deref(),
                         "never married as _STAT Never Married",
                     );
                 }
@@ -2378,7 +2386,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                         rows,
                         FoldKind::Moved,
                         true,
-                        x.as_ref(),
+                        x.as_deref(),
                         format!("{n} citations of notes lifted to their structure"),
                     );
                 }
@@ -2395,7 +2403,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                         rows,
                         FoldKind::Merged,
                         true,
-                        x.as_ref(),
+                        x.as_deref(),
                         "contact details joined",
                     );
                 }
@@ -2407,13 +2415,13 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                     .iter()
                     .find(|r| is(r, "HEAD"))
                     .and_then(|h| child(h, "_ROOT"))
-                    .and_then(|r| r.pointer().map(|p| p.as_str().to_string()))
+                    .and_then(|r| r.pointer().map(str::to_string))
             });
             if let Some(home) = home {
                 let first_indi = records.iter().position(|r| is(r, "INDI"));
-                let at = records.iter().position(|r| {
-                    is(r, "INDI") && r.xref.as_ref().is_some_and(|x| x.as_str() == home)
-                });
+                let at = records
+                    .iter()
+                    .position(|r| is(r, "INDI") && r.xref.as_deref().is_some_and(|x| x == home));
                 if let (Some(first), Some(at)) = (first_indi, at) {
                     if at != first {
                         let moved = records.remove(at);
@@ -2423,7 +2431,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                             rows,
                             FoldKind::Reordered,
                             false,
-                            x.as_ref(),
+                            x.as_deref(),
                             "the home person first",
                         );
                     }
@@ -2456,7 +2464,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                             rows,
                             FoldKind::Added,
                             false,
-                            x.as_ref(),
+                            x.as_deref(),
                             format!("a note on {} so that it is kept", e.tag),
                         );
                     }
@@ -2515,7 +2523,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                     rows,
                     FoldKind::Merged,
                     true,
-                    x.as_ref(),
+                    x.as_deref(),
                     format!("{} other names in one _AKA", others.len()),
                 );
             }
@@ -2531,7 +2539,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                             rows,
                             FoldKind::Recoded,
                             false,
-                            x.as_ref(),
+                            x.as_deref(),
                             "a name given empty surname slashes",
                         );
                     }
@@ -2569,7 +2577,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                             rows,
                             FoldKind::AsText,
                             true,
-                            x.as_ref(),
+                            x.as_deref(),
                             "a second place as a note",
                         );
                     }
@@ -2577,7 +2585,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
             }
         }
         Op::CitationRefnToSource => {
-            let mut moves: Vec<(String, Structure)> = Vec::new();
+            let mut moves: Vec<(String, Draft<'s>)> = Vec::new();
             for r in records.iter_mut() {
                 collect_citation_refns(r, &mut moves);
             }
@@ -2592,7 +2600,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                         rows,
                         FoldKind::Moved,
                         true,
-                        x.as_ref(),
+                        x.as_deref(),
                         "a citation's REFN on its source",
                     );
                 }
@@ -2619,7 +2627,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                     };
                     if let Some(label) = label {
                         retag(c, "MARR");
-                        c.payload = Payload::None;
+                        c.payload = Value::None;
                         c.substructures
                             .retain(|s| !matches!(s.tag.as_str(), "TYPE" | "PHRASE"));
                         c.substructures.insert(0, text_node("TYPE", label));
@@ -2627,7 +2635,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                             rows,
                             FoldKind::Relabelled,
                             false,
-                            x.as_ref(),
+                            x.as_deref(),
                             format!("a union as MARR TYPE {label}"),
                         );
                     }
@@ -2650,7 +2658,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                     rows,
                     FoldKind::Added,
                     false,
-                    x.as_ref(),
+                    x.as_deref(),
                     "SEX U for an unknown sex",
                 );
             }
@@ -2667,10 +2675,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                             && child_text(c, "RELA")
                                 .is_some_and(|t| t.to_ascii_lowercase().starts_with("god"))
                     })
-                    .filter_map(|c| {
-                        c.pointer()
-                            .and_then(|p| person_name(&snapshot, &idx, p.as_str()))
-                    })
+                    .filter_map(|c| c.pointer().and_then(|p| person_name(&snapshot, &idx, p)))
                     .collect();
                 if godparents.is_empty() {
                     continue;
@@ -2687,7 +2692,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                             rows,
                             FoldKind::Added,
                             false,
-                            x.as_ref(),
+                            x.as_deref(),
                             "_GODP beside the godparents",
                         );
                     }
@@ -2697,7 +2702,7 @@ fn run(step: &Step, records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
     }
 }
 
-fn fix_colons(s: &mut Structure, changed: &mut bool) {
+fn fix_colons(s: &mut Draft<'_>, changed: &mut bool) {
     if let Some(t) = s.text() {
         if t.contains(':') {
             let fixed = t.replace(':', " ");
@@ -2723,7 +2728,7 @@ fn fix_colons(s: &mut Structure, changed: &mut bool) {
 }
 
 /// Calls `f` on every note text (`NOTE` with text) under `s`.
-fn each_note(s: &mut Structure, f: &mut dyn FnMut(&mut Structure)) {
+fn each_note<'s>(s: &mut Draft<'s>, f: &mut dyn FnMut(&mut Draft<'s>)) {
     for c in &mut s.substructures {
         if is(c, "NOTE") && c.text().is_some() {
             f(c);
@@ -2735,7 +2740,7 @@ fn each_note(s: &mut Structure, f: &mut dyn FnMut(&mut Structure)) {
     }
 }
 
-fn each_tag(s: &mut Structure, tag: &str, f: &mut dyn FnMut(&mut Structure)) {
+fn each_tag<'s>(s: &mut Draft<'s>, tag: &str, f: &mut dyn FnMut(&mut Draft<'s>)) {
     for c in &mut s.substructures {
         if is(c, tag) {
             f(c);
@@ -2744,7 +2749,7 @@ fn each_tag(s: &mut Structure, tag: &str, f: &mut dyn FnMut(&mut Structure)) {
     }
 }
 
-fn each_date<'s>(s: &'s Structure, f: &mut dyn FnMut(&'s str)) {
+fn each_date<'s>(s: &'s Draft<'s>, f: &mut dyn FnMut(&'s str)) {
     for c in &s.substructures {
         if is(c, "DATE") {
             if let Some(t) = c.text() {
@@ -2877,7 +2882,7 @@ fn decode_entities(t: &str) -> String {
 }
 
 /// A structure and its substructures as one line of text.
-fn flatten(s: &Structure) -> String {
+fn flatten(s: &Draft<'_>) -> String {
     let mut parts = Vec::new();
     if let Some(v) = s.payload.as_str() {
         parts.push(v.to_string());
@@ -2889,7 +2894,7 @@ fn flatten(s: &Structure) -> String {
 }
 
 /// An address as one line.
-fn address_text(addr: &Structure) -> String {
+fn address_text(addr: &Draft<'_>) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(t) = addr.text() {
         parts.extend(
@@ -2952,7 +2957,7 @@ fn takes_note(path: &[&str]) -> bool {
 /// nearest structure that takes one: the texts that found none, for the
 /// caller; `lost` the tags folded (and whether as a note).
 fn extensions_as_notes(
-    s: &mut Structure,
+    s: &mut Draft<'_>,
     path: &mut Vec<String>,
     lost: &mut Vec<(String, bool)>,
 ) -> Vec<String> {
@@ -2989,7 +2994,7 @@ fn extensions_as_notes(
     rest
 }
 
-fn flatten_lines(s: &mut Structure, changed: &mut bool) {
+fn flatten_lines(s: &mut Draft<'_>, changed: &mut bool) {
     if let Some(t) = s.text() {
         if t.contains('\n') {
             let flat = t.split('\n').map(str::trim).collect::<Vec<_>>().join(" ");
@@ -3029,11 +3034,11 @@ fn paf_uid(value: &str) -> Option<String> {
     ))
 }
 
-fn lift_note_sources(s: &mut Structure, n: &mut usize) {
+fn lift_note_sources<'s>(s: &mut Draft<'s>, n: &mut usize) {
     let mut lifted = Vec::new();
     for c in &mut s.substructures {
         if is(c, "NOTE") {
-            let sources: Vec<Structure> = c
+            let sources: Vec<Draft<'s>> = c
                 .substructures
                 .iter()
                 .filter(|x| is(x, "SOUR"))
@@ -3051,7 +3056,7 @@ fn lift_note_sources(s: &mut Structure, n: &mut usize) {
     s.substructures.extend(lifted);
 }
 
-fn join_contacts(s: &mut Structure, join: bool, n: &mut usize) {
+fn join_contacts(s: &mut Draft<'_>, join: bool, n: &mut usize) {
     for c in &mut s.substructures {
         join_contacts(c, join, n);
     }
@@ -3098,11 +3103,11 @@ fn join_contacts(s: &mut Structure, join: bool, n: &mut usize) {
     }
 }
 
-fn collect_citation_refns(s: &mut Structure, out: &mut Vec<(String, Structure)>) {
+fn collect_citation_refns<'s>(s: &mut Draft<'s>, out: &mut Vec<(String, Draft<'s>)>) {
     for c in &mut s.substructures {
         if is(c, "SOUR") {
-            if let Some(p) = c.pointer().map(|p| p.as_str().to_string()) {
-                let refns: Vec<Structure> = c
+            if let Some(p) = c.pointer().map(str::to_string) {
+                let refns: Vec<Draft<'s>> = c
                     .substructures
                     .iter()
                     .filter(|x| is(x, "REFN"))
@@ -3120,32 +3125,29 @@ fn collect_citation_refns(s: &mut Structure, out: &mut Vec<(String, Structure)>)
 
 /// The media type or format of a multimedia link (its own `FILE.FORM`, or
 /// its record's).
-fn media_form(
-    link: &Structure,
-    records: &[Structure],
+fn media_form<'s>(
+    link: &Draft<'s>,
+    records: &[Draft<'s>],
     idx: &HashMap<String, usize>,
 ) -> Option<String> {
-    let of = |s: &Structure| {
+    let of = |s: &Draft<'s>| {
         child(s, "FILE")
             .and_then(|f| child_text(f, "FORM"))
             .or_else(|| child_text(s, "FORM"))
             .map(str::to_string)
     };
     match link.pointer() {
-        Some(p) => idx
-            .get(p.as_str())
-            .and_then(|&i| records.get(i))
-            .and_then(of),
+        Some(p) => idx.get(p).and_then(|&i| records.get(i)).and_then(of),
         None => of(link),
     }
 }
 
 /// A citation as one text: the source's title, the page, the repository.
-fn citation_text(c: &Structure, records: &[Structure], idx: &HashMap<String, usize>) -> String {
+fn citation_text<'s>(c: &Draft<'s>, records: &[Draft<'s>], idx: &HashMap<String, usize>) -> String {
     let mut parts: Vec<String> = Vec::new();
     match c.pointer() {
         Some(p) => {
-            if let Some(s) = idx.get(p.as_str()).and_then(|&i| records.get(i)) {
+            if let Some(s) = idx.get(p).and_then(|&i| records.get(i)) {
                 let title = child_text(s, "TITL")
                     .or_else(|| child_text(s, "ABBR"))
                     .map(|t| t.replace('\n', " "));
@@ -3156,7 +3158,7 @@ fn citation_text(c: &Structure, records: &[Structure], idx: &HashMap<String, usi
                 for repo in s.substructures.iter().filter(|r| is(r, "REPO")) {
                     if let Some(name) = repo
                         .pointer()
-                        .and_then(|r| idx.get(r.as_str()))
+                        .and_then(|r| idx.get(r))
                         .and_then(|&i| records.get(i))
                         .and_then(|r| child_text(r, "NAME"))
                     {
@@ -3178,7 +3180,7 @@ fn citation_text(c: &Structure, records: &[Structure], idx: &HashMap<String, usi
 }
 
 /// Every citation of a source record written inline.
-fn inline_sources(records: &mut [Structure], rows: &'static [&'static str], cx: &mut Cx<'_>) {
+fn inline_sources(records: &mut [Draft<'_>], rows: &'static [&'static str], cx: &mut Cx<'_>) {
     let (snapshot, idx) = lookup(records);
     for r in records
         .iter_mut()
@@ -3193,16 +3195,16 @@ fn inline_sources(records: &mut [Structure], rows: &'static [&'static str], cx: 
                 rows,
                 FoldKind::AsText,
                 lossy,
-                x.as_ref(),
+                x.as_deref(),
                 format!("{n} citations of source records written inline"),
             );
         }
     }
 }
 
-fn inline_citations(
-    s: &mut Structure,
-    records: &[Structure],
+fn inline_citations<'s>(
+    s: &mut Draft<'s>,
+    records: &[Draft<'s>],
     idx: &HashMap<String, usize>,
     n: &mut usize,
     lossy: &mut bool,
@@ -3237,11 +3239,15 @@ fn inline_citations(
 }
 
 /// Every text citation made a pointer to a new source record.
-fn source_records(records: &mut Vec<Structure>, rows: &'static [&'static str], cx: &mut Cx<'_>) {
-    let mut new: Vec<Structure> = Vec::new();
+fn source_records<'s>(
+    records: &mut Vec<Draft<'s>>,
+    rows: &'static [&'static str],
+    cx: &mut Cx<'_>,
+) {
+    let mut new: Vec<Draft<'s>> = Vec::new();
     let mut taken: Vec<String> = records
         .iter()
-        .filter_map(|r| r.xref.as_ref().map(|x| x.as_str().to_string()))
+        .filter_map(|r| r.xref.as_ref().map(std::string::ToString::to_string))
         .collect();
     let mut made: HashMap<String, Xref> = HashMap::new();
     for r in records
@@ -3264,8 +3270,8 @@ fn source_records(records: &mut Vec<Structure>, rows: &'static [&'static str], c
                     }
                 };
                 taken.push(xref.as_str().to_string());
-                let mut s = Structure::new("SOUR");
-                s.xref = Some(xref.clone());
+                let mut s = Draft::new("SOUR");
+                s.xref = Some(Cow::Owned(xref.as_str().to_string()));
                 s.substructures.push(text_node("TITL", title));
                 new.push(s);
                 made.insert(title.to_string(), xref.clone());
@@ -3278,7 +3284,7 @@ fn source_records(records: &mut Vec<Structure>, rows: &'static [&'static str], c
                 rows,
                 FoldKind::Moved,
                 false,
-                x.as_ref(),
+                x.as_deref(),
                 format!("{n} text citations made source records"),
             );
         }
@@ -3292,15 +3298,15 @@ fn source_records(records: &mut Vec<Structure>, rows: &'static [&'static str], c
     }
 }
 
-fn source_pointers(s: &mut Structure, make: &mut dyn FnMut(&str) -> Xref, n: &mut usize) {
+fn source_pointers<'s>(s: &mut Draft<'s>, make: &mut dyn FnMut(&str) -> Xref, n: &mut usize) {
     for c in &mut s.substructures {
         if is(c, "SOUR") {
-            if let Payload::Text(t) = &c.payload {
+            if let Value::Text(t) = &c.payload {
                 let title = t.to_string();
                 let x = make(&title);
-                c.payload = Payload::Pointer(x);
+                c.payload = Value::Pointer(Cow::Owned(x.as_str().to_string()));
                 // The text's own lines are the title now; TEXT goes under DATA.
-                let texts: Vec<Structure> = c
+                let texts: Vec<Draft<'s>> = c
                     .substructures
                     .iter()
                     .filter(|s| is(s, "TEXT"))
@@ -3308,7 +3314,7 @@ fn source_pointers(s: &mut Structure, make: &mut dyn FnMut(&str) -> Xref, n: &mu
                     .collect();
                 if !texts.is_empty() {
                     c.substructures.retain(|s| !is(s, "TEXT"));
-                    let mut data = Structure::new("DATA");
+                    let mut data = Draft::new("DATA");
                     data.substructures.extend(texts);
                     c.substructures.push(data);
                 }
@@ -3321,7 +3327,7 @@ fn source_pointers(s: &mut Structure, make: &mut dyn FnMut(&str) -> Xref, n: &mu
 }
 
 /// Godparents of a baptism as person-level associations.
-fn godparents(records: &mut [Structure], rows: &'static [&'static str], cx: &mut Cx<'_>) {
+fn godparents(records: &mut [Draft<'_>], rows: &'static [&'static str], cx: &mut Cx<'_>) {
     let (snapshot, idx) = lookup(records);
     for r in records.iter_mut().filter(|r| is(r, "INDI")) {
         let x = r.xref.clone();
@@ -3335,19 +3341,19 @@ fn godparents(records: &mut [Structure], rows: &'static [&'static str], cx: &mut
             while k < e.substructures.len() {
                 let godparent = e.substructures.get(k).is_some_and(|a| {
                     (is(a, "ASSO") || is(a, "_ASSO"))
-                        && a.pointer().is_some_and(|p| !p.is_void())
+                        && a.pointer().is_some_and(|p| p != Xref::VOID)
                         && is_godparent(a)
                 });
                 if godparent {
                     let a = e.substructures.remove(k);
                     if let Some(p) = a.pointer() {
-                        let sex = person_sex(&snapshot, &idx, p.as_str());
+                        let sex = person_sex(&snapshot, &idx, p);
                         let word = match sex.as_deref() {
                             Some("M") => "Godfather",
                             Some("F") => "Godmother",
                             _ => "Godparent",
                         };
-                        found.push((p.clone(), word.to_string()));
+                        found.push((Xref::new(p), word.to_string()));
                     }
                     continue;
                 }
@@ -3395,13 +3401,13 @@ fn godparents(records: &mut [Structure], rows: &'static [&'static str], cx: &mut
             rows,
             FoldKind::Moved,
             false,
-            x.as_ref(),
+            x.as_deref(),
             format!("{n} godparents of a baptism as associations of the person"),
         );
     }
 }
 
-fn is_godparent(a: &Structure) -> bool {
+fn is_godparent(a: &Draft<'_>) -> bool {
     let word = child_text(a, "RELA")
         .or_else(|| child_text(a, "ROLE"))
         .unwrap_or_default()
@@ -3415,8 +3421,8 @@ fn is_godparent(a: &Structure) -> bool {
 }
 
 /// The event associations 5.5.1 has no place for, written in `style`.
-fn event_associations(
-    records: &mut [Structure],
+fn event_associations<'s>(
+    records: &mut [Draft<'s>],
     rows: &'static [&'static str],
     style: AssocStyle,
     cx: &mut Cx<'_>,
@@ -3425,7 +3431,7 @@ fn event_associations(
         return;
     }
     let (snapshot, idx) = lookup(records);
-    let mut reversed: Vec<(String, Structure)> = Vec::new();
+    let mut reversed: Vec<(String, Draft<'s>)> = Vec::new();
     for r in records.iter_mut().filter(|r| is(r, "INDI") || is(r, "FAM")) {
         let holder = r.xref.clone();
         let owner = holder.clone();
@@ -3463,7 +3469,7 @@ fn event_associations(
                             rows,
                             FoldKind::Relabelled,
                             false,
-                            holder.as_ref(),
+                            holder.as_deref(),
                             format!("a witness of {event} as {tag}"),
                         );
                     }
@@ -3474,7 +3480,7 @@ fn event_associations(
                                 .push(text_node("RELA", &format!("{role}@{record_tag}:{event}")));
                             s.substructures.extend(rest);
                             reversed.push((p.as_str().to_string(), s));
-                            cx.fold(rows, FoldKind::Moved, false, holder.as_ref(), format!("a witness of {event} on the witness, RELA {role}@{record_tag}:{event}"));
+                            cx.fold(rows, FoldKind::Moved, false, holder.as_deref(), format!("a witness of {event} on the witness, RELA {role}@{record_tag}:{event}"));
                         }
                     }
                     (_, _) => {
@@ -3488,7 +3494,7 @@ fn event_associations(
                             rows,
                             FoldKind::AsText,
                             true,
-                            holder.as_ref(),
+                            holder.as_deref(),
                             format!("a witness of {event} as a note"),
                         );
                     }
@@ -3512,18 +3518,18 @@ fn event_associations(
 
 /// What an association says: its role, the person it points to, that
 /// person's name (or the phrase naming them) and its other substructures.
-fn association_parts(
-    found: &Structure,
-    records: &[Structure],
+fn association_parts<'s>(
+    found: &Draft<'s>,
+    records: &[Draft<'s>],
     idx: &HashMap<String, usize>,
-) -> (String, Option<Xref>, String, Vec<Structure>) {
+) -> (String, Option<Xref>, String, Vec<Draft<'s>>) {
     let role = child_text(found, "RELA")
         .or_else(|| child(found, "ROLE").and_then(|r| child_text(r, "PHRASE")))
         .or_else(|| child_text(found, "ROLE"))
         .unwrap_or("Witness")
         .trim()
         .to_string();
-    let target = found.pointer().filter(|p| !p.is_void()).cloned();
+    let target = found.pointer().filter(|p| *p != Xref::VOID).map(Xref::new);
     let name = target
         .as_ref()
         .and_then(|p| person_name(records, idx, p.as_str()))
@@ -3540,7 +3546,7 @@ fn association_parts(
 
 /// Each association as an `EVEN` + `TYPE Associate`.
 fn associations_as_events(
-    records: &mut [Structure],
+    records: &mut [Draft<'_>],
     rows: &'static [&'static str],
     name_in_payload: bool,
     cx: &mut Cx<'_>,
@@ -3570,8 +3576,8 @@ fn associations_as_events(
         for a in assocs {
             let name = a
                 .pointer()
-                .filter(|p| !p.is_void())
-                .and_then(|p| person_name(&snapshot, &idx, p.as_str()))
+                .filter(|p| *p != Xref::VOID)
+                .and_then(|p| person_name(&snapshot, &idx, p))
                 .or_else(|| child_text(&a, "PHRASE").map(str::to_string))
                 .unwrap_or_default();
             let rela = child_text(&a, "RELA")
@@ -3590,7 +3596,7 @@ fn associations_as_events(
                 rows,
                 FoldKind::AsText,
                 true,
-                x.as_ref(),
+                x.as_deref(),
                 "an association as EVEN TYPE Associate",
             );
         }
@@ -3598,7 +3604,7 @@ fn associations_as_events(
 }
 
 /// Links to multimedia records written inline.
-fn inline_media(records: &mut [Structure], rows: &'static [&'static str], cx: &mut Cx<'_>) {
+fn inline_media(records: &mut [Draft<'_>], rows: &'static [&'static str], cx: &mut Cx<'_>) {
     if cx.v7 {
         return;
     }
@@ -3608,7 +3614,7 @@ fn inline_media(records: &mut [Structure], rows: &'static [&'static str], cx: &m
         let mut n = 0;
         let mut lossy = false;
         for link in r.substructures.iter_mut().filter(|c| is(c, "OBJE")) {
-            let Some(p) = link.pointer().cloned() else {
+            let Some(p) = link.pointer().map(Xref::new) else {
                 continue;
             };
             let Some(record) = idx.get(p.as_str()).and_then(|&i| snapshot.get(i)) else {
@@ -3618,7 +3624,7 @@ fn inline_media(records: &mut [Structure], rows: &'static [&'static str], cx: &m
                 continue;
             };
             // 5.5.1: `OBJE` + `FILE` (+ `FORM` + `TYPE`) + `TITL`.
-            let mut inline = Structure::new("OBJE");
+            let mut inline = Draft::new("OBJE");
             let mut first = file.clone();
             first
                 .substructures
@@ -3647,7 +3653,7 @@ fn inline_media(records: &mut [Structure], rows: &'static [&'static str], cx: &m
                 rows,
                 FoldKind::Moved,
                 lossy,
-                x.as_ref(),
+                x.as_deref(),
                 format!("{n} links to multimedia records written inline"),
             );
         }
@@ -3754,8 +3760,8 @@ fn place_in(text: &str, mapping: &[Option<usize>], known: bool, style: PlaceStyl
 
 /// Names the places' format in the header ([`places`]) when every place
 /// left, but those of extensions, follows it.
-fn place_form(records: &mut [Structure], style: PlaceStyle) {
-    fn all_fit(s: &Structure, style: PlaceStyle) -> bool {
+fn place_form(records: &mut [Draft<'_>], style: PlaceStyle) {
+    fn all_fit(s: &Draft<'_>, style: PlaceStyle) -> bool {
         s.substructures.iter().all(|c| {
             if c.tag.is_extension() {
                 return true;
@@ -3781,7 +3787,7 @@ fn place_form(records: &mut [Structure], style: PlaceStyle) {
             None => p.substructures.push(text_node("FORM", form)),
         }
     } else {
-        let mut p = Structure::new("PLAC");
+        let mut p = Draft::new("PLAC");
         p.substructures.push(text_node("FORM", form));
         head.substructures.push(p);
     }
@@ -3789,7 +3795,7 @@ fn place_form(records: &mut [Structure], style: PlaceStyle) {
 
 /// Places in a target's format.
 fn places(
-    records: &mut [Structure],
+    records: &mut [Draft<'_>],
     rows: &'static [&'static str],
     style: PlaceStyle,
     cx: &mut Cx<'_>,
@@ -3880,7 +3886,7 @@ fn places(
 /// The writer's own system identifier in `HEAD.SOUR`: an export never
 /// passes for another program (importers switch dialects on it, EXF-082,
 /// EXC-018, EXC-057).
-fn own_source(records: &mut [Structure], cx: &mut Cx<'_>) {
+fn own_source(records: &mut [Draft<'_>], cx: &mut Cx<'_>) {
     const ROWS: &[&str] = &["EXF-082", "EXC-018", "EXC-057"];
     let Some(head) = records.iter_mut().find(|r| is(r, "HEAD")) else {
         return;
@@ -3896,7 +3902,7 @@ fn own_source(records: &mut [Structure], cx: &mut Cx<'_>) {
         let old = std::mem::replace(
             head.substructures
                 .get_mut(at)
-                .unwrap_or(&mut Structure::default()),
+                .unwrap_or(&mut Draft::default()),
             sour,
         );
         payload_str(&old).to_string()
@@ -3918,23 +3924,23 @@ fn own_source(records: &mut [Structure], cx: &mut Cx<'_>) {
 /// Leaves out the records `RESN` restricts, and the pointers to them.
 /// Leaves out the credentials the records hold, as the writer does
 /// ([`Credentials`]), saying so.
-fn omit_credentials(records: &mut [Structure], cx: &mut Cx<'_>) {
+fn omit_credentials(records: &mut [Draft<'_>], cx: &mut Cx<'_>) {
     for r in records {
-        let dropped = crate::writer::drop_credentials(r);
+        let dropped = crate::writer::drop_draft_credentials(r);
         if dropped > 0 {
             let x = r.xref.clone();
             cx.fold(
                 &[],
                 FoldKind::Omitted,
                 true,
-                x.as_ref(),
+                x.as_deref(),
                 format!("{dropped} credentials (_PASS, _USER) left out"),
             );
         }
     }
 }
 
-fn omit_private(records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
+fn omit_private(records: &mut Vec<Draft<'_>>, cx: &mut Cx<'_>) {
     const ROWS: &[&str] = &["EXF-022", "EXC-056", "EXC-074"];
     let private: Vec<Xref> = records
         .iter()
@@ -3944,14 +3950,18 @@ fn omit_private(records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
                 t.contains("privacy") || t.contains("confidential")
             })
         })
-        .filter_map(|r| r.xref.clone())
+        .filter_map(|r| r.xref.as_deref().map(Xref::new))
         .collect();
     if private.is_empty() {
         return;
     }
-    records.retain(|r| r.xref.as_ref().is_none_or(|x| !private.contains(x)));
+    records.retain(|r| {
+        r.xref
+            .as_deref()
+            .is_none_or(|x| !private.iter().any(|p| p.as_str() == x))
+    });
     for r in records.iter_mut() {
-        drop_pointers(r, &|p| private.contains(p));
+        drop_pointers(r, &|p| private.iter().any(|x| x.as_str() == p));
     }
     cx.fold(
         ROWS,
@@ -3962,7 +3972,7 @@ fn omit_private(records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
     );
 }
 
-fn drop_pointers(s: &mut Structure, gone: &dyn Fn(&Xref) -> bool) {
+fn drop_pointers(s: &mut Draft<'_>, gone: &dyn Fn(&str) -> bool) {
     s.substructures
         .retain(|c| c.pointer().is_none_or(|p| !gone(p)));
     for c in &mut s.substructures {
@@ -3971,7 +3981,7 @@ fn drop_pointers(s: &mut Structure, gone: &dyn Fn(&Xref) -> bool) {
 }
 
 /// Leaves out the multimedia links and records.
-fn omit_media(records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
+fn omit_media(records: &mut Vec<Draft<'_>>, cx: &mut Cx<'_>) {
     const ROWS: &[&str] = &["EXC-002", "EXC-047", "EXC-055", "EXC-107"];
     let before = records.len();
     records.retain(|r| !is(r, "OBJE"));
@@ -3991,7 +4001,7 @@ fn omit_media(records: &mut Vec<Structure>, cx: &mut Cx<'_>) {
     }
 }
 
-fn drop_tag(s: &mut Structure, tag: &str, n: &mut usize) {
+fn drop_tag(s: &mut Draft<'_>, tag: &str, n: &mut usize) {
     let before = s.substructures.len();
     s.substructures.retain(|c| !is(c, tag));
     *n += before - s.substructures.len();
@@ -4000,7 +4010,7 @@ fn drop_tag(s: &mut Structure, tag: &str, n: &mut usize) {
     }
 }
 
-fn omit_change_dates(records: &mut [Structure], cx: &mut Cx<'_>) {
+fn omit_change_dates(records: &mut [Draft<'_>], cx: &mut Cx<'_>) {
     const ROWS: &[&str] = &["EXC-068"];
     let mut n = 0;
     for r in records.iter_mut() {
@@ -4018,7 +4028,7 @@ fn omit_change_dates(records: &mut [Structure], cx: &mut Cx<'_>) {
 }
 
 /// Media paths in the target's form.
-fn media_paths(records: &mut [Structure], cx: &mut Cx<'_>) {
+fn media_paths(records: &mut [Draft<'_>], cx: &mut Cx<'_>) {
     let style = cx.target.media;
     if style == MediaPaths::Keep {
         return;
@@ -4072,7 +4082,7 @@ fn media_paths(records: &mut [Structure], cx: &mut Cx<'_>) {
     }
 }
 
-fn each_media_file(s: &mut Structure, f: &mut dyn FnMut(&mut Structure)) {
+fn each_media_file<'s>(s: &mut Draft<'s>, f: &mut dyn FnMut(&mut Draft<'s>)) {
     let obje = is(s, "OBJE");
     for c in &mut s.substructures {
         if obje && is(c, "FILE") {
@@ -4084,20 +4094,20 @@ fn each_media_file(s: &mut Structure, f: &mut dyn FnMut(&mut Structure)) {
 
 /// Record identifiers of at most `max` characters, delimiters excluded.
 fn short_xrefs(
-    records: &mut [Structure],
+    records: &mut [Draft<'_>],
     rows: &'static [&'static str],
     max: usize,
     cx: &mut Cx<'_>,
 ) {
     let taken: Vec<String> = records
         .iter()
-        .filter_map(|r| r.xref.as_ref().map(|x| x.as_str().to_string()))
+        .filter_map(|r| r.xref.as_ref().map(std::string::ToString::to_string))
         .collect();
     let mut map: HashMap<String, Xref> = HashMap::new();
     let mut next = 0_u32;
     for r in records.iter() {
         let Some(x) = &r.xref else { continue };
-        if x.id().chars().count() <= max {
+        if Xref::new(&**x).id().chars().count() <= max {
             continue;
         }
         let prefix = match r.tag.as_str() {
@@ -4117,7 +4127,7 @@ fn short_xrefs(
                 break Xref::new(candidate);
             }
         };
-        map.insert(x.as_str().to_string(), new);
+        map.insert(x.to_string(), new);
     }
     if map.is_empty() {
         return;
@@ -4135,20 +4145,28 @@ fn short_xrefs(
     );
 }
 
-fn remap(s: &mut Structure, map: &HashMap<String, Xref>) {
+fn remap(s: &mut Draft<'_>, map: &HashMap<String, Xref>) {
     if let Some(x) = &s.xref {
-        if let Some(new) = map.get(x.as_str()) {
-            s.xref = Some(new.clone());
+        if let Some(new) = map.get(&**x) {
+            s.xref = Some(Cow::Owned(new.as_str().to_string()));
         }
     }
-    if let Payload::Pointer(p) = &s.payload {
-        if let Some(new) = map.get(p.as_str()) {
-            s.payload = Payload::Pointer(new.clone());
+    if let Value::Pointer(p) = &s.payload {
+        if let Some(new) = map.get(&**p) {
+            s.payload = Value::Pointer(Cow::Owned(new.as_str().to_string()));
         }
     }
     for c in &mut s.substructures {
         remap(c, map);
     }
+}
+
+/// The conformance repair of drafts, as the writer makes it.
+fn conform_drafts(records: &mut Vec<Draft<'_>>, to: GedcomVersion) -> Vec<Repair> {
+    let mut structures: Vec<Structure> = records.iter().map(Draft::to_structure).collect();
+    let repairs = crate::spec::conform(&mut structures, to);
+    *records = structures.into_iter().map(Draft::from_owned).collect();
+    repairs
 }
 
 #[cfg(test)]

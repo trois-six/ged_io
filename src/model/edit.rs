@@ -824,6 +824,12 @@ impl Index {
         }
     }
 
+    /// Whether a record placed so far has identifier `id`.
+    #[inline]
+    pub(crate) fn is_defined(&self, id: XrefId) -> bool {
+        self.def(id) != 0
+    }
+
     /// Bytes held.
     pub(crate) fn heap_size(&self) -> usize {
         self.defs.capacity() * 4
