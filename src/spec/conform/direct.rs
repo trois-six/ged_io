@@ -349,6 +349,9 @@ pub(crate) struct Direct<'n> {
     /// The pointers between records kept so far, for the 7.x pointer
     /// rules ([`crate::spec::graph`]).
     graph: Graph,
+    /// Whether the last record [`Direct::record`] answered `None` of needs
+    /// converting, and nothing else ([`Direct::wants_converting`]).
+    converts: bool,
 }
 
 impl<'n> Direct<'n> {
@@ -461,6 +464,7 @@ impl<'n> Direct<'n> {
             first,
             watch: None,
             graph: Graph::default(),
+            converts: false,
         })
     }
 
@@ -470,6 +474,35 @@ impl<'n> Direct<'n> {
     pub(crate) fn watch(&mut self, watch: Rc<Watch>) {
         self.arena.set_stream_watch(Some(Rc::clone(&watch)));
         self.watch = Some(watch);
+    }
+
+    /// The arena of the records kept, which [`Rec::to_structure`] reads.
+    pub(crate) fn c_arena(&self) -> &Flat<'n> {
+        &self.c.arena
+    }
+
+    /// Whether the record [`Direct::record`] last answered `None` of needs
+    /// converting, and nothing else seen yet: converted alone
+    /// ([`crate::convert::Watch::convert_alone`]), it is to be checked
+    /// again ([`Direct::record_converted`]).
+    pub(crate) fn wants_converting(&self) -> bool {
+        self.converts
+    }
+
+    /// [`Direct::record`] of a record just converted (or found to need
+    /// no converting), which needs no more.
+    pub(crate) fn record_converted<N: Node<'n>>(
+        &mut self,
+        index: usize,
+        r: &mut Rec<'n, N>,
+        xref: Option<Cow<'n, str>>,
+    ) -> Option<Place> {
+        let watch = self.watch.take();
+        self.arena.set_stream_watch(None);
+        let place = self.record(index, r, xref);
+        self.arena.set_stream_watch(watch.clone());
+        self.watch = watch;
+        place
     }
 
     /// The stub submitter record to write first, after the header, when
@@ -515,6 +548,7 @@ impl<'n> Direct<'n> {
         r: &mut Rec<'n, N>,
         xref: Option<Cow<'n, str>>,
     ) -> Option<Place> {
+        self.converts = false;
         let mut walk = Walk {
             size: 0,
             pending: None,
@@ -533,6 +567,7 @@ impl<'n> Direct<'n> {
             self.arena.begin_stream(xref);
             b.build(&mut self.arena);
             if self.arena.stream_converts() {
+                self.converts = true;
                 return None;
             }
             let clean = !self.arena.spoiled()
@@ -604,6 +639,7 @@ impl<'n> Direct<'n> {
                 let root = self.arena.root();
                 if let (Some(w), Some(root)) = (&self.watch, root) {
                     if w.needs(root) {
+                        self.converts = true;
                         return None;
                     }
                 }
@@ -614,6 +650,7 @@ impl<'n> Direct<'n> {
             }
             Body::Owned(s) => {
                 if self.watch.as_ref().is_some_and(|w| w.needs(&**s)) {
+                    self.converts = true;
                     return None;
                 }
                 (
@@ -623,6 +660,7 @@ impl<'n> Direct<'n> {
             }
             Body::Given(n) => {
                 if self.watch.as_ref().is_some_and(|w| w.needs(*n)) {
+                    self.converts = true;
                     return None;
                 }
                 (c.is_clean_record(*n, n.xref(), &mut walk), Place::Record)

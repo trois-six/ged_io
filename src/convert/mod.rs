@@ -449,32 +449,15 @@ impl Plan {
     /// The look for the records this plan would convert, for a writer
     /// that writes them as they are ([`Plan::of_dataset`] without a scan).
     pub(crate) fn watch(&self) -> Watch {
-        Watch::new(self.conv.clone())
+        let mut watch = Watch::new(self.conv.clone());
+        watch.order = self.order;
+        watch
     }
 
     /// The header converted, and its index among the records, when the
     /// conversion changes it.
     pub(crate) fn head(&self) -> Option<(usize, &Structure)> {
         self.head.as_ref().map(|(i, h)| (*i, h))
-    }
-
-    /// Whether the plan converts no record and adds none (its header
-    /// aside).
-    #[cfg(debug_assertions)]
-    pub(crate) fn converts_no_record(&self) -> bool {
-        self.added.is_empty() && self.actions.iter().all(|a| matches!(a, Action::Keep))
-    }
-
-    /// The records the plan converts, as they are written (tests).
-    #[cfg(debug_assertions)]
-    pub(crate) fn debug_converted<'a, B: Build<'a>>(&self, built: &[B]) -> Vec<Structure> {
-        self.actions
-            .iter()
-            .zip(built)
-            .filter(|(a, _)| !matches!(a, Action::Keep))
-            .map(|(_, b)| built_structure(b))
-            .chain(self.added.iter().cloned())
-            .collect()
     }
 
     /// Converts record `index` (anew), as planned.
@@ -677,6 +660,8 @@ fn ranks<'t>(tags: impl ExactSizeIterator<Item = &'t str>) -> Vec<u8> {
 /// by tag and payload that spares nearly every structure the look.
 pub(crate) struct Watch {
     conv: Converter,
+    /// The order of the typed model the records come from, if they do.
+    order: Option<&'static FieldOrder>,
     /// By the index of a standard tag: the payloads with which a rule may
     /// apply to a structure of that tag ([`Converter::may_apply`]).
     tags: [u8; STANDARD_TAGS.len()],
@@ -706,8 +691,46 @@ impl Watch {
             special: conv.special_mask(),
             pointers: conv.watches_pointers(),
             conv,
+            order: None,
             tags,
         }
+    }
+
+    /// Converts record `s` on its own, as a plan converts it, when the
+    /// conversion changes nothing outside it: no record added, no
+    /// extension the header is to declare, the record kept with its tag and
+    /// identifier. Whether it changed (written as it was when not, as a
+    /// plan keeps it); `None` (`s` then in any state) when the conversion
+    /// is not its own, for the dataset to be planned whole.
+    pub(crate) fn convert_alone(&self, s: &mut Structure) -> Option<bool> {
+        /// Names no record: a record the conversion adds is not local.
+        struct Nothing(bool);
+        impl Fresh for Nothing {
+            fn fresh(&mut self, prefix: &str) -> Box<str> {
+                self.0 = true;
+                format!("@{prefix}@").into()
+            }
+        }
+        let (tag, xref) = (s.tag.clone(), s.xref.clone());
+        let mut fresh = Nothing(false);
+        let mut out = Out::default();
+        let fate = self.conv.record(s, &mut fresh, &mut out);
+        if fate != Fate::Keep
+            || fresh.0
+            || !out.records.is_empty()
+            || !out.known.is_empty()
+            || s.tag != tag
+            || s.xref != xref
+        {
+            return None;
+        }
+        if !out.changed {
+            return Some(false);
+        }
+        if let Some(order) = self.order {
+            model_order(s, self.conv.target(), order);
+        }
+        Some(true)
     }
 
     /// Whether a rule may apply to a structure of the standard tag
