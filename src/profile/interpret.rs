@@ -963,13 +963,26 @@ impl Op {
                 .any(|&(from, to)| from.eq_ignore_ascii_case(value.trim()) && to != value.trim()),
             Op::NegativeYear => negative_years(value, v7).is_some(),
             Op::AgeWords => age_words(value).is_some(),
+            // (A date of the commonest shapes is in the grammar's words, as
+            // `plain_date` finds it, with no word to look up.)
             Op::DateWords => {
-                value.trim().eq_ignore_ascii_case("stillborn") || date_dialect(value, v7).is_some()
+                !crate::spec::payload::is_simple_date(value, false, false)
+                    && (value.trim().eq_ignore_ascii_case("stillborn")
+                        || date_dialect(value, v7).is_some())
             }
             // Markup, or markup escaped once more.
             Op::Html => value.contains(['<', '&']),
             _ => true,
         }
+    }
+
+    /// Whether what [`Op::may_change`] answers depends on the payload
+    /// alone, the op's kind aside (no data of its own).
+    fn by_payload(self) -> bool {
+        matches!(
+            self,
+            Op::DateWords | Op::AgeWords | Op::NegativeYear | Op::Html
+        )
     }
 
     /// Whether [`apply`] leaves a structure as it is, without a trace, in
@@ -1080,7 +1093,24 @@ pub(crate) struct Interpreter<'r> {
     deferred: Vec<(Applied, Deferred)>,
     declare: BTreeSet<(Box<str>, String)>,
     schema: Vec<(String, String, String)>,
+    /// Room for [`Interpreter::record_in_arena`], kept from record to
+    /// record.
+    scratch: InArenaScratch,
 }
+
+/// What [`Interpreter::record_in_arena`] keeps its structures in, record
+/// after record: the structures a rule may change (each with its depth,
+/// where its substructures end, its place among the record's
+/// substructures, its index in the record, its rules in `found`).
+#[derive(Default)]
+struct InArenaScratch {
+    waiting: Vec<(u8, u32, usize, usize, std::ops::Range<usize>)>,
+    found: Vec<Applied>,
+}
+
+/// The deepest structure whose tags above [`Interpreter::record_in_arena`]
+/// keeps: one deeper is read as a draft.
+const IN_ARENA_DEPTH: usize = 32;
 
 /// What interpreting one record did ([`Interpreter::record`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1104,6 +1134,7 @@ impl<'r> Interpreter<'r> {
             deferred: Vec::new(),
             declare: BTreeSet::new(),
             schema: Vec::new(),
+            scratch: InArenaScratch::default(),
         }
     }
 
@@ -1194,7 +1225,7 @@ impl<'r> Interpreter<'r> {
     /// is reported until [`Interpreter::commit`]. `read` tells what the
     /// arena is.
     pub(crate) fn record_in_arena<'a>(
-        &self,
+        &mut self,
         root: NodeRef<'a>,
         read: &InArena<'a, '_>,
     ) -> InPlace<'a> {
@@ -1214,9 +1245,12 @@ impl<'r> Interpreter<'r> {
         // its substructures end, its place among the record's
         // substructures, and its rules (in `found`): few, found by their
         // tags alone.
-        let mut waiting: Vec<(u8, u32, usize, NodeRef<'a>, std::ops::Range<usize>)> = Vec::new();
-        let mut found: Vec<Applied> = Vec::new();
-        let mut path: Vec<&'a str> = Vec::new();
+        let InArenaScratch { waiting, found } = &mut self.scratch;
+        waiting.clear();
+        found.clear();
+        // (Made for the first structure a rule may change: most records
+        // have none.)
+        let mut path: Option<[&'a str; IN_ARENA_DEPTH]> = None;
         for (at, raw) in nodes.iter().enumerate() {
             let depth = raw.depth.wrapping_sub(top);
             let bit = if depth == 0 {
@@ -1239,7 +1273,12 @@ impl<'r> Interpreter<'r> {
                 continue;
             }
             // The tags above it, and its place: by the structures before it.
-            path.clear();
+            let path = path.get_or_insert([""; IN_ARENA_DEPTH]);
+            let Some(above_path) = path.get_mut(..usize::from(depth)) else {
+                look.emulated = false;
+                look.wanted = true;
+                break;
+            };
             let mut want = depth;
             let mut ordinal = 0;
             for above in nodes.get(..at).unwrap_or_default().iter().rev() {
@@ -1249,24 +1288,34 @@ impl<'r> Interpreter<'r> {
                 }
                 if d < want {
                     want = d;
-                    path.push(tag_of(above.tag, read.others));
+                    if let Some(slot) = above_path.get_mut(usize::from(d)) {
+                        *slot = tag_of(above.tag, read.others);
+                    }
                 }
             }
-            path.reverse();
             let from = found.len();
-            look.rules_for(n, &path, &mut found);
+            look.rules_for(n, above_path, found);
             if found.len() > from {
-                waiting.push((depth, raw.end, ordinal, n, from..found.len()));
+                waiting.push((depth, raw.end, ordinal, at, from..found.len()));
             }
             if !look.emulated && look.wanted {
                 break;
             }
         }
+        if !look.wanted {
+            // Nothing to do: nothing to report either.
+            return InPlace {
+                wanted: false,
+                done: None,
+            };
+        }
         // As `walk` applies them: a structure's substructures first, then
         // the structure; the record's substructures in order.
         waiting.sort_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)));
-        for (depth, _, ordinal, n, rules) in waiting {
-            look.apply(depth, ordinal, n, found.get(rules).unwrap_or_default());
+        for (depth, _, ordinal, at, rules) in waiting.drain(..) {
+            if let Some(n) = root.below(at) {
+                look.apply(depth, ordinal, n, found.get(rules).unwrap_or_default());
+            }
         }
         let (wanted, emulated) = (look.wanted, look.emulated);
         InPlace {
@@ -1283,18 +1332,18 @@ impl<'r> Interpreter<'r> {
     /// it).
     pub(crate) fn commit(
         &mut self,
-        notes: Notes,
+        notes: Notes<'_>,
         xref: Option<&str>,
         defined: &dyn Fn(&str) -> bool,
     ) {
         let record = xref.filter(|x| !defined(x)).map(Xref::new);
         for (applied, tag, action, line) in notes.0 {
             self.report
-                .note(&applied, &tag, action, line, record.as_ref());
+                .note(&applied, tag, action, line, record.as_ref());
             if action == Action::Kept && tag.starts_with('_') {
-                let uri = registered_uri(&tag)
-                    .map_or_else(|| docs_uri(applied.profile.id, &tag), str::to_string);
-                self.declare.insert((tag, uri));
+                let uri = registered_uri(tag)
+                    .map_or_else(|| docs_uri(applied.profile.id, tag), str::to_string);
+                self.declare.insert((tag.into(), uri));
             }
         }
     }
@@ -1411,16 +1460,16 @@ pub(crate) struct InPlace<'a> {
 /// report ([`Interpreter::commit`]), and what changed of its
 /// substructures, in their order.
 pub(crate) struct Done<'a> {
-    pub(crate) notes: Notes,
+    pub(crate) notes: Notes<'a>,
     pub(crate) edits: Vec<Edit<'a>>,
 }
 
 /// What the rules did to the structures of a record, to report.
-pub(crate) struct Notes(Vec<Note>);
+pub(crate) struct Notes<'a>(Vec<Note<'a>>);
 
 /// What a rule did to a structure: the rule, the tag, the action and the
 /// line.
-type Note = (Applied, Box<str>, Action, u32);
+type Note<'a> = (Applied, &'a str, Action, u32);
 
 /// The interpretation of a record where the lexer left it
 /// ([`Interpreter::record_in_arena`]).
@@ -1433,7 +1482,7 @@ struct Look<'r, 'a, 'x> {
     wanted: bool,
     /// Whether the rules that applied so far are those interpreted so.
     emulated: bool,
-    notes: Vec<Note>,
+    notes: Vec<Note<'a>>,
     /// What the rules changed of the record's substructures, in their
     /// order.
     edits: Vec<Edit<'a>>,
@@ -1455,8 +1504,23 @@ impl<'a> Look<'_, 'a, '_> {
             &rules.any
         };
         let mut text = None;
+        // An op that looks at the payload alone, found not to change it:
+        // the rules after with the same op are not asked again (rules of
+        // several contexts often have one).
+        let mut refused = None;
         any_of(rules.rules_of(tag, standard), any, |a| {
-            let text = text.get_or_insert_with(|| n.payload_str(self.read.escaping));
+            let op = a.rule.op;
+            let kind = op.by_payload().then(|| std::mem::discriminant(&op));
+            if kind.is_some() && kind == refused {
+                return false;
+            }
+            // (The tag and the kind of payload tell of these.)
+            let kind_only = matches!(op, Op::LongForm | Op::CaseFold | Op::RecordXref);
+            let text: &str = if kind_only {
+                ""
+            } else {
+                text.get_or_insert_with(|| n.payload_str(self.read.escaping))
+            };
             let payload = if n.is_pointer() {
                 PayloadRef::Pointer(text)
             } else if n.has_no_payload() {
@@ -1464,9 +1528,11 @@ impl<'a> Look<'_, 'a, '_> {
             } else {
                 PayloadRef::Text(text)
             };
-            a.rule
-                .op
-                .may_apply_to_parts(tag, payload, n.has_xref(), record, self.v7)
+            let may = op.may_apply_to_parts(tag, payload, n.has_xref(), record, self.v7);
+            if !may && kind.is_some() {
+                refused = kind;
+            }
+            may
         })
     }
 
@@ -1515,7 +1581,7 @@ impl<'a> Look<'_, 'a, '_> {
             }
             if depth != 1 {
                 if matches!(a.rule.op, Op::Known) {
-                    self.notes.push((a, tag.into(), Action::Kept, line));
+                    self.notes.push((a, tag, Action::Kept, line));
                 } else {
                     self.emulated = false;
                 }
@@ -1525,7 +1591,7 @@ impl<'a> Look<'_, 'a, '_> {
             let read = || Draft::of_arena(n, others, escaping);
             let new = match a.rule.op {
                 Op::Known => {
-                    self.notes.push((a, tag.into(), Action::Kept, line));
+                    self.notes.push((a, tag, Action::Kept, line));
                     return;
                 }
                 Op::Rename(to) => {
@@ -1598,7 +1664,7 @@ impl<'a> Look<'_, 'a, '_> {
     /// no trace).
     fn place(&mut self, n: NodeRef<'a>, k: usize, new: Draft<'a>, a: Applied) -> bool {
         let read = self.read;
-        let want = new.tag.as_str().trim_start_matches('_').to_string();
+        let want = new.tag.as_str().trim_start_matches('_');
         // Whether a sibling `c` holds `new` (`said`: as `holds` finds,
         // else equal).
         let like = |c: Sibling<'_, 'a>, said: bool| -> bool {
@@ -1652,7 +1718,7 @@ impl<'a> Look<'_, 'a, '_> {
             );
             self.edits
                 .insert(at, Edit::Replace(k, (!equal).then(|| Box::new(new))));
-            self.notes.push((a, tag.into(), Action::Replaced, n.line()));
+            self.notes.push((a, tag, Action::Replaced, n.line()));
             return true;
         }
         if equal {
@@ -1662,7 +1728,7 @@ impl<'a> Look<'_, 'a, '_> {
             .edits
             .partition_point(|e| matches!(e, Edit::Replace(j, _) | Edit::After(j, _) if *j < k));
         self.edits.insert(at, Edit::After(k, Box::new(new)));
-        self.notes.push((a, tag.into(), Action::Added, n.line()));
+        self.notes.push((a, tag, Action::Added, n.line()));
         true
     }
 }
