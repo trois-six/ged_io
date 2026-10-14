@@ -825,7 +825,9 @@ impl<'s> Flat<'s> {
                 FlatPayload::Text(t, _) => (crate::convert::TEXT, t.len()),
                 FlatPayload::Pointer(..) => (crate::convert::POINTER, 0),
             };
-            if w.may_apply(standard, kind, len, special) && watched(w, st, tag, &payload) {
+            if w.may_apply(standard, kind, len, special)
+                && watched(w, &st.open, st.xref.is_some(), tag, &payload)
+            {
                 st.converts = true;
                 st.spoiled = true;
                 return;
@@ -1145,18 +1147,24 @@ fn size_bound(
 /// (and the same size: more arguments make the compiler outline what each
 /// structure written calls).
 #[inline(never)]
-fn watched(watch: &Watch, st: &Stream<'_>, tag: &str, payload: &FlatPayload<'_>) -> bool {
-    let open = &st.open;
-    // Only a record has an identifier, there.
+fn watched(
+    watch: &Watch,
+    open: &[Open],
+    named: bool,
+    tag: &str,
+    payload: &FlatPayload<'_>,
+) -> bool {
+    // Only a record has an identifier, there (`named`).
     let record = open.is_empty();
-    let standard = super::standard_index(tag);
-    if watch.interprets_node(
-        tag,
-        standard,
-        payload_ref(payload),
-        record && st.xref.is_some(),
-        record,
-    ) {
+    if watch.has_interpretation()
+        && watch.interprets_node(
+            tag,
+            super::standard_index(tag),
+            payload_ref(payload),
+            record && named,
+            record,
+        )
+    {
         return true;
     }
     let n = open.len();

@@ -734,6 +734,12 @@ impl Watch {
         self.interp = Some(rules);
     }
 
+    /// Whether the watch interprets ([`Watch::interpreting`]).
+    #[inline]
+    pub(crate) fn has_interpretation(&self) -> bool {
+        self.interp.is_some()
+    }
+
     /// Whether interpretation may change a structure tagged `tag` (of
     /// index `standard` among the standard tags) with `payload` (and an
     /// identifier when `has_xref`), a record when `record`, wherever it is:
