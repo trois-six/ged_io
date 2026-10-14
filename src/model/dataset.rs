@@ -64,6 +64,10 @@ pub struct Dataset {
     /// conventions ([`crate::profile`]); what is left to interpret only in
     /// 7.x is interpreted when the dataset is written in 7.x.
     pub(crate) producer: Option<Box<(Detection, Interpretation)>>,
+    /// The `HEAD.SOUR` system identifier the dataset was read with: an
+    /// export tells it from one the program set
+    /// ([`crate::profile::HeadSource`]).
+    pub(crate) read_source: Option<Box<str>>,
 }
 
 impl AsRef<Store> for Dataset {
@@ -533,6 +537,22 @@ impl Dataset {
         self.producer
             .as_deref()
             .map_or(Interpretation::None, |&(_, level)| level)
+    }
+
+    /// Notes the `HEAD.SOUR` system identifier the dataset was just read
+    /// with ([`Dataset::read_source`]).
+    pub(crate) fn note_read_source(&mut self) {
+        let source = self.header.as_deref().and_then(|h| h.source.as_ref());
+        // A program's export through this crate names the program: its
+        // `HEAD.SOUR` is the program's (`profile::HeadSource`).
+        let exported = source.is_some_and(|s| {
+            s.extra
+                .iter()
+                .any(|n| self.store.tag(n.tag) == crate::profile::export::MARKER)
+        });
+        self.read_source = source
+            .filter(|_| !exported)
+            .map(|s| s.product.to_str(&self.store).into());
     }
 
     /// Records the producer and the interpretation level, so that what

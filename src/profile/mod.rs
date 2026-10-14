@@ -82,7 +82,7 @@
 pub(crate) mod detect;
 pub(crate) mod draft;
 mod dsl;
-mod export;
+pub(crate) mod export;
 mod export_data;
 mod import_data;
 pub(crate) mod interpret;
@@ -92,7 +92,7 @@ use std::fmt;
 
 pub use detect::{Detection, HeadFields, ProducerVersion, FINGERPRINT_CAP, THRESHOLD};
 pub use export::{
-    ExportOptions, ExportReport, Exporter, Fold, FoldKind, Limit, MediaPaths, Target,
+    ExportOptions, ExportReport, Exporter, Fold, FoldKind, HeadSource, Limit, MediaPaths, Target,
 };
 pub use interpret::{docs_uri, interpret, Action, InterpretReport, Interpretation, Mapping};
 

@@ -74,7 +74,9 @@ import_profile! {
     /// extensions are those it kept, its repairs and the redundant ones an
     /// importer needs, none another producer's to interpret again.
     OXIDGED = "oxidged", "oxidged (ged_io)", tier 0, parent None;
-    detect [sig!(Sour, Eq("ged_io"), 200)];
+    // An export of a program that names itself in `HEAD.SOUR` names the
+    // crate in `HEAD.SOUR._OXIDGED` (`profile::HeadSource`).
+    detect [sig!(Sour, Eq("ged_io"), 200), sig!(HeadTag, Eq("_OXIDGED"), 200)];
     charset [];
     stats false;
     rules [];

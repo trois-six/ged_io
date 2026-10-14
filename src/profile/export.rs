@@ -167,6 +167,35 @@ pub struct ExportOptions {
     /// Whether the credentials the data holds are written ([`Credentials`];
     /// by default they are left out, and the report says so).
     pub credentials: Credentials,
+    /// Which system `HEAD.SOUR` names ([`HeadSource`]).
+    pub source: HeadSource,
+}
+
+/// The system an export names in `HEAD.SOUR`: GEDCOM's "system that
+/// produced the file".
+///
+/// An application that writes its data through this crate produces the
+/// file: the `HEAD.SOUR` it gives the dataset (its identifier, `VERS`,
+/// `NAME`, `CORP`) is written as it is, and the file says it passed through
+/// this crate by a `HEAD.SOUR._OXIDGED` naming the crate's version (declared
+/// in a 7.x `HEAD.SCHMA`), by which reading it back finds the `oxidged`
+/// profile ([`crate::profile`]: what was exported is not interpreted
+/// again). A dataset read from a file and written again names the crate:
+/// the producer of the file read did not produce this one, and an importer
+/// that switches dialects on `HEAD.SOUR` must not take it for that
+/// producer's export (EXF-082, EXC-018, EXC-057).
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum HeadSource {
+    /// The dataset's `HEAD.SOUR` when the program set it (it differs from
+    /// the one read, or the dataset was not read from a file); else the
+    /// crate's.
+    #[default]
+    Auto,
+    /// The crate's, always.
+    Library,
+    /// The dataset's, whatever it is (the crate's when it has none).
+    Dataset,
 }
 
 /// What kind of change a fold made.
@@ -609,7 +638,8 @@ impl Exporter {
             next_xref: 0,
             place_style: None,
         };
-        own_source(&mut records, &mut cx);
+        let read = data.read_source.as_deref();
+        let program = own_source(&mut records, &mut cx, read);
         if self.options.credentials == Credentials::LeftOut {
             omit_credentials(&mut records, &mut cx);
         }
@@ -656,6 +686,9 @@ impl Exporter {
             let repairs = conform_drafts(&mut records, to);
             cx.report.repairs.extend(repairs);
             place_form(&mut records, style);
+        }
+        if program {
+            name_the_crate(&mut records, cx.v7);
         }
         let mut report = cx.report;
         if limits {
@@ -3883,17 +3916,30 @@ fn places(
     }
 }
 
-/// The writer's own system identifier in `HEAD.SOUR`: an export never
-/// passes for another program (importers switch dialects on it, EXF-082,
-/// EXC-018, EXC-057).
-fn own_source(records: &mut [Draft<'_>], cx: &mut Cx<'_>) {
+/// The system `HEAD.SOUR` names ([`HeadSource`]): the crate's, unless
+/// the program set the dataset's (`read`: the one the dataset was read
+/// with): whether it is the program's, for [`name_the_crate`] once the
+/// steps are done. An export never passes for the producer of a file it
+/// read (importers switch dialects on it, EXF-082, EXC-018, EXC-057).
+fn own_source(records: &mut [Draft<'_>], cx: &mut Cx<'_>, read: Option<&str>) -> bool {
     const ROWS: &[&str] = &["EXF-082", "EXC-018", "EXC-057"];
     let Some(head) = records.iter_mut().find(|r| is(r, "HEAD")) else {
-        return;
+        return false;
     };
     let product = crate::writer::head::PRODUCT;
-    if child_text(head, "SOUR").is_some_and(|s| s == product) {
-        return;
+    let program = match (cx.options.source, child_text(head, "SOUR")) {
+        (_, Some(s)) if s == product => return false,
+        (_, None) | (HeadSource::Library, _) => false,
+        (HeadSource::Dataset, _) => true,
+        (HeadSource::Auto, Some(s)) => read != Some(s),
+    };
+    if program {
+        // The crate is named again once the steps are done, which would
+        // fold the name an export read back holds.
+        if let Some(sour) = child_mut(head, "SOUR") {
+            sour.substructures.retain(|s| !is(s, MARKER));
+        }
+        return true;
     }
     let mut sour = text_node("SOUR", product);
     sour.substructures
@@ -3919,7 +3965,44 @@ fn own_source(records: &mut [Draft<'_>], cx: &mut Cx<'_>) {
             format!("HEAD.SOUR {previous} written as {product}"),
         );
     }
+    false
 }
+
+/// Names the crate under the program's `HEAD.SOUR` ([`MARKER`]), declared
+/// in a 7.x `HEAD.SCHMA`.
+fn name_the_crate(records: &mut [Draft<'_>], v7: bool) {
+    let Some(head) = records.iter_mut().find(|r| is(r, "HEAD")) else {
+        return;
+    };
+    if let Some(sour) = child_mut(head, "SOUR") {
+        sour.substructures
+            .push(text_node(MARKER, env!("CARGO_PKG_VERSION")));
+    }
+    if !v7 {
+        return;
+    }
+    let declared = head
+        .substructures
+        .iter()
+        .filter(|s| is(s, "SCHMA"))
+        .flat_map(|s| &s.substructures)
+        .any(|t| payload_str(t).split_whitespace().next() == Some(MARKER));
+    if !declared {
+        let uri = super::docs_uri("oxidged", MARKER);
+        let tag = text_node("TAG", &format!("{MARKER} {uri}"));
+        if let Some(schma) = child_mut(head, "SCHMA") {
+            schma.substructures.push(tag);
+        } else {
+            let mut schma = Draft::new("SCHMA");
+            schma.substructures.push(tag);
+            head.substructures.push(schma);
+        }
+    }
+}
+
+/// The extension under `HEAD.SOUR` that says an export of a program
+/// passed through this crate ([`HeadSource`]).
+pub(crate) const MARKER: &str = "_OXIDGED";
 
 /// Leaves out the records `RESN` restricts, and the pointers to them.
 /// Leaves out the credentials the records hold, as the writer does

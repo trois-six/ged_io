@@ -1040,3 +1040,13 @@ Facts come from the compatibility research (catalogue rows in brackets); every e
 - Where: `HEAD`
 - Meaning: Navigation start person(s); code page in CHAR.VERS [VD-117]
 - Declared as `TAG _NAVM https://github.com/trois-six/oxidged/blob/main/docs/extensions.md#ahnenblatt-_NAVM`
+
+## oxidged (`oxidged`)
+
+<a id="oxidged-_OXIDGED"></a>
+
+### `_OXIDGED` (oxidged)
+
+- Where: `HEAD.SOUR`
+- Meaning: the version of oxidged that wrote the file, when the program that wrote its data names itself in `HEAD.SOUR`; reading the file back finds the `oxidged` profile, which interprets nothing again
+- Declared as `TAG _OXIDGED https://github.com/trois-six/oxidged/blob/main/docs/extensions.md#oxidged-_OXIDGED`

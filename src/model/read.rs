@@ -198,6 +198,7 @@ pub(crate) fn read_segmented(text: String, limit: usize) -> Dataset {
         data.shrink();
     }
     data.index_read();
+    data.note_read_source();
     data
 }
 
@@ -563,6 +564,7 @@ pub(crate) fn read_interpreting(
         data.shrink();
     }
     data.index_read();
+    data.note_read_source();
     Ok((data, report))
 }
 

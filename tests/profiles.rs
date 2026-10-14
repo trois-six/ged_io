@@ -10,8 +10,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use ged_io::model::HeaderSource;
 use ged_io::profile::{
-    self, export_profiles, import_profiles, Action, Detection, ExportOptions, Exporter,
+    self, export_profiles, import_profiles, Action, Detection, ExportOptions, Exporter, HeadSource,
     Interpretation,
 };
 use ged_io::{Dataset, GedcomBuilder, GedcomEncoding, GedcomVersion, GedcomWriter};
@@ -956,6 +957,113 @@ fn own_output_is_read_as_written() {
     }
 }
 
+/// A program's dataset: its header names the program.
+fn program_dataset() -> Dataset {
+    let mut data = Dataset::parse(
+        "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 NAME Ann /Example/\n\
+         1 OCCU Weaver\n1 OCCU Miller\n0 TRLR\n",
+    );
+    let mut header = data.header().cloned().unwrap_or_default();
+    header.source = Some(HeaderSource {
+        product: "EXAMPLE_APP".into(),
+        version: Some("1.2".into()),
+        name: Some("Example App".into()),
+        ..HeaderSource::default()
+    });
+    data.set_header(Some(header));
+    data
+}
+
+/// An export names the program that wrote it when the program set
+/// `HEAD.SOUR`, the crate beside it; reading it back finds the crate's own
+/// output, which is not interpreted again.
+#[test]
+fn exports_name_the_program() {
+    let data = program_dataset();
+    let version = env!("CARGO_PKG_VERSION");
+    for p in export_profiles() {
+        let (out, report) = Exporter::new(p).write_to_string(&data).unwrap();
+        let lines = out.replace("\r\n", "\n").replace('\r', "\n");
+        assert!(
+            lines.contains("1 SOUR EXAMPLE_APP\n2 VERS 1.2\n2 NAME Example App\n")
+                && lines.contains(&format!("2 _OXIDGED {version}\n")),
+            "{}: {out}",
+            p.id()
+        );
+        assert!(
+            report.folds.iter().all(|f| !f.detail.contains("HEAD.SOUR")),
+            "{}: {report:?}",
+            p.id()
+        );
+        if p.target().version().is_v7() {
+            assert!(
+                lines.contains("2 TAG _OXIDGED https://github.com/trois-six/oxidged/blob/main/docs/extensions.md#oxidged-_OXIDGED\n"),
+                "{}: {out}",
+                p.id()
+            );
+        }
+        let (again, read) = GedcomBuilder::new()
+            .build_from_str_with_report(out.as_str())
+            .unwrap();
+        assert_eq!(read.detection.profile().id(), "oxidged", "{}", p.id());
+        assert!(read.interpretation.is_empty(), "{}", p.id());
+        // Exported again, the same.
+        let (out2, _) = Exporter::new(p).write_to_string(&again).unwrap();
+        assert_eq!(out2, out, "{}", p.id());
+    }
+}
+
+/// A dataset read from a file names the crate, unless the program renames
+/// it, or asks otherwise ([`HeadSource`]).
+#[test]
+fn exports_name_the_crate_for_what_they_read() {
+    let file = "0 HEAD\n1 SOUR FTM\n2 VERS 24.0\n1 GEDC\n2 VERS 5.5.1\n\
+                0 @I1@ INDI\n1 NAME Ann /Example/\n0 TRLR\n";
+    let read = GedcomBuilder::new().build_from_str(file).unwrap();
+    let geneanet = Exporter::named("geneanet").unwrap();
+    let (out, report) = geneanet.write_to_string(&read).unwrap();
+    assert!(
+        out.contains("1 SOUR ged_io\n") && !out.contains("_OXIDGED"),
+        "{out}"
+    );
+    assert!(
+        report
+            .folds
+            .iter()
+            .any(|f| f.detail == "HEAD.SOUR FTM written as ged_io"),
+        "{report:?}"
+    );
+    // Asked: the dataset's, the crate beside it.
+    let kept = geneanet.clone().options(ExportOptions {
+        source: HeadSource::Dataset,
+        ..ExportOptions::default()
+    });
+    let (out, _) = kept.write_to_string(&read).unwrap();
+    assert!(
+        out.contains("1 SOUR FTM\n2 VERS 24.0\n2 _OXIDGED "),
+        "{out}"
+    );
+    // Renamed by the program: its own.
+    let mut renamed = read.clone();
+    let mut header = renamed.header().cloned().unwrap_or_default();
+    if let Some(source) = &mut header.source {
+        source.product = "EXAMPLE_APP".into();
+    }
+    renamed.set_header(Some(header));
+    let (out, _) = geneanet.write_to_string(&renamed).unwrap();
+    assert!(out.contains("1 SOUR EXAMPLE_APP\n"), "{out}");
+    // Asked: the crate's, whatever the program set.
+    let library = geneanet.options(ExportOptions {
+        source: HeadSource::Library,
+        ..ExportOptions::default()
+    });
+    let (out, _) = library.write_to_string(&program_dataset()).unwrap();
+    assert!(
+        out.contains("1 SOUR ged_io\n") && !out.contains("EXAMPLE_APP"),
+        "{out}"
+    );
+}
+
 #[test]
 fn reports_are_queries() {
     let file = b"0 HEAD\n1 SOUR FTM\n2 VERS Family Tree Maker (22.2.5)\n1 GEDC\n2 VERS 5.5.1\n\
@@ -1106,6 +1214,16 @@ fn extension_docs_are_current() {
             }
         }
     }
+    // The crate's own (`profile::HeadSource`).
+    doc.push_str(&format!(
+        "\n## oxidged (`oxidged`)\n\n<a id=\"oxidged-_OXIDGED\"></a>\n\n### `_OXIDGED` (oxidged)\n\n\
+         - Where: `HEAD.SOUR`\n\
+         - Meaning: the version of oxidged that wrote the file, when the program that \
+         wrote its data names itself in `HEAD.SOUR`; reading the file back finds the \
+         `oxidged` profile, which interprets nothing again\n\
+         - Declared as `TAG _OXIDGED {}`\n",
+        profile::docs_uri("oxidged", "_OXIDGED")
+    ));
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/extensions.md");
     if std::env::var_os("BLESS").is_some() {
         std::fs::write(&path, &doc).unwrap();
