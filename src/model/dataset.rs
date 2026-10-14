@@ -39,7 +39,7 @@ use super::text::{Store, XrefId};
 /// identifier take constant time. See [`crate::model`] (Editing).
 ///
 /// ```rust
-/// use ged_io::model::{Dataset, RecordRef};
+/// use oxidged::model::{Dataset, RecordRef};
 ///
 /// let data = Dataset::parse("0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n0 @F1@ FAM\n1 CHIL @I1@\n0 _LOC Place\n0 TRLR\n");
 /// assert_eq!(data.individuals().len(), 1);
@@ -888,7 +888,7 @@ impl Dataset {
     /// dangling pointer.
     ///
     /// ```rust
-    /// use ged_io::model::Dataset;
+    /// use oxidged::model::Dataset;
     ///
     /// let data = Dataset::parse("0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 FAMC @F9@\n1 SOUR @VOID@\n0 TRLR\n");
     /// let dangling = data.dangling_references();

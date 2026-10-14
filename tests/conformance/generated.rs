@@ -12,10 +12,10 @@
 //! 4. Payload types (`payload/…`): valid samples (kept verbatim) and invalid
 //!    samples (kept somewhere, written conformant) per data type.
 //! 5. Checker self-test: misplaced, repeated and missing structures built from
-//!    the tables must be reported by `checker.rs` (no ged_io involved).
+//!    the tables must be reported by `checker.rs` (no oxidged involved).
 //!
 //! Every generated input is itself checked conformant first, so a generator
-//! or checker mistake cannot pass for a ged_io gap.
+//! or checker mistake cannot pass for a oxidged gap.
 
 use crate::support::adapter::{self, Target as WriteTarget};
 use crate::support::checker::{self, Target};
@@ -725,7 +725,7 @@ fn validator_issues(doc: &str) -> Vec<(String, u32, String)> {
 }
 
 /// The generator only produces conformant datasets (lenient enumeration
-/// probes excepted): a probe that fails is a ged_io gap, not a test mistake.
+/// probes excepted): a probe that fails is a oxidged gap, not a test mistake.
 #[test]
 fn generated_inputs_are_conformant() {
     let mut bad = Vec::new();

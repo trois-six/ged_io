@@ -13,7 +13,7 @@ use std::ops::Deref;
 /// contain a `:`; [`Xref::form`] tells them apart. They are kept verbatim.
 ///
 /// ```rust
-/// use ged_io::tree::{Xref, XrefForm};
+/// use oxidged::tree::{Xref, XrefForm};
 ///
 /// let xref = Xref::new("@I1@");
 /// assert_eq!(xref.id(), "I1");

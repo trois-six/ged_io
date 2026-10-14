@@ -422,8 +422,8 @@ impl Date {
     /// ([`DateValue::parse`]).
     ///
     /// ```rust
-    /// use ged_io::model::Dataset;
-    /// use ged_io::value::{Approximation, Calendar, DateValue};
+    /// use oxidged::model::Dataset;
+    /// use oxidged::value::{Approximation, Calendar, DateValue};
     ///
     /// let data = Dataset::parse("0 HEAD\n0 @I1@ INDI\n1 BIRT\n2 DATE ABT @#DJULIAN@ 1700\n0 TRLR\n");
     /// let date = data.individuals().first().unwrap().birth().unwrap().date().unwrap();
@@ -496,8 +496,8 @@ impl Date {
     /// rewritten likewise; GEDCOM 5.5.1 has no `Z` for UTC.
     ///
     /// ```rust
-    /// use ged_io::model::{Dataset, Date};
-    /// use ged_io::GedcomVersion;
+    /// use oxidged::model::{Dataset, Date};
+    /// use oxidged::GedcomVersion;
     ///
     /// let data = Dataset::default();
     /// let date = Date::new("INT 1850 (about 1850)").to_version(&data, GedcomVersion::V7_0);
@@ -523,9 +523,9 @@ impl Date {
     /// the time and the phrase are kept.
     ///
     /// ```rust
-    /// use ged_io::model::{Dataset, Date};
-    /// use ged_io::value::Calendar;
-    /// use ged_io::GedcomVersion;
+    /// use oxidged::model::{Dataset, Date};
+    /// use oxidged::value::Calendar;
+    /// use oxidged::GedcomVersion;
     ///
     /// let data = Dataset::default();
     /// let date = Date::new("@#DJULIAN@ 15 MAR 1582");
@@ -658,8 +658,8 @@ impl Age {
     /// ([`AgeValue::parse`]).
     ///
     /// ```rust
-    /// use ged_io::model::{Age, Dataset};
-    /// use ged_io::value::{AgeBound, AgeValue};
+    /// use oxidged::model::{Age, Dataset};
+    /// use oxidged::value::{AgeBound, AgeValue};
     ///
     /// let data = Dataset::default();
     /// let AgeValue::Duration { bound, duration } = Age::new("> 1y 400d").parse(&data) else {
@@ -700,8 +700,8 @@ impl Age {
     ///   stays, which 5.5.1 cannot write.
     ///
     /// ```rust
-    /// use ged_io::model::{Age, Dataset};
-    /// use ged_io::GedcomVersion;
+    /// use oxidged::model::{Age, Dataset};
+    /// use oxidged::GedcomVersion;
     ///
     /// let data = Dataset::default();
     /// let age = Age::new("CHILD").to_version(&data, GedcomVersion::V7_0);

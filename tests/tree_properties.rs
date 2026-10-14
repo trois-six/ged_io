@@ -14,10 +14,10 @@
 
 use std::io::{BufReader, Read};
 
-use ged_io::encoding::{decode, DecodeReader};
-use ged_io::tree::{parse_tree, Structure, Tree, TreeReader};
-use ged_io::version::detect_version;
-use ged_io::{Dataset, GedcomBuilder, GedcomStreamParser};
+use oxidged::encoding::{decode, DecodeReader};
+use oxidged::tree::{parse_tree, Structure, Tree, TreeReader};
+use oxidged::version::detect_version;
+use oxidged::{Dataset, GedcomBuilder, GedcomStreamParser};
 
 struct Rng(u64);
 

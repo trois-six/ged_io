@@ -31,7 +31,7 @@ use crate::writer::{special_bytes, LINE_FEED};
 /// for an absent payload.
 ///
 /// ```rust
-/// use ged_io::model::{Dataset, Text};
+/// use oxidged::model::{Dataset, Text};
 ///
 /// let data = Dataset::parse("0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @N1@ SNOTE Shared\n1 CONT text\n0 TRLR\n");
 /// let text = data.notes().first().unwrap().text().to_text();
@@ -517,7 +517,7 @@ impl fmt::Debug for Span {
 /// without a copy, and prints them (`Display`).
 ///
 /// ```rust
-/// use ged_io::Dataset;
+/// use oxidged::Dataset;
 ///
 /// let data = Dataset::parse("0 HEAD\n0 @I1@ INDI\n1 NAME Ann /Example/\n1 NOTE a\n2 CONT b\n0 TRLR\n");
 /// let ann = data.individuals().first().unwrap();

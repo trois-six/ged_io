@@ -9,10 +9,10 @@
 //! [`TreeReader`] does.
 //!
 //! ```rust
-//! use ged_io::model::RecordRef;
-//! use ged_io::GedcomStreamParser;
+//! use oxidged::model::RecordRef;
+//! use oxidged::GedcomStreamParser;
 //!
-//! # fn main() -> Result<(), ged_io::GedcomError> {
+//! # fn main() -> Result<(), oxidged::GedcomError> {
 //! let file: &[u8] = b"0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 NAME Ann /Example/\n0 @F1@ FAM\n0 TRLR\n";
 //! let mut names = Vec::new();
 //! for record in GedcomStreamParser::new(file)? {
@@ -36,8 +36,8 @@
 //!
 //! ```rust
 //! use std::ops::ControlFlow;
-//! use ged_io::model::{Individual, View};
-//! use ged_io::stream::{GedcomStreamParser, StreamedRecord, Visitor};
+//! use oxidged::model::{Individual, View};
+//! use oxidged::stream::{GedcomStreamParser, StreamedRecord, Visitor};
 //!
 //! /// Finds the first individual named in a file.
 //! struct FirstNamed;
@@ -52,7 +52,7 @@
 //!     }
 //! }
 //!
-//! # fn main() -> Result<(), ged_io::GedcomError> {
+//! # fn main() -> Result<(), oxidged::GedcomError> {
 //! let file: &[u8] = b"0 HEAD\n0 @I1@ INDI\n0 @I2@ INDI\n1 NAME Ann /Example/\n0 @I3@ INDI\n0 TRLR\n";
 //! let mut parser = GedcomStreamParser::new(file)?;
 //! assert_eq!(parser.visit(&mut FirstNamed)?, ControlFlow::Break("Ann Example".to_string()));

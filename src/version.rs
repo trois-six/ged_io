@@ -58,7 +58,7 @@ impl GedcomVersion {
     /// # Examples
     ///
     /// ```
-    /// use ged_io::version::GedcomVersion;
+    /// use oxidged::version::GedcomVersion;
     ///
     /// assert_eq!(GedcomVersion::from_version_str("5.5.1"), GedcomVersion::V5_5_1);
     /// assert_eq!(GedcomVersion::from_version_str("5.5"), GedcomVersion::V5_5_1);
@@ -155,7 +155,7 @@ pub(crate) enum XrefGrammar {
 /// static per version, reached with [`GedcomVersion::rules`].
 ///
 /// ```
-/// use ged_io::GedcomVersion;
+/// use oxidged::GedcomVersion;
 ///
 /// let rules = GedcomVersion::V5_5_1.rules();
 /// assert_eq!(rules.max_line_length(), Some(255));
@@ -404,7 +404,7 @@ pub(crate) fn is_banned(c: char) -> bool {
 /// # Examples
 ///
 /// ```
-/// use ged_io::version::{detect_version, GedcomVersion};
+/// use oxidged::version::{detect_version, GedcomVersion};
 ///
 /// let content = "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 TRLR";
 /// assert_eq!(detect_version(content), GedcomVersion::V7_0);

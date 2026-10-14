@@ -5,10 +5,12 @@ use std::fs;
 use std::io::{self, Write as _};
 use std::process::ExitCode;
 
-use ged_io::convert::ConversionOptions;
-use ged_io::model::{Dataset, Event, Individual, RecordRef, Sex, View};
-use ged_io::profile::{self, Exporter, Interpretation};
-use ged_io::{GedcomBuilder, GedcomError, GedcomVersion, GedcomWriter, OutputEncoding, WriteError};
+use oxidged::convert::ConversionOptions;
+use oxidged::model::{Dataset, Event, Individual, RecordRef, Sex, View};
+use oxidged::profile::{self, Exporter, Interpretation};
+use oxidged::{
+    GedcomBuilder, GedcomError, GedcomVersion, GedcomWriter, OutputEncoding, WriteError,
+};
 
 const HELP: &str = "\
 ged-io - inspect, validate and rewrite GEDCOM files (5.5.1, 7.0, 7.1)
@@ -397,7 +399,7 @@ fn list_profiles() -> String {
 /// Every deviation of the file from its specification, as errors in strict
 /// mode, as warnings otherwise.
 fn validate(bytes: &[u8], strict: bool) -> ExitCode {
-    let deviations = ged_io::spec::validate_bytes(bytes);
+    let deviations = oxidged::spec::validate_bytes(bytes);
     let (level, kind) = if strict {
         ("strict", "error")
     } else {

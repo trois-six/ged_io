@@ -1,12 +1,12 @@
 [package]
-name = "ged_io-perf"
+name = "oxidged-perf"
 version = "0.0.0"
 edition = "2021"
 publish = false
-description = "Time, throughput and peak memory of ged_io's pipelines on generated or given GEDCOM files, with the thresholds the CI checks."
+description = "Time, throughput and peak memory of oxidged's pipelines on generated or given GEDCOM files, with the thresholds the CI checks."
 
 [dependencies]
-ged_io = { path = "../.." }
+oxidged = { path = "../.." }
 
 # Not part of the crate's build: a stand-alone tool.
 [workspace]

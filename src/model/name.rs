@@ -207,7 +207,7 @@ gedcom_struct! {
     /// slashes (`John /Smith/`), its pieces, and what kind of name it is.
     ///
     /// ```rust
-    /// use ged_io::model::{Dataset, NameType};
+    /// use oxidged::model::{Dataset, NameType};
     ///
     /// let data = Dataset::parse("0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 NAME Ann /Example/\n2 TYPE BIRTH\n2 GIVN Ann\n2 GIVN Marie\n0 TRLR\n");
     /// let name = data.individuals().first().unwrap().name().unwrap();

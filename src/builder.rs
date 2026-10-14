@@ -2,7 +2,7 @@
 //! encoding, a reader or a GEDZIP archive.
 //!
 //! ```rust
-//! use ged_io::GedcomBuilder;
+//! use oxidged::GedcomBuilder;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let text = "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 NAME Ann /Example/\n0 TRLR\n";
@@ -84,7 +84,7 @@ impl GedcomBuilder {
     /// fails with [`GedcomError::NonConformant`] and every deviation found.
     ///
     /// ```rust
-    /// use ged_io::{GedcomBuilder, GedcomError};
+    /// use oxidged::{GedcomBuilder, GedcomError};
     ///
     /// let text = "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 SEX male\n0 TRLR\n";
     /// assert!(GedcomBuilder::new().build_from_str(text).is_ok());
@@ -201,7 +201,7 @@ impl GedcomBuilder {
     /// declared one included).
     ///
     /// ```rust
-    /// use ged_io::GedcomBuilder;
+    /// use oxidged::GedcomBuilder;
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let data = GedcomBuilder::new()
@@ -221,9 +221,9 @@ impl GedcomBuilder {
     /// was interpreted.
     ///
     /// ```rust
-    /// use ged_io::GedcomBuilder;
+    /// use oxidged::GedcomBuilder;
     ///
-    /// # fn main() -> Result<(), ged_io::GedcomError> {
+    /// # fn main() -> Result<(), oxidged::GedcomError> {
     /// let (data, report) = GedcomBuilder::new().build_from_bytes_with_report(
     ///     b"0 HEAD\n1 SOUR FTM\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 SEX male\n1 _FUN\n2 DATE 1900\n0 TRLR\n",
     /// )?;
@@ -401,7 +401,7 @@ impl GedcomBuilder {
     ///
     /// ```rust,no_run
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// use ged_io::GedcomBuilder;
+    /// use oxidged::GedcomBuilder;
     ///
     /// let data = GedcomBuilder::new().build_from_gedzip(std::fs::File::open("family.gdz")?)?;
     /// println!("{} individuals", data.individuals().len());

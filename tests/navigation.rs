@@ -4,11 +4,11 @@
 //! reindexing after edits), and how the model clones and compares. Every
 //! name and value is fictitious.
 
-use ged_io::model::{
+use oxidged::model::{
     Dataset, Family, Individual, IndividualRef, Name, RecordRef, Removal, Repository, Sex, View,
     XrefId,
 };
-use ged_io::IndexedDataset;
+use oxidged::IndexedDataset;
 
 /// A family of three, their sources and the other record types.
 const FAMILY: &str = "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n2 FORM LINEAGE-LINKED\n\

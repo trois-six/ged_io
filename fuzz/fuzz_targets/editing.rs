@@ -11,14 +11,14 @@
 
 use std::collections::BTreeMap;
 
-use ged_io::model::{
+use libfuzzer_sys::fuzz_target;
+use oxidged::model::{
     ChildLink, Citation, CitationSource, Dataset, Family, Holder, Individual, IndividualRef, Link,
     Node, Note, Record, RecordHandle, RecordKind, RecordType, Removal, SharedNote, Source, Value,
     XrefId,
 };
-use ged_io::tree::{Payload, Structure};
-use ged_io::{GedcomVersion, GedcomWriter};
-use libfuzzer_sys::fuzz_target;
+use oxidged::tree::{Payload, Structure};
+use oxidged::{GedcomVersion, GedcomWriter};
 
 #[path = "common/left.rs"]
 mod left;
@@ -102,13 +102,13 @@ fn remove(data: &mut Dataset, h: RecordHandle, how: Removal) {
         RecordKind::Note => data.remove(h.typed::<SharedNote>().unwrap(), how).map(drop),
         RecordKind::Other => data.remove(h.typed::<Node>().unwrap(), how).map(drop),
         RecordKind::Repository => data
-            .remove(h.typed::<ged_io::model::Repository>().unwrap(), how)
+            .remove(h.typed::<oxidged::model::Repository>().unwrap(), how)
             .map(drop),
         RecordKind::Multimedia => data
-            .remove(h.typed::<ged_io::model::Multimedia>().unwrap(), how)
+            .remove(h.typed::<oxidged::model::Multimedia>().unwrap(), how)
             .map(drop),
         RecordKind::Submitter => data
-            .remove(h.typed::<ged_io::model::Submitter>().unwrap(), how)
+            .remove(h.typed::<oxidged::model::Submitter>().unwrap(), how)
             .map(drop),
         _ => Ok(()),
     };
@@ -297,7 +297,7 @@ fn edit(data: &mut Dataset, ops: &mut Ops<'_>, fresh: &mut usize) -> bool {
             true
         }
         _ => {
-            let submitter = xref_of::<ged_io::model::Submitter>(data, ops);
+            let submitter = xref_of::<oxidged::model::Submitter>(data, ops);
             if let Some(mut h) = data.header_mut() {
                 h.submitter = submitter;
             }

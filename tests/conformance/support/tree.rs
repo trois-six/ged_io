@@ -1,6 +1,6 @@
-//! A small GEDCOM line-tree reader, deliberately independent of ged_io.
+//! A small GEDCOM line-tree reader, deliberately independent of oxidged.
 //!
-//! The suite compares what ged_io reads and writes against this reader, so it
+//! The suite compares what oxidged reads and writes against this reader, so it
 //! must not share code with the crate under test. It reads any line terminator,
 //! folds `CONT`/`CONC` into the payload they continue, decodes `@@` for the
 //! file's version and types a payload as a pointer only when the raw payload
@@ -183,7 +183,7 @@ pub fn unescape(raw: &str, version: Version) -> String {
 
 /// Bytes to text, by evidence only: a BOM, a UTF-16 NUL pattern, valid UTF-8,
 /// or Latin-1 as the last resort. Good enough for the suite's own fixtures and
-/// for ged_io output, which is always UTF-8.
+/// for oxidged output, which is always UTF-8.
 pub fn decode_bytes(bytes: &[u8]) -> String {
     if let Some(rest) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
         return String::from_utf8_lossy(rest).into_owned();

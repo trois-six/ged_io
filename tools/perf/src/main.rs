@@ -1,4 +1,4 @@
-//! Time, throughput and peak memory of ged_io's pipelines, one pipeline per
+//! Time, throughput and peak memory of oxidged's pipelines, one pipeline per
 //! process (so that each peak resident set is its own).
 //!
 //! ```sh
@@ -53,10 +53,10 @@ use std::io::{BufReader, Write as _};
 use std::process::{Command, ExitCode};
 use std::time::Instant;
 
-use ged_io::model::RecordRef;
-use ged_io::profile::{Exporter, Interpretation};
-use ged_io::tree::Tree;
-use ged_io::{
+use oxidged::model::RecordRef;
+use oxidged::profile::{Exporter, Interpretation};
+use oxidged::tree::Tree;
+use oxidged::{
     GedcomBuilder, GedcomStreamParser, GedcomStreamWriter, GedcomVersion, GedcomWriter,
     WriterConfig,
 };
@@ -75,7 +75,7 @@ fn peak_rss() -> u64 {
 
 /// Reads `path` into a dataset, interpreting its producer's extensions
 /// at `level`.
-fn read_at(path: &str, level: Interpretation) -> ged_io::Dataset {
+fn read_at(path: &str, level: Interpretation) -> oxidged::Dataset {
     GedcomBuilder::new()
         .interpretation(level)
         .build_from_bytes(fs::read(path).expect("read the file"))
@@ -83,7 +83,7 @@ fn read_at(path: &str, level: Interpretation) -> ged_io::Dataset {
 }
 
 /// Reads `path` into a dataset, as the builder does by default.
-fn read(path: &str) -> ged_io::Dataset {
+fn read(path: &str) -> oxidged::Dataset {
     read_at(path, Interpretation::default())
 }
 
@@ -100,7 +100,7 @@ fn stream(path: &str, write: bool) -> usize {
     let Some(head) = records.next().map(|r| r.expect("reads")) else {
         return 0;
     };
-    let default = ged_io::model::Header::default();
+    let default = oxidged::model::Header::default();
     let header = match head.record() {
         RecordRef::Header(h) => h.header(),
         _ => &default,

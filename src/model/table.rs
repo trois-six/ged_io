@@ -894,7 +894,7 @@ pub(crate) trait HasTable: sealed::Stored {
 /// structure out as its owned type, to edit or keep.
 ///
 /// ```rust
-/// use ged_io::model::{Dataset, EventKind};
+/// use oxidged::model::{Dataset, EventKind};
 ///
 /// let data = Dataset::parse(
 ///     "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 NAME Ann /Example/\n1 BIRT\n2 DATE 1 JAN 1900\n\

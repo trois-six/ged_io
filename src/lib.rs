@@ -18,14 +18,14 @@ Reads and writes GEDCOM, the genealogical data format, in versions 5.5.1,
   reporting every lossy fold.
 - **Streaming and indexing.** [`GedcomStreamParser`] reads one record at a
   time in bounded memory; [`IndexedDataset`] finds records and families in
-  constant time; `ged_io::gedzip` reads and writes GEDZIP archives (feature
+  constant time; `oxidged::gedzip` reads and writes GEDZIP archives (feature
   `gedzip`).
 - **The specifications as data.** [`spec`] validates a file against the
   tables of its version; [`value`] reads and converts dates, ages and
   times.
 
 ```rust
-use ged_io::{Dataset, GedcomVersion, GedcomWriter};
+use oxidged::{Dataset, GedcomVersion, GedcomWriter};
 
 let data = Dataset::parse(
     "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 NAME Ann /Example/\n1 BIRT\n\
@@ -49,7 +49,7 @@ assert!(out.contains("2 DATE ABT JULIAN 1700\n"));
   and identifiers as strings), [`StreamedRecord`] (`Serialize`), the
   values of [`value`] and the structures of [`tree`], in self-describing
   formats such as JSON.
-- `gedzip`: GEDZIP archives (`ged_io::gedzip`).
+- `gedzip`: GEDZIP archives (`oxidged::gedzip`).
 - `calendar`: conversions between calendars and day numbers
   ([`value::CalendarDate`]).
 */

@@ -49,7 +49,7 @@
 //! # Example
 //!
 //! ```rust
-//! use ged_io::tree::{parse_tree, PayloadRef};
+//! use oxidged::tree::{parse_tree, PayloadRef};
 //!
 //! let tree = parse_tree("0 HEAD\r1 GEDC\r2 VERS 7.0\r0 @I1@ INDI\r1 NOTE First\r2 CONT second\r1 FAMC @F1@\r0 TRLR\r");
 //! let indi = tree.records().nth(1).unwrap();

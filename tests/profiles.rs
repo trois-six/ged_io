@@ -10,12 +10,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use ged_io::model::HeaderSource;
-use ged_io::profile::{
+use oxidged::model::HeaderSource;
+use oxidged::profile::{
     self, export_profiles, import_profiles, Action, Detection, ExportOptions, Exporter, HeadSource,
     Interpretation,
 };
-use ged_io::{Dataset, GedcomBuilder, GedcomEncoding, GedcomVersion, GedcomWriter};
+use oxidged::{Dataset, GedcomBuilder, GedcomEncoding, GedcomVersion, GedcomWriter};
 
 fn dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/profiles")
@@ -579,7 +579,7 @@ fn import_fixtures() {
                 .gedcom_version(v)
                 .write_to_string(&data)
                 .unwrap();
-            let deviations = ged_io::spec::validate_text(&out);
+            let deviations = oxidged::spec::validate_text(&out);
             assert!(
                 deviations.is_empty(),
                 "{} in {v}: {deviations:?}\n{out}",
@@ -637,7 +637,7 @@ fn export_fixtures() {
         let exporter = Exporter::new(p);
         let (out, report) = exporter.write_to_string(&data).unwrap();
         let version = p.target().version();
-        let deviations = ged_io::spec::validate_text(&out);
+        let deviations = oxidged::spec::validate_text(&out);
         assert!(deviations.is_empty(), "{}: {deviations:?}\n{out}", p.id());
         let again = GedcomBuilder::new().build_from_str(out.clone()).unwrap();
         let (out2, _) = exporter.write_to_string(&again).unwrap();
@@ -872,7 +872,7 @@ fn seven_only_meanings_wait_for_the_conversion() {
     );
     assert!(v7.contains("2 SDATE 1 JAN 1850\n"), "{v7}");
     assert!(v7.contains("2 ASSO @I2@\n3 ROLE WITN\n"), "{v7}");
-    assert!(ged_io::spec::validate_text(&v7).is_empty());
+    assert!(oxidged::spec::validate_text(&v7).is_empty());
 }
 
 /// A rule that gives an extension its standard tag keeps the extension
@@ -1118,7 +1118,7 @@ fn export_options_leave_out_only_when_asked() {
         "{out}"
     );
     assert_eq!(report.lossy().count(), 2);
-    assert!(ged_io::spec::validate_text(&out).is_empty());
+    assert!(oxidged::spec::validate_text(&out).is_empty());
 }
 
 /// Exports leave the credentials a file holds out, and say so, unless
@@ -1146,7 +1146,7 @@ fn exports_leave_credentials_out() {
     let (out, report) = Exporter::named("generic-551")
         .unwrap()
         .options(ExportOptions {
-            credentials: ged_io::Credentials::Written,
+            credentials: oxidged::Credentials::Written,
             ..ExportOptions::default()
         })
         .write_to_string(&data)

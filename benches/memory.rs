@@ -11,8 +11,8 @@
 mod common;
 
 use criterion::{criterion_group, Criterion};
-use ged_io::tree::Tree;
-use ged_io::{Dataset, GedcomBuilder, GedcomStreamParser, GedcomWriter, IndexedDataset};
+use oxidged::tree::Tree;
+use oxidged::{Dataset, GedcomBuilder, GedcomStreamParser, GedcomWriter, IndexedDataset};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::fs;
 use std::hint::black_box;
@@ -116,7 +116,7 @@ fn measure(pipeline: &str) {
             .ok()
             .and_then(|p| p.parse().ok())
             .unwrap_or(330_000);
-        let path = std::env::temp_dir().join(format!("ged_io-model-{people}.ged"));
+        let path = std::env::temp_dir().join(format!("oxidged-model-{people}.ged"));
         if !path.exists() {
             fs::write(&path, common::generated(people)).expect("write the generated file");
         }

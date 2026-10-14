@@ -39,7 +39,7 @@
 //! # Example
 //!
 //! ```rust
-//! use ged_io::encoding::{decode, GedcomEncoding};
+//! use oxidged::encoding::{decode, GedcomEncoding};
 //!
 //! let decoded = decode(b"0 HEAD\n1 CHAR ANSI\n0 @I1@ INDI\n1 NAME Ren\xE9e\n0 TRLR\n");
 //! assert_eq!(decoded.encoding, GedcomEncoding::Windows1252);
@@ -102,7 +102,7 @@ impl GedcomEncoding {
     /// ignored; `None` for a value no producer is known to use.
     ///
     /// ```rust
-    /// use ged_io::GedcomEncoding;
+    /// use oxidged::GedcomEncoding;
     ///
     /// assert_eq!(GedcomEncoding::from_label("ANSI"), Some(GedcomEncoding::Windows1252));
     /// assert_eq!(GedcomEncoding::from_label("iso-8859-1"), Some(GedcomEncoding::Iso8859_1));
@@ -349,7 +349,7 @@ impl std::error::Error for EncodeError {}
 /// precomposed letters as a mark and a base.
 ///
 /// ```rust
-/// use ged_io::encoding::{decode_as, encode, GedcomEncoding};
+/// use oxidged::encoding::{decode_as, encode, GedcomEncoding};
 ///
 /// let bytes = encode("Renée", GedcomEncoding::Ansel).unwrap();
 /// assert_eq!(decode_as(&bytes, GedcomEncoding::Ansel), "Renée");

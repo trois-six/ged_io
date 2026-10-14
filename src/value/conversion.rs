@@ -263,8 +263,8 @@ impl CalendarDate {
     /// The same day in `calendar`.
     ///
     /// ```
-    /// use ged_io::value::{Calendar, CalendarDate};
-    /// use ged_io::GedcomVersion;
+    /// use oxidged::value::{Calendar, CalendarDate};
+    /// use oxidged::GedcomVersion;
     ///
     /// let julian = CalendarDate::parse("@#DJULIAN@ 5 OCT 1582");
     /// let gregorian = julian.convert_to(&Calendar::Gregorian).unwrap();

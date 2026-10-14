@@ -3,9 +3,9 @@
 //! nothing; elsewhere, only in the ways its documentation lists. Its output
 //! conforms, but for the pointers it cannot check.
 
-use ged_io::model::Header;
-use ged_io::spec::{validate_text, DeviationKind};
-use ged_io::{
+use oxidged::model::Header;
+use oxidged::spec::{validate_text, DeviationKind};
+use oxidged::{
     Bom, Dataset, GedcomStreamWriter, GedcomVersion, GedcomWriter, RepairKind, RepairPolicy,
     WriteReport, WriterConfig,
 };
@@ -335,7 +335,7 @@ fn a_record_a_conversion_makes_an_extension_record_is_written_last() {
     let config = WriterConfig {
         version: Some(GedcomVersion::V7_0),
         bom: Bom::Never,
-        conversion: ged_io::convert::ConversionOptions::default().keep_obsolete(true),
+        conversion: oxidged::convert::ConversionOptions::default().keep_obsolete(true),
         ..WriterConfig::default()
     };
     let (stream, _) = streamed(&data, config.clone());
@@ -409,7 +409,7 @@ fn credentials_are_left_out_by_default() {
         let (all, _) = streamed(
             &data,
             WriterConfig {
-                credentials: ged_io::Credentials::Written,
+                credentials: oxidged::Credentials::Written,
                 ..config
             },
         );

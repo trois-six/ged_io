@@ -33,7 +33,7 @@ gedcom_struct! {
     /// name piece, as written: none is derived from the name.
     ///
     /// ```rust
-    /// use ged_io::model::{Dataset, Sex};
+    /// use oxidged::model::{Dataset, Sex};
     ///
     /// let data = Dataset::parse("0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 NAME Ann /Example/\n1 SEX f\n1 FAMC @F1@\n1 FAMC @F1@\n2 PEDI adopted\n1 REFN 7\n0 @F1@ FAM\n0 TRLR\n");
     /// let ann = data.individuals().first().unwrap();

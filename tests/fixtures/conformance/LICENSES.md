@@ -1,7 +1,7 @@
 # Licences of the conformance-suite inputs
 
 Everything under `tests/fixtures/conformance/` is fictitious. It is either written for
-this project (MIT, like ged_io), vendored from a source whose licence allows it, or
+this project (MIT, like oxidged), vendored from a source whose licence allows it, or
 derived as facts from licensed specification data. Material whose terms do not allow
 vendoring is never copied: `tools/fetch-corpora.sh` fetches it at test time, pinned by
 commit and SHA-256 in `tests/fixtures/corpora.lock.tsv`.

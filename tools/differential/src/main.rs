@@ -53,7 +53,7 @@ fn published(bytes: &[u8]) -> Result<String, String> {
 /// composes them (Unicode NFC over the ANSEL repertoire), line by line (a
 /// line ANSEL cannot hold stays as it is), and its tabs as spaces.
 fn composed(text: &str) -> String {
-    use ged_io::encoding::{decode_as, encode, GedcomEncoding};
+    use oxidged::encoding::{decode_as, encode, GedcomEncoding};
     text.replace('\t', " ")
         .lines()
         .map(|line| match encode(line, GedcomEncoding::Ansel) {
@@ -91,10 +91,10 @@ fn kept_and_lost(input: &str, old: &str, new: &str) -> Vec<String> {
 }
 
 fn current(bytes: &[u8]) -> Result<String, String> {
-    let d = ged_io::GedcomBuilder::new()
+    let d = oxidged::GedcomBuilder::new()
         .build_from_bytes(bytes)
         .map_err(|e| e.to_string())?;
-    ged_io::GedcomWriter::new()
+    oxidged::GedcomWriter::new()
         .write_to_string(&d)
         .map_err(|e| e.to_string())
 }
@@ -156,7 +156,7 @@ fn main() -> ExitCode {
                     let _ = std::fs::write(format!("{dir}/{name}.old"), &old);
                     let _ = std::fs::write(format!("{dir}/{name}.new"), &new);
                 }
-                let input = ged_io::encoding::decode(&bytes).text;
+                let input = oxidged::encoding::decode(&bytes).text;
                 let new = new.replace('\t', " ");
                 for item in kept_and_lost(&input, &composed(&old), &new) {
                     match allow

@@ -5,9 +5,9 @@
 
 use std::io::BufReader;
 
-use ged_io::model::{Dataset, Individual, Node, OrdinanceStatus, Record, Text, Value};
-use ged_io::tree::Structure;
-use ged_io::{GedcomStreamParser, GedcomVersion, GedcomWriter};
+use oxidged::model::{Dataset, Individual, Node, OrdinanceStatus, Record, Text, Value};
+use oxidged::tree::Structure;
+use oxidged::{GedcomStreamParser, GedcomVersion, GedcomWriter};
 
 // ----------------------------------------------------------------------------
 // Helpers

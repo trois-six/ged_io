@@ -1,15 +1,15 @@
-//! The typed records of the model (`ged_io::model`): header, individuals,
+//! The typed records of the model (`oxidged::model`): header, individuals,
 //! families, sources, repositories, multimedia objects, submitters,
 //! submissions and shared notes, with their events, names, links and
 //! ordinances; an ordinance status of either version's enumeration reads as
 //! its variant, any other as `Unknown`, and both are written back with
 //! their `DATE`. Every name and value is fictitious.
 
-use ged_io::model::{
+use oxidged::model::{
     Adoption, BirthKind, Dataset, EventKind, GedcomForm, NamePieceKind, NameType, OrdinanceKind,
     OrdinanceStatus, Pedigree, RecordRef, Restriction, Sex, Text,
 };
-use ged_io::{GedcomVersion, GedcomWriter};
+use oxidged::{GedcomVersion, GedcomWriter};
 
 fn text(data: &Dataset, t: &Text) -> String {
     t.to_str(data).into_owned()
@@ -422,7 +422,7 @@ fn sources() {
         .kinds
         .0
         .is_empty());
-    assert!(ged_io::model::ledger::untyped(&empty).is_empty());
+    assert!(oxidged::model::ledger::untyped(&empty).is_empty());
     assert_eq!(recorded.kinds.0, [EventKind::Birth, EventKind::Death]);
     let place = recorded.place.as_ref().unwrap();
     assert!(place.detail().map.is_some());
@@ -527,7 +527,7 @@ fn other_records() {
     let out = write(&data);
     assert_has(&out, "0 @L1@ _LOC Sampleton\n1 _POP 100\n");
     assert_has(&out, "1 _AFTER trailer content\n");
-    assert_eq!(ged_io::model::ledger::untyped(&data), ["INDI"]);
+    assert_eq!(oxidged::model::ledger::untyped(&data), ["INDI"]);
 }
 
 /// Sex: any case in 5.5.1 (D15a), 7.x's `X`, an unknown value kept; no
@@ -556,7 +556,7 @@ fn sex() {
 /// that set nothing twice (§4.10), and written conformant.
 #[test]
 fn building_records() {
-    use ged_io::model::{Event, Individual, Name};
+    use oxidged::model::{Event, Individual, Name};
     let mut data = Dataset::parse(v7(""));
     let id = data.store_mut().intern_xref("@I9@").unwrap();
     let mut birth = Event::new(EventKind::Birth);
@@ -590,7 +590,7 @@ fn same_tag_order_is_kept() {
     assert_eq!(subm.extra.len(), 3);
     // A leaf with an extension stays whole; a repeated singleton is
     // untyped, the first of its tag only.
-    assert_eq!(ged_io::model::ledger::untyped(&data), ["INDI/SOUR/PAGE"]);
+    assert_eq!(oxidged::model::ledger::untyped(&data), ["INDI/SOUR/PAGE"]);
     let out = write(&data);
     assert_has(
         &out,

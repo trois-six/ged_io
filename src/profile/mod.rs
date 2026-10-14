@@ -24,10 +24,10 @@
 //! default:
 //!
 //! ```rust
-//! use ged_io::profile::{Action, Interpretation};
-//! use ged_io::GedcomBuilder;
+//! use oxidged::profile::{Action, Interpretation};
+//! use oxidged::GedcomBuilder;
 //!
-//! # fn main() -> Result<(), ged_io::GedcomError> {
+//! # fn main() -> Result<(), oxidged::GedcomError> {
 //! let file = "0 HEAD\n1 SOUR PAF\n2 NAME Personal Ancestral File\n1 GEDC\n2 VERS 5.5.1\n\
 //!             0 @I1@ INDI\n1 NAME Anne /Example/\n2 _AKA Annie /Example/\n0 TRLR\n";
 //! let (data, report) = GedcomBuilder::new().build_from_str_with_report(file)?;
@@ -61,8 +61,8 @@
 //! reads, and an [`ExportReport`] listing every fold that lost something:
 //!
 //! ```rust
-//! use ged_io::profile::Exporter;
-//! use ged_io::Dataset;
+//! use oxidged::profile::Exporter;
+//! use oxidged::Dataset;
 //!
 //! let data = Dataset::parse(
 //!     "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 NAME Ann /Example/\n\

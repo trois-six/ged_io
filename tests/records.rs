@@ -5,12 +5,12 @@
 //! GEDCOM 5.5.1 and 7.0 and read back with nothing lost. Every name and
 //! value is fictitious.
 
-use ged_io::model::{
+use oxidged::model::{
     Certainty, CitationSource, EnumList, EventKind, Individual, Medium, NoteContent, OrdinanceKind,
     OrdinanceStatus, Restriction, Role, Sex, Source, Text, XrefId,
 };
-use ged_io::tree::Structure;
-use ged_io::{Dataset, GedcomStreamParser, GedcomVersion, GedcomWriter};
+use oxidged::tree::Structure;
+use oxidged::{Dataset, GedcomStreamParser, GedcomVersion, GedcomWriter};
 
 const V551: GedcomVersion = GedcomVersion::V5_5_1;
 const V70: GedcomVersion = GedcomVersion::V7_0;

@@ -8,8 +8,8 @@
 //! dataset's, through `Deref`.
 //!
 //! ```rust
-//! use ged_io::model::Dataset;
-//! use ged_io::IndexedDataset;
+//! use oxidged::model::Dataset;
+//! use oxidged::IndexedDataset;
 //!
 //! let data = Dataset::parse(
 //!     "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 NAME Ann /Example/\n0 @I2@ INDI\n\

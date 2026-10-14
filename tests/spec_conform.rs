@@ -13,9 +13,9 @@
 //! seeds, no dependency), and, opt-in, on the fetched corpora and on a
 //! fuzz corpus.
 
-use ged_io::spec::{conform, validate, DeviationKind};
-use ged_io::tree::{Payload, Structure, Tag, Tree, Xref};
-use ged_io::{Bom, Dataset, GedcomVersion, GedcomWriter};
+use oxidged::spec::{conform, validate, DeviationKind};
+use oxidged::tree::{Payload, Structure, Tag, Tree, Xref};
+use oxidged::{Bom, Dataset, GedcomVersion, GedcomWriter};
 use std::path::{Path, PathBuf};
 
 /// The versions a dataset is conformed to.
@@ -411,8 +411,8 @@ fn every_fuzz_input_conforms() {
 /// path).
 #[test]
 fn the_tree_writer_conforms() {
-    use ged_io::spec::{validate_text, RepairKind};
-    use ged_io::{GedcomWriter, RepairPolicy};
+    use oxidged::spec::{validate_text, RepairKind};
+    use oxidged::{GedcomWriter, RepairPolicy};
     for (input, kept) in [
         (
             "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 FAMS @F9@\n0 TRLR\n",
@@ -453,7 +453,7 @@ fn the_tree_writer_conforms() {
 /// `!`, `:` and a leading `_`.
 #[test]
 fn the_tree_writer_keeps_valid_551_identifiers() {
-    use ged_io::GedcomWriter;
+    use oxidged::GedcomWriter;
     let input = "0 HEAD\n1 SOUR EXAMPLE\n1 SUBM @U1@\n1 GEDC\n2 VERS 5.5.1\n2 FORM LINEAGE-LINKED\n1 CHAR UTF-8\n0 @U1@ SUBM\n1 NAME Example\n0 @_X 1@ INDI\n1 FAMS @A:B@\n0 @A:B@ FAM\n1 HUSB @_X 1@\n0 @I1!2@ _NOTE x\n0 TRLR\n";
     let mut out = Vec::new();
     let report = GedcomWriter::new()

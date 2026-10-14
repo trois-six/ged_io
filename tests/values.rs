@@ -1,4 +1,4 @@
-//! The date, age and time grammars of GEDCOM 5.5.1 and 7.0 (`ged_io::value`)
+//! The date, age and time grammars of GEDCOM 5.5.1 and 7.0 (`oxidged::value`)
 //! and the conversions of the model's `Date` and `Age` between versions.
 //!
 //! - The test-suite plan's cases (`G7-AGE-*`, `G7-DATE-*`, `G7-TIME`,
@@ -18,11 +18,11 @@
 //! The samples come from the ArmidaleSoftware/gedcom7 validator's tests (MIT)
 //! and the gedcom7code/test-files `age-*` and `date-*` files (Unlicense).
 
-use ged_io::model::{Age, Date, Text};
-use ged_io::value::{
+use oxidged::model::{Age, Date, Text};
+use oxidged::value::{
     AgeValue, Approximation, Calendar, CalendarDate, DateExact, DatePeriod, DateValue, Month, Time,
 };
-use ged_io::{Dataset, GedcomBuilder, GedcomVersion, GedcomWriter};
+use oxidged::{Dataset, GedcomBuilder, GedcomVersion, GedcomWriter};
 
 const V551: GedcomVersion = GedcomVersion::V5_5_1;
 const V7: GedcomVersion = GedcomVersion::V7_0;
@@ -422,7 +422,7 @@ fn calendar_dates_are_re_emitted_identically() {
 #[cfg(feature = "calendar")]
 #[test]
 fn every_calendar_month_converts_and_back() {
-    use ged_io::value::CalendarError;
+    use oxidged::value::CalendarError;
     for case in calendar_cases() {
         let DateValue::Date(date) = DateValue::parse(&case.v7) else {
             continue;
@@ -1031,7 +1031,7 @@ fn free_text_ages_round_trip() {
 
 /// The texts of every structure tagged `tag`, in order.
 fn texts_of(data: &Dataset, tag: &str) -> Vec<String> {
-    fn walk(structure: &ged_io::tree::Structure, tag: &str, out: &mut Vec<String>) {
+    fn walk(structure: &oxidged::tree::Structure, tag: &str, out: &mut Vec<String>) {
         if structure.tag.as_str() == tag {
             out.extend(structure.text().map(str::to_string));
         }
@@ -1101,7 +1101,7 @@ fn has_tag(written: &str, tag: &str) -> bool {
 }
 
 /// The first individual record, as an owned structure.
-fn individual_structure(data: &Dataset) -> ged_io::tree::Structure {
+fn individual_structure(data: &Dataset) -> oxidged::tree::Structure {
     data.to_structures()
         .into_iter()
         .find(|s| s.tag.as_str() == "INDI")
@@ -1568,9 +1568,9 @@ fn property_times() {
 #[cfg(feature = "calendar")]
 mod calendar_properties {
     use super::{payload, Rng, PROPERTY_CASES, V7};
-    use ged_io::model::Date;
-    use ged_io::value::{Calendar, CalendarDate, CalendarError, DateValue, Epoch, Month};
-    use ged_io::Dataset;
+    use oxidged::model::Date;
+    use oxidged::value::{Calendar, CalendarDate, CalendarError, DateValue, Epoch, Month};
+    use oxidged::Dataset;
 
     const CALENDARS: [Calendar; 6] = [
         Calendar::Gregorian,

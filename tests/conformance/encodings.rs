@@ -51,7 +51,7 @@ fn ansel_map() -> HashMap<char, Vec<u8>> {
 }
 
 /// Encodes text; panics on a character the encoding cannot represent (a
-/// mistake in the test, not in ged_io).
+/// mistake in the test, not in oxidged).
 pub fn encode(text: &str, enc: Enc) -> Vec<u8> {
     let one = |c: char, f: &dyn Fn(char) -> Option<u8>| -> u8 {
         f(c).unwrap_or_else(|| panic!("{c:?} has no {enc:?} code"))

@@ -4,9 +4,9 @@
 //! order mark, the bytes and `HEAD.CHAR`; and the encoder. Every name and
 //! place is fictitious.
 
-use ged_io::encoding::{decode, detect_encoding, encode, GedcomEncoding};
-use ged_io::model::NoteContent;
-use ged_io::{Dataset, GedcomBuilder, GedcomError};
+use oxidged::encoding::{decode, detect_encoding, encode, GedcomEncoding};
+use oxidged::model::NoteContent;
+use oxidged::{Dataset, GedcomBuilder, GedcomError};
 
 /// A minimal 5.5.1 file declaring `char_tag` whose individual has `name`.
 fn file_with_name(name: &str, char_tag: &str) -> String {
@@ -476,7 +476,7 @@ fn encoder_refuses_what_an_encoding_cannot_hold() {
     ] {
         let bytes = encode("Renée /Exemple/", encoding).unwrap();
         assert_eq!(
-            ged_io::encoding::decode_as(&bytes, encoding),
+            oxidged::encoding::decode_as(&bytes, encoding),
             "Renée /Exemple/",
             "{encoding}"
         );

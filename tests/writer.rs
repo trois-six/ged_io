@@ -4,13 +4,13 @@
 //! identifiers, levels and banned characters, and the repairs it reports.
 //! Every name and value is fictitious.
 
-use ged_io::model::{
+use oxidged::model::{
     Citation, CitationSource, Individual, Node, Note, NoteContent, Record, SharedNote, Source,
     Value,
 };
-use ged_io::model::{Text, XrefId};
-use ged_io::tree::{parse_tree, Tree};
-use ged_io::{
+use oxidged::model::{Text, XrefId};
+use oxidged::tree::{parse_tree, Tree};
+use oxidged::{
     Bom, Dataset, GedcomBuilder, GedcomVersion, GedcomWriter, LineEnding, OutputEncoding,
     RepairKind, RepairPolicy, WriteError,
 };
@@ -32,7 +32,7 @@ fn write(data: &Dataset, version: GedcomVersion) -> String {
 /// interpretation (`tests/profiles.rs` has its own idempotence tests).
 fn read(text: &str) -> Dataset {
     GedcomBuilder::new()
-        .interpretation(ged_io::profile::Interpretation::None)
+        .interpretation(oxidged::profile::Interpretation::None)
         .build_from_str(text)
         .unwrap_or_else(|e| panic!("{e}\n{text}"))
 }
@@ -451,7 +451,7 @@ fn output_encodings() {
             .as_ref()
             .unwrap()
             .value,
-        ged_io::model::CharacterSet::Unicode
+        oxidged::model::CharacterSet::Unicode
     );
 
     let error = GedcomWriter::new()
@@ -806,7 +806,7 @@ fn pointers_to_a_documented_alias_record_stay_standard() {
     let input = "0 HEAD\n1 SCHMA\n2$TA://example.com/calendar\n2 TAG _USER https://gedcom.io/terms/v7/record-SUBM\n1 SUBM @U1@\n0 @U1@ _USER";
     for version in VERSIONS {
         let out = write(&read(input), version);
-        let left = ged_io::spec::validate_text(&out);
+        let left = oxidged::spec::validate_text(&out);
         assert!(left.is_empty(), "{version}: {left:?}\n{out}");
         assert_eq!(write(&read(&out), version), out, "{version}");
     }
@@ -867,7 +867,7 @@ fn credentials_are_left_out_by_default() {
     for version in VERSIONS {
         let all = GedcomWriter::new()
             .gedcom_version(version)
-            .credentials(ged_io::Credentials::Written)
+            .credentials(oxidged::Credentials::Written)
             .write_to_string(&data)
             .unwrap();
         assert!(

@@ -7,12 +7,12 @@
 //! (`GedcomStreamWriter`).
 #![no_main]
 
-use ged_io::model::Header;
-use ged_io::tree::{parse_tree, Tree};
-use ged_io::{
+use libfuzzer_sys::fuzz_target;
+use oxidged::model::Header;
+use oxidged::tree::{parse_tree, Tree};
+use oxidged::{
     Dataset, GedcomStreamWriter, GedcomVersion, GedcomWriter, OutputEncoding, WriterConfig,
 };
-use libfuzzer_sys::fuzz_target;
 use std::collections::HashSet;
 
 const VERSIONS: [GedcomVersion; 3] = [
@@ -81,7 +81,7 @@ fn check_lines(out: &str, version: GedcomVersion) {
 fn streamed(data: &Dataset, version: GedcomVersion) -> (String, bool) {
     let config = WriterConfig {
         version: Some(version),
-        bom: ged_io::Bom::Never,
+        bom: oxidged::Bom::Never,
         ..WriterConfig::default()
     };
     let default = Header::default();
@@ -94,7 +94,7 @@ fn streamed(data: &Dataset, version: GedcomVersion) -> (String, bool) {
     let moved = report
         .repairs
         .iter()
-        .any(|r| r.kind == ged_io::RepairKind::RecordSize);
+        .any(|r| r.kind == oxidged::RepairKind::RecordSize);
     (String::from_utf8(bytes).expect("UTF-8"), moved)
 }
 
@@ -140,7 +140,7 @@ fuzz_target!(|data: &[u8]| {
                 .filter(|n| {
                     n.tag() == "TRLR"
                         && n.children().is_empty()
-                        && matches!(n.payload(), ged_io::model::Value::None)
+                        && matches!(n.payload(), oxidged::model::Value::None)
                 })
                 .count();
             let (written, read) = (back.record_count(), model.record_count() - bare_trailers);
@@ -194,7 +194,7 @@ fuzz_target!(|data: &[u8]| {
     let mut head = false;
     for record in tree.records() {
         let empty_trailer = record.tag() == "TRLR"
-            && record.payload() == ged_io::tree::PayloadRef::None
+            && record.payload() == oxidged::tree::PayloadRef::None
             && record.substructures().next().is_none();
         if record.tag() == "HEAD" && !head {
             head = true;
@@ -206,7 +206,7 @@ fuzz_target!(|data: &[u8]| {
         let mut bytes = Vec::new();
         GedcomWriter::new()
             .gedcom_version(version)
-            .bom(ged_io::Bom::Never)
+            .bom(oxidged::Bom::Never)
             .write_tree(&mut bytes, &tree)
             .expect("repairs, never fails");
         let out = String::from_utf8(bytes).expect("UTF-8");
@@ -229,7 +229,7 @@ fuzz_target!(|data: &[u8]| {
         let mut again = Vec::new();
         GedcomWriter::new()
             .gedcom_version(version)
-            .bom(ged_io::Bom::Never)
+            .bom(oxidged::Bom::Never)
             .write_tree(&mut again, &Tree::from_bytes(out.as_bytes()))
             .expect("repairs, never fails");
         assert!(again == out.as_bytes(), "{version}: not stable\n{out}");

@@ -1,18 +1,20 @@
 [package]
-name = "ged_io"
-version = "0.17.0"
+name = "oxidged"
+version = "0.1.0"
 authors = [
     "Robert Pirtle <astropirtle@gmail.com>",
     "Jacob Benison <ge3224@gmail.com>",
     "Pierre Erraud <trois.six+github@ik.me>",
     "n4n5 <its.just.n4n5@gmail.com>",
 ]
-description = "A parser for GEDCOM files"
-keywords = ["genealogy", "gedcom", "parser", "family-trees"]
-categories = ["parser-implementations", "data-structures"]
+description = "A conformant, lenient GEDCOM 5.5.1, 7.0 and 7.1 reader and writer: any file read without loss, strictly conformant output, streaming, GEDZIP, editing and producer profiles"
+keywords = ["genealogy", "gedcom", "gedzip", "family-tree", "parser"]
+categories = ["parser-implementations", "encoding"]
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/ge3224/ged_io"
+repository = "https://github.com/trois-six/oxidged"
+homepage = "https://github.com/trois-six/oxidged"
+documentation = "https://docs.rs/oxidged"
 edition = "2021"
 rust-version = "1.88"
 include = ["Cargo.toml", "src/**/*.rs", "license.md", "NOTICE", "/README.md", "/MIGRATION.md", "/CHANGELOG.md"]
@@ -48,9 +50,12 @@ name = "memory"
 harness = false
 
 [lib]
-name = "ged_io"
+name = "oxidged"
 path = "src/lib.rs"
 
 [[bin]]
 name = "ged-io"
 path = "src/bin/ged-io.rs"
+
+[package.metadata.docs.rs]
+all-features = true

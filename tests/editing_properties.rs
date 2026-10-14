@@ -20,14 +20,14 @@
 
 use std::collections::BTreeMap;
 
-use ged_io::model::{
+use oxidged::model::{
     ChildLink, Citation, CitationDetail, CitationSource, Dataset, EditError, Family, Holder,
     Individual, IndividualRef, Link, Multimedia, Node, Note, Record, RecordHandle, RecordKind,
     RecordType, Removal, Repository, RepositoryCitation, SharedNote, Source, Submitter, Value,
     XrefId,
 };
-use ged_io::tree::{Payload, Structure};
-use ged_io::{GedcomVersion, GedcomWriter};
+use oxidged::tree::{Payload, Structure};
+use oxidged::{GedcomVersion, GedcomWriter};
 
 struct Rng(u64);
 
@@ -204,7 +204,7 @@ fn check_writes(data: &Dataset, step: &str) {
     ] {
         let writer = GedcomWriter::new().gedcom_version(version);
         let out = writer.write_to_string(data).unwrap();
-        let deviations = ged_io::spec::validate_text(&out);
+        let deviations = oxidged::spec::validate_text(&out);
         assert!(
             deviations.is_empty(),
             "{step} {version}: {deviations:?}\n{out}"
@@ -222,7 +222,7 @@ fn any_record(data: &Dataset, rng: &mut Rng) -> Option<RecordHandle> {
     (!all.is_empty()).then(|| all[rng.below(all.len())])
 }
 
-fn any_of<T: RecordType>(data: &Dataset, rng: &mut Rng) -> Option<ged_io::model::Handle<T>> {
+fn any_of<T: RecordType>(data: &Dataset, rng: &mut Rng) -> Option<oxidged::model::Handle<T>> {
     let n = data.all::<T>().len();
     (n > 0).then(|| data.handle_at::<T>(rng.below(n)).unwrap())
 }
@@ -520,7 +520,7 @@ fn edit(data: &mut Dataset, rng: &mut Rng, dangling_allowed: bool, fresh: &mut u
             let edits = data.individuals().len();
             data.edit_all::<Individual>(|i| {
                 i.notes
-                    .retain(|n| !matches!(n.content, ged_io::model::NoteContent::Text(_)));
+                    .retain(|n| !matches!(n.content, oxidged::model::NoteContent::Text(_)));
             });
             format!("edit all {edits}")
         }
@@ -551,7 +551,7 @@ fn run(seed: u64, steps: usize) {
     assert_eq!(copy, data);
     for (h, r) in data.records_with_handles() {
         assert_eq!(
-            copy.get_any(h).map(ged_io::model::RecordRef::into_owned),
+            copy.get_any(h).map(oxidged::model::RecordRef::into_owned),
             Some(r.into_owned())
         );
     }

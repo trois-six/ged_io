@@ -1,12 +1,12 @@
-//! The only module of the suite that touches ged_io's API.
+//! The only module of the suite that touches oxidged's API.
 //!
 //! Every test reads and writes through these functions and asserts on
 //! behaviour: what the model keeps (searched as text), what the writer emits
 //! and what reads back. When the crate's types or entry points change, this
 //! file is the one to update; the cases, tables and checks stay as they are.
 
-use ged_io::model::{Dataset, RecordRef};
-use ged_io::{GedcomBuilder, GedcomVersion, GedcomWriter, LineEnding};
+use oxidged::model::{Dataset, RecordRef};
+use oxidged::{GedcomBuilder, GedcomVersion, GedcomWriter, LineEnding};
 use std::cell::Cell;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Once;
@@ -51,7 +51,7 @@ pub fn guard<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
 /// own tests are `tests/profiles.rs`): the suite checks what the reader
 /// keeps as written.
 fn lenient() -> GedcomBuilder {
-    GedcomBuilder::new().interpretation(ged_io::profile::Interpretation::None)
+    GedcomBuilder::new().interpretation(oxidged::profile::Interpretation::None)
 }
 
 /// Reads bytes with the default (lenient) configuration, interpreting
@@ -77,7 +77,7 @@ pub fn read_checking_references(bytes: &[u8]) -> Result<Model, String> {
 /// The structures the model types but read untyped (it found them not to
 /// fit their type): none for a conformant input.
 pub fn untyped(m: &Model) -> Vec<String> {
-    ged_io::model::ledger::untyped(m)
+    oxidged::model::ledger::untyped(m)
 }
 
 /// Target of a write.
@@ -127,7 +127,7 @@ pub fn write_with(m: &Model, target: Target, eol: Option<&str>) -> Result<String
 pub fn write_keeping(m: &Model, target: Target) -> Result<String, String> {
     guard(|| {
         writer(target, None)
-            .conversion(ged_io::convert::ConversionOptions::default().keep_obsolete(true))
+            .conversion(oxidged::convert::ConversionOptions::default().keep_obsolete(true))
             .write_to_string(m)
             .map_err(|e| e.to_string())
     })
@@ -140,10 +140,10 @@ pub fn as_archived(m: &Model) -> Model {
     if m.version().is_v7() {
         m.clone()
     } else {
-        ged_io::convert::convert_dataset(
+        oxidged::convert::convert_dataset(
             m,
             GedcomVersion::V7_0,
-            &ged_io::convert::ConversionOptions::default(),
+            &oxidged::convert::ConversionOptions::default(),
         )
     }
 }
@@ -152,10 +152,10 @@ pub fn as_archived(m: &Model) -> Model {
 /// and writes it.
 pub fn write_tree(text: &str, target: Target) -> Result<String, String> {
     guard(|| {
-        let tree = ged_io::tree::Tree::parse(text);
+        let tree = oxidged::tree::Tree::parse(text);
         let mut out = Vec::new();
         writer(target, None)
-            .bom(ged_io::Bom::Never)
+            .bom(oxidged::Bom::Never)
             .write_tree(&mut out, &tree)
             .map_err(|e| e.to_string())?;
         String::from_utf8(out).map_err(|e| e.to_string())
@@ -168,7 +168,7 @@ pub fn write_ansel(m: &Model) -> Result<Vec<u8>, String> {
         let mut bytes = Vec::new();
         GedcomWriter::new()
             .gedcom_version(GedcomVersion::V5_5_1)
-            .output_encoding(ged_io::OutputEncoding::Ansel)
+            .output_encoding(oxidged::OutputEncoding::Ansel)
             .write(&mut bytes, m)
             .map_err(|e| e.to_string())?;
         Ok(bytes)
@@ -211,7 +211,7 @@ pub fn record_count(m: &Model) -> usize {
 /// form of each record.
 pub fn read_streaming(bytes: &[u8]) -> Result<Vec<String>, String> {
     guard(|| {
-        let parser = ged_io::GedcomStreamParser::new(std::io::Cursor::new(bytes))
+        let parser = oxidged::GedcomStreamParser::new(std::io::Cursor::new(bytes))
             .map_err(|e| e.to_string())?;
         parser
             .map(|r| {
@@ -228,7 +228,7 @@ pub fn read_streaming(bytes: &[u8]) -> Result<Vec<String>, String> {
 /// Looks an xref up through the indexed (O(1)) view; returns the record's
 /// text form.
 pub fn indexed_find(m: Model, xrefs: &[&str]) -> Vec<Option<String>> {
-    let idx = ged_io::IndexedDataset::new(m);
+    let idx = oxidged::IndexedDataset::new(m);
     xrefs
         .iter()
         .map(|x| idx.find(*x).map(|r| format!("{r:?}")))
@@ -259,8 +259,8 @@ pub fn gedzip_round_trip(
             .map(|(n, b)| ((*n).to_string(), b.to_vec()))
             .collect();
         let bytes =
-            ged_io::gedzip::write_gedzip_with_media(m, &files).map_err(|e| e.to_string())?;
-        let mut reader = ged_io::gedzip::GedzipReader::new(std::io::Cursor::new(bytes.as_slice()))
+            oxidged::gedzip::write_gedzip_with_media(m, &files).map_err(|e| e.to_string())?;
+        let mut reader = oxidged::gedzip::GedzipReader::new(std::io::Cursor::new(bytes.as_slice()))
             .map_err(|e| e.to_string())?;
         let names = reader
             .media_files()
@@ -275,13 +275,13 @@ pub fn gedzip_round_trip(
 /// Reads a GEDZIP archive.
 #[cfg(feature = "gedzip")]
 pub fn read_gedzip(bytes: &[u8]) -> Result<Model, String> {
-    guard(|| ged_io::gedzip::read_gedzip(bytes).map_err(|e| e.to_string()))
+    guard(|| oxidged::gedzip::read_gedzip(bytes).map_err(|e| e.to_string()))
 }
 
 /// The crate's validator on a written or input stream: each deviation as
 /// (rule, line, detail), the rule being the `DeviationKind` name.
 pub fn validate(text: &str) -> Vec<(String, u32, String)> {
-    ged_io::spec::validate_text(text)
+    oxidged::spec::validate_text(text)
         .into_iter()
         .map(|d| (format!("{:?}", d.kind), d.line, d.detail.to_string()))
         .collect()

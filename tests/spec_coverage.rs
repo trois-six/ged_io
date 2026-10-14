@@ -1,4 +1,4 @@
-//! The coverage ledger of the typed model (`ged_io::model`), checked against
+//! The coverage ledger of the typed model (`oxidged::model`), checked against
 //! the specification tables (`src/spec/tables.rs`, read here as data).
 //!
 //! For every typed structure and every structure type of 5.5.1, 7.0 and 7.1
@@ -39,7 +39,7 @@ mod tables;
 
 use std::collections::{BTreeSet, HashMap};
 
-use ged_io::model::ledger::{self, FieldDesc};
+use oxidged::model::ledger::{self, FieldDesc};
 use schema::{Schema, StructId};
 
 /// Substructures of typed structures kept in `extra` rather than in a

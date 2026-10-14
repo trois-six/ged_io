@@ -1,13 +1,13 @@
-//! The typed model (`ged_io::model`): shared substructures and
+//! The typed model (`oxidged::model`): shared substructures and
 //! enumerations read typed and lossless, written conformant; the writer
 //! writes a dataset's records where they are, one at a time, as writing
 //! their owned structures writes them. Every name and value is fictitious.
 
-use ged_io::model::{
+use oxidged::model::{
     Adoption, Certainty, CitationSource, Dataset, Event, EventKind, FileForm, Individual, Medium,
     NameType, Note, NoteContent, OrdinanceStatus, Pedigree, Role, Sex, Source, Text,
 };
-use ged_io::{GedcomVersion, GedcomWriter};
+use oxidged::{GedcomVersion, GedcomWriter};
 
 /// The individual with identifier `xref`, copied out.
 fn indi(data: &Dataset, xref: &str) -> Individual {
@@ -429,7 +429,7 @@ fn dates_and_ages() {
     assert_eq!(text(&data, &date.value), "@#DJULIAN@ 1 JAN 1700");
     assert!(matches!(
         date.parse(&data),
-        ged_io::value::DateValue::Date(_)
+        oxidged::value::DateValue::Date(_)
     ));
     let age = event(person, EventKind::Death)
         .detail()
@@ -460,14 +460,14 @@ fn payloads_that_do_not_fit_are_kept_aside() {
     let asso = &person.detail().associations[0];
     assert_eq!(asso.individual, None);
     assert_eq!(asso.role.as_ref().unwrap().value, Role::Neighbor);
-    assert_eq!(asso.extra[0].tag, ged_io::model::TagId::ASIDE);
+    assert_eq!(asso.extra[0].tag, oxidged::model::TagId::ASIDE);
     assert!(person.notes[0].extra[0].xref.is_some());
     assert_eq!(
         data.families().get(0).unwrap().into_owned().events.len(),
         1,
         "a record with a payload is typed"
     );
-    let untyped = ged_io::model::ledger::untyped(&data);
+    let untyped = oxidged::model::ledger::untyped(&data);
     assert_eq!(untyped, ["INDI/NOTE", "INDI/ASSO", "FAM"]);
     let structures = data.to_structures();
     let indi = structures.iter().find(|r| r.tag == "INDI").unwrap();
@@ -590,13 +590,13 @@ fn generated_inputs(n: usize) -> Vec<String> {
 /// A written text's structures, records and siblings of different tags in
 /// tag order (their relative order carries no meaning; the order within a
 /// tag does).
-fn canonical(text: &str) -> Vec<ged_io::tree::Structure> {
-    fn sort(s: &mut ged_io::tree::Structure) {
+fn canonical(text: &str) -> Vec<oxidged::tree::Structure> {
+    fn sort(s: &mut oxidged::tree::Structure) {
         s.substructures.iter_mut().for_each(sort);
         s.substructures
             .sort_by(|a, b| a.tag.as_str().cmp(b.tag.as_str()));
     }
-    let mut records = ged_io::tree::parse_tree(text).to_structures();
+    let mut records = oxidged::tree::parse_tree(text).to_structures();
     records.iter_mut().for_each(sort);
     records.sort_by(|a, b| a.tag.as_str().cmp(b.tag.as_str()));
     records
@@ -616,7 +616,7 @@ fn written_output_reads_typed_and_is_stable() {
         ] {
             let out = write_as(&data, version);
             let again = Dataset::parse(&out);
-            let untyped = ged_io::model::ledger::untyped(&again);
+            let untyped = oxidged::model::ledger::untyped(&again);
             assert!(untyped.is_empty(), "{untyped:?}\n{input}\n{out}");
             let twice = write_as(&again, version);
             assert_eq!(
@@ -650,7 +650,7 @@ fn fuzz_findings_are_stable() {
         ] {
             let out = write_as(&data, version);
             let again = Dataset::parse(&out);
-            let untyped = ged_io::model::ledger::untyped(&again);
+            let untyped = oxidged::model::ledger::untyped(&again);
             assert!(
                 untyped.is_empty(),
                 "{input:?} {version}: {untyped:?}\n{out}"
@@ -769,11 +769,11 @@ fn repairs_follow_the_order_of_the_model() {
 #[test]
 fn an_enumeration_value_with_a_line_break_is_kept() {
     let text = "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 NAME Ann /Sample/\n2 FONE Value\n3 TYPE hangul\n\u{0}\u{0}\n0 TRLR\n";
-    let data = ged_io::Dataset::parse(text);
-    let writer = ged_io::GedcomWriter::new();
+    let data = oxidged::Dataset::parse(text);
+    let writer = oxidged::GedcomWriter::new();
     let once = writer.write_to_string(&data).unwrap();
     let twice = writer
-        .write_to_string(&ged_io::Dataset::parse(once.as_str()))
+        .write_to_string(&oxidged::Dataset::parse(once.as_str()))
         .unwrap();
     assert_eq!(once, twice);
     assert!(once.contains("3 TYPE hangul\n4 CONT\n"), "{once}");

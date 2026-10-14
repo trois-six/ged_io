@@ -1,4 +1,4 @@
-//! Memory layout of the owned types of the typed model (`ged_io::model`),
+//! Memory layout of the owned types of the typed model (`oxidged::model`),
 //! checked at compile time.
 //!
 //! A dataset keeps every structure as a row of the table of its type
@@ -20,7 +20,7 @@
 
 use std::mem::size_of;
 
-use ged_io::model::{
+use oxidged::model::{
     Address, Age, Association, CallNumber, ChangeDate, ChildLink, Citation, CitationData,
     CitedEvent, Crop, Date, Event, EventDetail, EventFamily, EventSpouse, ExactDate, Exid, Extra,
     Family, File, FileForm, Header, Individual, IndividualDetail, IndividualRef, LdsStatus, Map,

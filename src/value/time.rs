@@ -11,8 +11,8 @@ use crate::GedcomVersion;
 /// A time of day on a 24-hour clock: `hh:mm[:ss[.fraction]][Z]`.
 ///
 /// ```
-/// use ged_io::value::Time;
-/// use ged_io::GedcomVersion;
+/// use oxidged::value::Time;
+/// use oxidged::GedcomVersion;
 ///
 /// let time = Time::parse("2:50:00.25Z").unwrap();
 /// assert_eq!((time.hour, time.minute, time.second), (2, 50, Some(0)));

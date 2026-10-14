@@ -28,8 +28,8 @@
 //! # Example
 //!
 //! ```rust
-//! use ged_io::model::Dataset;
-//! use ged_io::{GedcomVersion, GedcomWriter};
+//! use oxidged::model::Dataset;
+//! use oxidged::{GedcomVersion, GedcomWriter};
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let data = Dataset::parse("0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 NAME Ann /Example/\n0 TRLR\n");

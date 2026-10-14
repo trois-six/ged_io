@@ -60,7 +60,7 @@
 //! suggests. Call the method instead, or name the type:
 //!
 //! ```rust
-//! use ged_io::model::{Dataset, Individual, View};
+//! use oxidged::model::{Dataset, Individual, View};
 //!
 //! let data = Dataset::parse("0 HEAD\n0 @I1@ INDI\n0 @I2@ INDI\n0 TRLR\n");
 //! let ids: Vec<_> = data.individuals().iter().map(|i| i.xref()).collect();
@@ -122,8 +122,8 @@
 //!   [`Dataset::dangling_references`] the pointers to no record.
 //!
 //! ```rust
-//! use ged_io::model::{Dataset, Family, Individual, Link, Removal, Source};
-//! use ged_io::GedcomWriter;
+//! use oxidged::model::{Dataset, Family, Individual, Link, Removal, Source};
+//! use oxidged::GedcomWriter;
 //!
 //! let mut data = Dataset::parse(
 //!     "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 NAME Ann /Example/\n\
@@ -152,8 +152,8 @@
 //! and every line follows its line rules.
 //!
 //! ```rust
-//! use ged_io::model::{Dataset, NoteContent, Pedigree};
-//! use ged_io::GedcomWriter;
+//! use oxidged::model::{Dataset, NoteContent, Pedigree};
+//! use oxidged::GedcomWriter;
 //!
 //! let data = Dataset::parse(
 //!     "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 NOTE Hello\n2 LANG en\n\

@@ -8,9 +8,9 @@
 
 use std::io::{BufReader, Read};
 
-use ged_io::encoding::{decode, DecodeReader};
-use ged_io::tree::{parse_tree, Structure, Tree, TreeReader};
 use libfuzzer_sys::fuzz_target;
+use oxidged::encoding::{decode, DecodeReader};
+use oxidged::tree::{parse_tree, Structure, Tree, TreeReader};
 
 /// The bytes a stream reads to choose the decoding.
 const WINDOW: usize = 64 * 1024;
@@ -37,7 +37,7 @@ fuzz_target!(|data: &[u8]| {
         .expect("decoded text is UTF-8");
     // Both decide from the first 64 KiB; when those are ASCII, which tells
     // nothing, the rest of the input decides in memory, out of the stream's
-    // sight (`ged_io::encoding`).
+    // sight (`oxidged::encoding`).
     let ascii_window = bytes.get(..WINDOW).is_some_and(|w| w.is_ascii()) && bytes.len() > WINDOW;
     assert!(
         streamed == decoded.text || ascii_window,

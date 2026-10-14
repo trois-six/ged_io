@@ -7,12 +7,12 @@
 use std::collections::HashMap;
 use std::io::{Cursor, Read, Write};
 
-use ged_io::gedzip::{
+use oxidged::gedzip::{
     read_gedzip, write_gedzip, write_gedzip_with_media, GedzipError, GedzipReader, GedzipWriter,
     GEDCOM_FILENAME,
 };
-use ged_io::model::Dataset;
-use ged_io::{GedcomBuilder, GedcomError, GedcomVersion, GedcomWriter};
+use oxidged::model::Dataset;
+use oxidged::{GedcomBuilder, GedcomError, GedcomVersion, GedcomWriter};
 
 const FAMILY: &str = "0 HEAD\n1 GEDC\n2 VERS 7.0\n\
     0 @I1@ INDI\n1 NAME Ann /Example/\n1 SEX F\n1 OBJE @M1@\n\
@@ -330,7 +330,7 @@ fn an_archive_holds_gedcom_7() {
         "{text}"
     );
     assert!(!text.contains("CHAR"), "{text}");
-    assert!(ged_io::spec::validate_text(&text).is_empty(), "{text}");
+    assert!(oxidged::spec::validate_text(&text).is_empty(), "{text}");
 
     let with = |writer: GedcomWriter, data: &Dataset| {
         let mut zip = GedzipWriter::new(Cursor::new(Vec::new())).unwrap();
@@ -348,7 +348,7 @@ fn an_archive_holds_gedcom_7() {
         with(v551_writer, &data71).starts_with("\u{feff}0 HEAD\n1 GEDC\n2 VERS 7.1\n".as_bytes())
     );
     // A writer may leave the byte order mark out.
-    let bare = GedcomWriter::new().bom(ged_io::Bom::Never);
+    let bare = GedcomWriter::new().bom(oxidged::Bom::Never);
     assert!(with(bare, &v551).starts_with(b"0 HEAD\n"));
 }
 

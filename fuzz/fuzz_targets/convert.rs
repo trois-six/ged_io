@@ -9,11 +9,11 @@
 
 use std::collections::HashMap;
 
-use ged_io::convert::{convert_dataset, convert_structures, ConversionOptions};
-use ged_io::spec::{validate_text, DeviationKind};
-use ged_io::tree::{Payload, Structure, Tree};
-use ged_io::{Bom, Dataset, GedcomVersion, GedcomWriter};
 use libfuzzer_sys::fuzz_target;
+use oxidged::convert::{convert_dataset, convert_structures, ConversionOptions};
+use oxidged::spec::{validate_text, DeviationKind};
+use oxidged::tree::{Payload, Structure, Tree};
+use oxidged::{Bom, Dataset, GedcomVersion, GedcomWriter};
 
 const V551: GedcomVersion = GedcomVersion::V5_5_1;
 

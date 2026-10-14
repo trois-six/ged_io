@@ -1,5 +1,5 @@
 //! The schema tests of ArmidaleSoftware/gedcom7 (MIT, commit `dabc9a9`,
-//! `Tests/SchemaTests.cs`) against `ged_io::spec`: every `ValidateGedcomText`
+//! `Tests/SchemaTests.cs`) against `oxidged::spec`: every `ValidateGedcomText`
 //! and `ValidateGedcomFile` call of the C# suite, with its value lists, as a
 //! dataset and its expected outcome — valid, or a deviation of a given kind
 //! on a given line.
@@ -8,7 +8,7 @@
 //! data. Where Armidale and the specification disagree, the specification
 //! wins and the case says why ([`Expect::Departure`]).
 
-use ged_io::spec::{validate_bytes, validate_text, Deviation, DeviationKind as K};
+use oxidged::spec::{validate_bytes, validate_text, Deviation, DeviationKind as K};
 use std::path::Path;
 
 /// What a case expects.
@@ -924,8 +924,8 @@ fn wants_valid(expect: &Expect) -> bool {
 /// invalid one is refused with its deviations.
 #[test]
 fn armidale_cases_in_strict_mode() {
-    let lenient = ged_io::GedcomBuilder::new();
-    let strict = ged_io::GedcomBuilder::new().strict(true);
+    let lenient = oxidged::GedcomBuilder::new();
+    let strict = oxidged::GedcomBuilder::new().strict(true);
     let mut wrong = Vec::new();
     for (name, text, expect) in &all_cases().0 {
         let read = lenient.build_from_str(text.as_str());
@@ -934,7 +934,7 @@ fn armidale_cases_in_strict_mode() {
         }
         match (strict.build_from_str(text.as_str()), wants_valid(expect)) {
             (Ok(_), true) => {}
-            (Err(ged_io::GedcomError::NonConformant(found)), false) if meets(&found, expect) => {}
+            (Err(oxidged::GedcomError::NonConformant(found)), false) if meets(&found, expect) => {}
             (result, _) => wrong.push(format!(
                 "{name}: expected {expect:?}, strict mode gave {result:?}"
             )),

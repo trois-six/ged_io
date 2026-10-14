@@ -17,7 +17,7 @@ use super::{Decoder, GedcomEncoding};
 ///
 /// ```rust
 /// use std::io::Read;
-/// use ged_io::encoding::{DecodeReader, GedcomEncoding};
+/// use oxidged::encoding::{DecodeReader, GedcomEncoding};
 ///
 /// let bytes: &[u8] = b"0 HEAD\r1 CHAR ANSEL\r1 NOTE Jos\xE2e\r0 TRLR\r";
 /// let mut reader = DecodeReader::new(bytes)?;

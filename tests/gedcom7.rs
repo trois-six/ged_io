@@ -5,11 +5,11 @@
 //! (`TRAN`), cropping (`CROP`), Latter-day Saint ordinances (7.x `INIL`),
 //! 7.1 structures and `@` escaping. Every name and value is fictitious.
 
-use ged_io::model::{
+use oxidged::model::{
     BirthKind, Dataset, EventKind, NoteContent, NoteKind, OrdinanceKind, OrdinanceStatus, Text,
 };
-use ged_io::version::detect_version;
-use ged_io::{GedcomBuilder, GedcomVersion, GedcomWriter, RepairKind};
+use oxidged::version::detect_version;
+use oxidged::{GedcomBuilder, GedcomVersion, GedcomWriter, RepairKind};
 
 /// A 7.0 file with these records.
 fn v7(records: &str) -> String {
@@ -392,7 +392,7 @@ fn enumeration_phrases() {
     ));
     let ann = data.individuals().get(0).unwrap().into_owned();
     let pedigree = ann.child_of[0].detail().pedigree.as_ref().unwrap();
-    assert_eq!(pedigree.value, ged_io::model::Pedigree::Other);
+    assert_eq!(pedigree.value, oxidged::model::Pedigree::Other);
     assert_eq!(
         text(&data, pedigree.phrase.as_ref().unwrap()),
         "Guardianship"
@@ -753,7 +753,7 @@ fn structures_5_5_1_lacks_are_written_to_it_as_extensions() {
 /// writes the records, and the output reads back and writes as it is.
 #[test]
 fn pointer_cycles_7_0_17_are_read_and_cut_on_write() {
-    use ged_io::spec::{validate_text, DeviationKind};
+    use oxidged::spec::{validate_text, DeviationKind};
     let input = v7(
         "0 @I1@ INDI\n1 ALIA @I1@\n1 ALIA @I2@\n0 @I2@ INDI\n1 ALIA @I1@\n\
          0 @N1@ SNOTE Transcribed from the register\n1 SOUR @S1@\n\
@@ -777,7 +777,7 @@ fn pointer_cycles_7_0_17_are_read_and_cut_on_write() {
             .len(),
         2
     );
-    let index = ged_io::IndexedDataset::new(data.clone());
+    let index = oxidged::IndexedDataset::new(data.clone());
     assert!(index.find_source("@S1@").is_some());
 
     let (out, report) = GedcomWriter::new()
@@ -827,8 +827,8 @@ fn pointer_cycles_7_0_17_are_read_and_cut_on_write() {
 /// typed and written as it was, and validates.
 #[test]
 fn the_7_0_17_examples_read_and_write_as_they_are() {
-    use ged_io::model::NameType;
-    use ged_io::spec::validate_text;
+    use oxidged::model::NameType;
+    use oxidged::spec::validate_text;
     let input = v7(
         "0 @I1@ INDI\n1 NAME Mark /Twain/\n2 TYPE PROFESSIONAL\n3 PHRASE Pen\n\
          1 RESI\n2 PLAC Sampletown\n3 MAP\n4 LATI N18.150944\n4 LONG E168.150944\n\
@@ -883,7 +883,7 @@ fn the_7_0_17_examples_read_and_write_as_they_are() {
 fn web_file_addresses_are_percent_encoded() {
     let v551 = "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @M1@ OBJE\n1 FILE https://example.org/a b.jpg\n\
                 2 FORM jpg\n0 @M2@ OBJE\n1 FILE photos/a b.jpg\n2 FORM jpg\n0 TRLR\n";
-    let data = ged_io::Dataset::parse(v551);
+    let data = oxidged::Dataset::parse(v551);
     let (out, report) = GedcomWriter::new()
         .gedcom_version(GedcomVersion::V7_0)
         .write_to_string_with_report(&data)
@@ -902,8 +902,8 @@ fn web_file_addresses_are_percent_encoded() {
         "{:?}",
         report.repairs
     );
-    assert!(ged_io::spec::validate_text(&out).is_empty());
-    let back = ged_io::Dataset::parse(out.clone());
+    assert!(oxidged::spec::validate_text(&out).is_empty());
+    let back = oxidged::Dataset::parse(out.clone());
     let again = GedcomWriter::new()
         .gedcom_version(GedcomVersion::V7_0)
         .write_to_string(&back)
@@ -913,7 +913,7 @@ fn web_file_addresses_are_percent_encoded() {
     let v70 = "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @M1@ OBJE\n1 FILE https://example.org/a b.jpg\n\
                2 FORM image/jpeg\n0 TRLR\n";
     let out = GedcomWriter::new()
-        .write_to_string(&ged_io::Dataset::parse(v70))
+        .write_to_string(&oxidged::Dataset::parse(v70))
         .unwrap();
     assert!(
         out.contains("0 @M1@ OBJE\n1 FILE https://example.org/a%20b.jpg\n"),

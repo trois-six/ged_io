@@ -91,8 +91,8 @@ impl Approximation {
 /// # Example
 ///
 /// ```
-/// use ged_io::value::{Calendar, DateValue};
-/// use ged_io::GedcomVersion;
+/// use oxidged::value::{Calendar, DateValue};
+/// use oxidged::GedcomVersion;
 ///
 /// let value = DateValue::parse("BET @#DJULIAN@ 1700 AND @#DJULIAN@ 1710");
 /// let DateValue::Between(start, end) = &value else { panic!() };
@@ -205,7 +205,7 @@ impl CalendarDate {
     /// [`text`](Self::text) the whole wording when some of it is not.
     ///
     /// ```
-    /// use ged_io::value::{Calendar, CalendarDate};
+    /// use oxidged::value::{Calendar, CalendarDate};
     ///
     /// let date = CalendarDate::parse("@#DJULIAN@ 1850 environ");
     /// assert_eq!(date.calendar, Calendar::Julian);

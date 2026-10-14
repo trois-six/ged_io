@@ -25,7 +25,7 @@ gedcom_struct! {
     /// the rest is in its [`detail`](Self::detail).
     ///
     /// ```rust
-    /// use ged_io::model::{Dataset, EventKind};
+    /// use oxidged::model::{Dataset, EventKind};
     ///
     /// let data = Dataset::parse("0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 BIRT\n2 DATE 1 JAN 1900\n2 AGE 0y\n1 OCCU Miller\n0 TRLR\n");
     /// let indi = data.individuals().first().unwrap();

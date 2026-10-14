@@ -2,13 +2,13 @@
 //! removing and renaming records, links of every kind, pointer counts and
 //! dangling pointers. Every name is fictitious.
 
-use ged_io::model::{
+use oxidged::model::{
     Citation, CitationSource, Dataset, EditError, Family, Holder, Individual, IndividualRef, Link,
     Name, Node, Note, Record, RecordKind, Removal, Repository, SharedNote, Source, Submitter,
     Value,
 };
-use ged_io::tree::{Payload, Structure};
-use ged_io::{GedcomVersion, GedcomWriter};
+use oxidged::tree::{Payload, Structure};
+use oxidged::{GedcomVersion, GedcomWriter};
 
 const FAMILY: &str = "0 HEAD\n1 GEDC\n2 VERS 7.0\n1 SUBM @U1@\n\
     0 @U1@ SUBM\n1 NAME Example submitter\n\
@@ -128,7 +128,7 @@ fn lookups_are_by_index_and_find_the_first() {
     );
     // Individuals come before families in record order; each lookup by
     // type finds the first of its type.
-    let Some(ged_io::model::RecordRef::Individual(first)) = data.find("@X1@") else {
+    let Some(oxidged::model::RecordRef::Individual(first)) = data.find("@X1@") else {
         panic!()
     };
     assert_eq!(first.names().first().unwrap().full(), "First");
@@ -154,14 +154,14 @@ fn add_checks_identifiers_and_pointers() {
     // A pointer to no record.
     let nowhere = data.store_mut().intern_xref("@F9@").unwrap();
     let mut child = Individual::default();
-    child.child_of.push(ged_io::model::ChildLink::new(nowhere));
+    child.child_of.push(oxidged::model::ChildLink::new(nowhere));
     assert_eq!(
         data.add(child.clone()),
         Err(EditError::UnknownXref("@F9@".into()))
     );
     // 7.x `@VOID@` points nowhere by definition.
     let void = data.store_mut().intern_xref("@VOID@").unwrap();
-    child.child_of = vec![ged_io::model::ChildLink::new(void)].into();
+    child.child_of = vec![oxidged::model::ChildLink::new(void)].into();
     data.add(child).unwrap();
     // An id of no store of this dataset.
     let mut other = Dataset::new(GedcomVersion::V7_0);
@@ -332,7 +332,7 @@ fn renaming_to_an_invalid_identifier_is_repaired_on_write() {
     data.rename("@I1@", "@ann@").unwrap();
     // Not a 7.0 identifier: the writer renames it, and its pointers.
     let out = write(&data);
-    assert!(ged_io::spec::validate_text(&out).is_empty(), "{out}");
+    assert!(oxidged::spec::validate_text(&out).is_empty(), "{out}");
     assert!(!out.contains("@ann@"), "{out}");
     data.rename("@ann@", "@ANN@").unwrap();
     let out = write(&data);
@@ -347,7 +347,7 @@ fn links_of_every_kind() {
     let src = data.handle::<Source>("@S1@").unwrap();
     let note = data.handle::<SharedNote>("@N1@").unwrap();
     let sub = data.handle::<Submitter>("@U1@").unwrap();
-    let obje = data.add(ged_io::model::Multimedia::default()).unwrap();
+    let obje = data.add(oxidged::model::Multimedia::default()).unwrap();
     let obje_id = data.get(obje).unwrap().xref().unwrap();
     let ext = data.store_mut().intern_tag("_WITNESS");
     let cases: &[(Holder, Link, &str)] = &[
@@ -384,7 +384,7 @@ fn links_of_every_kind() {
     assert_eq!(data.references(obje_id), 3);
     assert_counts(&data);
     let out = write(&data);
-    assert!(ged_io::spec::validate_text(&out).is_empty(), "{out}");
+    assert!(oxidged::spec::validate_text(&out).is_empty(), "{out}");
     assert!(has(&out, "1 _WITNESS @I2@\n"), "{out}");
 
     // Type checks and inapplicable links.
@@ -448,7 +448,7 @@ fn header_links() {
         Err(EditError::NoHeader)
     );
     assert!(empty
-        .set_header(Some(ged_io::model::Header::default()))
+        .set_header(Some(oxidged::model::Header::default()))
         .is_none());
     empty.link(Holder::Header, Link::Note, "@N1@").unwrap();
     assert_eq!(empty.references("@N1@"), 1);
@@ -536,7 +536,7 @@ fn edits_through_a_lent_record_are_counted() {
     );
     assert!(data.find_individual("@I1@").is_none());
     let out = write(&data);
-    assert!(ged_io::spec::validate_text(&out).is_empty(), "{out}");
+    assert!(oxidged::spec::validate_text(&out).is_empty(), "{out}");
     // Every individual, in turn.
     data.edit_all::<Individual>(|i| i.names.push(Name::new("Also /Known/")));
     assert!(data.individuals().iter().all(|i| i.names().len() == 2));
@@ -606,7 +606,7 @@ fn push_is_unchecked() {
         xref: Some(i1),
         ..Individual::default()
     };
-    twin.child_of.push(ged_io::model::ChildLink::new(f9));
+    twin.child_of.push(oxidged::model::ChildLink::new(f9));
     let h = data.push(Record::Individual(Box::new(twin))).unwrap();
     assert_eq!(h.kind(), RecordKind::Individual);
     assert_eq!(data.dangling_references().len(), 1);
@@ -621,7 +621,7 @@ fn push_is_unchecked() {
     // Written conformant all the same: the duplicate renamed, the pointer
     // to no record kept.
     let out = write(&data);
-    assert!(ged_io::spec::validate_text(&out).is_empty(), "{out}");
+    assert!(oxidged::spec::validate_text(&out).is_empty(), "{out}");
     assert_counts(&data);
 }
 

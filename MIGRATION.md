@@ -15,7 +15,7 @@ This guide explains the key differences between GEDCOM 5.5.1 and GEDCOM 7.0, and
 **Migration Note:** If you're creating GEDCOM 7.0 files, always use UTF-8 encoding. The `CHAR` tag should not be included.
 
 ```rust
-use ged_io::version::GedcomVersion;
+use oxidged::version::GedcomVersion;
 
 let rules = GedcomVersion::V7_0.rules();
 assert!(!rules.has_head_char()); // 7.0 is UTF-8 only: no CHAR
@@ -31,7 +31,7 @@ assert!(!rules.has_head_char()); // 7.0 is UTF-8 only: no CHAR
 **Migration Note:** GEDCOM 7.0 removes the `CONC` tag. Use only `CONT` for multi-line text. The library handles this automatically when writing.
 
 ```rust
-use ged_io::version::GedcomVersion;
+use oxidged::version::GedcomVersion;
 
 assert!(GedcomVersion::V5_5_1.rules().uses_conc());
 assert!(!GedcomVersion::V7_0.rules().uses_conc());
@@ -47,12 +47,12 @@ assert!(!GedcomVersion::V7_0.rules().uses_conc());
 version, and the writer escapes text by the rule of the version it writes:
 
 ```rust
-use ged_io::model::{Dataset, Note};
-use ged_io::{GedcomVersion, GedcomWriter};
+use oxidged::model::{Dataset, Note};
+use oxidged::{GedcomVersion, GedcomWriter};
 
 let mut data = Dataset::new(GedcomVersion::V5_5_1);
 let id = data.store_mut().intern_xref("@I1@").unwrap();
-let mut person = ged_io::model::Individual { xref: Some(id), ..Default::default() };
+let mut person = oxidged::model::Individual { xref: Some(id), ..Default::default() };
 person.notes.push(Note::text("@home and ann@example.com"));
 data.add(person).unwrap();
 
@@ -72,7 +72,7 @@ assert!(v70.contains("1 NOTE @@home and ann@example.com\n"));
 GEDCOM 7.0 introduces `SNOTE` records for notes that can be referenced by multiple structures:
 
 ```rust
-use ged_io::Dataset;
+use oxidged::Dataset;
 
 let gedcom_7 = "\
     0 HEAD\n\
@@ -97,7 +97,7 @@ A 5.5.1 `NOTE` record is a shared note too, written `NOTE` in 5.5.1 and
 GEDCOM 7.0 formalizes extension tags via the `SCHMA` structure:
 
 ```rust
-use ged_io::Dataset;
+use oxidged::Dataset;
 
 let gedcom_7 = "\
     0 HEAD\n\
@@ -177,8 +177,8 @@ Defines a region of an image to display:
 GEDCOM 7.0 adds the `INIL` tag for LDS initiatory ordinances:
 
 ```rust
-use ged_io::Dataset;
-use ged_io::model::OrdinanceKind;
+use oxidged::Dataset;
+use oxidged::model::OrdinanceKind;
 
 let data = Dataset::parse("0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 INIL\n2 DATE 15 MAR 1990\n2 TEMP SLAKE\n0 TRLR\n");
 let ordinance = data.individuals().first().unwrap().ordinances().first().unwrap();
@@ -212,7 +212,7 @@ Written as 5.5.1, which has no `INIL`, it is kept as the extension `_INIL`.
 The library automatically detects the GEDCOM version:
 
 ```rust
-use ged_io::version::detect_version;
+use oxidged::version::detect_version;
 
 let content = "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 TRLR\n";
 let version = detect_version(content);
@@ -232,7 +232,7 @@ println!("longest line: {:?}", rules.max_line_length());
 ## Checking Version Programmatically
 
 ```rust
-use ged_io::Dataset;
+use oxidged::Dataset;
 
 let data = Dataset::parse("0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @N1@ SNOTE Shared\n0 TRLR\n");
 
@@ -248,7 +248,7 @@ assert_eq!(data.declared_version(), Some("7.0"));
 ## Writing Version-Specific Files
 
 ```rust
-use ged_io::{Dataset, GedcomVersion, GedcomWriter};
+use oxidged::{Dataset, GedcomVersion, GedcomWriter};
 
 let data = Dataset::parse("0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 NAME Ann /Example/\n0 TRLR\n");
 
@@ -278,8 +278,8 @@ assert!(output_70.contains("2 VERS 7.0\n"));
 ### Converting Inline Notes to Shared Notes
 
 ```rust
-use ged_io::model::{Note, SharedNote};
-use ged_io::{Dataset, GedcomVersion};
+use oxidged::model::{Note, SharedNote};
+use oxidged::{Dataset, GedcomVersion};
 
 let mut data = Dataset::new(GedcomVersion::V7_0);
 // Create a shared note from common text, and point to it.
@@ -290,7 +290,7 @@ data.add(SharedNote {
     ..Default::default()
 })
 .unwrap();
-let mut person = ged_io::model::Individual::default();
+let mut person = oxidged::model::Individual::default();
 person.notes.push(Note::shared(id));
 data.add(person).unwrap(); // checked: the note it points to is there
 assert_eq!(data.references(id), 1);
@@ -303,7 +303,7 @@ Reading joins `CONC` continuations into the text; writing GEDCOM 7.0 never
 splits a payload, so 7.0 output has no `CONC` at all:
 
 ```rust
-use ged_io::{Dataset, GedcomVersion, GedcomWriter};
+use oxidged::{Dataset, GedcomVersion, GedcomWriter};
 
 let text = format!("0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 NOTE {}\n2 CONC {}\n0 TRLR\n", "a".repeat(200), "b".repeat(200));
 let data = Dataset::parse(text);

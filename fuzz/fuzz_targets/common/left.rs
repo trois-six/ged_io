@@ -1,11 +1,11 @@
 //! What the conformance repair documents it leaves in a written file
-//! (`ged_io::spec`, repair j): a 5.5.1 record over 32K that holds no note
+//! (`oxidged::spec`, repair j): a 5.5.1 record over 32K that holds no note
 //! to move out, a header (whose note takes no pointer) or an extension
 //! record. Shared by the targets that validate what the writer writes.
 
-use ged_io::spec::{validate_text, Deviation, DeviationKind};
-use ged_io::tree::{parse_tree, Payload, Structure};
-use ged_io::GedcomVersion;
+use oxidged::spec::{validate_text, Deviation, DeviationKind};
+use oxidged::tree::{parse_tree, Payload, Structure};
+use oxidged::GedcomVersion;
 
 /// The bytes of the structure starting at the 1-based line `line` of
 /// `lines`: its line and every line under it.

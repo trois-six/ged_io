@@ -69,7 +69,7 @@ ged_io = { version = "0.18", features = ["calendar"] }
 ### Read a file
 
 ```rust,no_run
-use ged_io::GedcomBuilder;
+use oxidged::GedcomBuilder;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Any encoding: the bytes are decoded by what they hold and their CHAR.
@@ -97,7 +97,7 @@ edits records.
 ### Write a file
 
 ```rust,no_run
-use ged_io::{Dataset, GedcomVersion, GedcomWriter};
+use oxidged::{Dataset, GedcomVersion, GedcomWriter};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let data = Dataset::from_bytes(std::fs::read("input.ged")?);
@@ -142,7 +142,7 @@ variant names is kept as written (`Pedigree::Unknown("stepchild")`), as is
 any date, age or time: their grammars read them on demand.
 
 ```rust
-use ged_io::model::{Dataset, Pedigree, Sex};
+use oxidged::model::{Dataset, Pedigree, Sex};
 
 let data = Dataset::parse(
     "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 NAME Ann /Example/\n1 SEX f\n\
@@ -158,7 +158,7 @@ assert_eq!(ann.extra().first().unwrap().tag(), "_HOBBY"); // kept, in place
 ### Builder options and strict mode
 
 ```rust
-use ged_io::{GedcomBuilder, GedcomError};
+use oxidged::{GedcomBuilder, GedcomError};
 
 let text = "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 SEX male\n0 TRLR\n";
 let builder = GedcomBuilder::new().max_file_size(50_000_000);
@@ -194,7 +194,7 @@ from the specification (what strict mode would refuse, nothing refused)
 and what was interpreted.
 
 ```rust
-use ged_io::GedcomBuilder;
+use oxidged::GedcomBuilder;
 
 let file = b"0 HEAD\n1 SOUR FTM\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 SEX male\n1 _FUN\n2 DATE 1900\n0 TRLR\n";
 let (data, report) = GedcomBuilder::new().build_from_bytes_with_report(file.to_vec()).unwrap();
@@ -210,7 +210,7 @@ assert_eq!(data.individuals().first().unwrap().events().len(), 1);
 
 Genealogy programs extend GEDCOM their own ways: extension tags
 (`_MARNM`, `_FREL`, `_SDATE`), standard tags given another meaning, date
-dialects, `CHAR ANSI` meaning one code page or another. `ged_io::profile`
+dialects, `CHAR ANSI` meaning one code page or another. `oxidged::profile`
 describes them as data, from a compatibility study of about 40 programs:
 each rule cites the row of the research it implements.
 
@@ -255,8 +255,8 @@ that loses something, and every importer limit the output exceeds, is in
 the `ExportReport`.
 
 ```rust
-use ged_io::profile::Exporter;
-use ged_io::Dataset;
+use oxidged::profile::Exporter;
+use oxidged::Dataset;
 
 let data = Dataset::parse(
     "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 NAME Ann /Example/\n\
@@ -301,7 +301,7 @@ research alone.
 Lookups and navigation:
 
 ```rust
-use ged_io::Dataset;
+use oxidged::Dataset;
 
 let data = Dataset::parse(
     "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 NAME Ann /Example/\n0 @I2@ INDI\n\
@@ -324,7 +324,7 @@ record of each identifier. `families_as_spouse` and `families_as_child`
 search the families; `IndexedDataset` finds them in constant time too:
 
 ```rust
-use ged_io::{Dataset, IndexedDataset};
+use oxidged::{Dataset, IndexedDataset};
 
 let indexed = IndexedDataset::new(Dataset::parse(
     "0 HEAD\n0 @I1@ INDI\n0 @F1@ FAM\n1 CHIL @I1@\n0 TRLR\n",
@@ -344,8 +344,8 @@ pointers to it, so that it can refuse what would break a reference and
 find any record in constant time.
 
 ```rust
-use ged_io::model::{Dataset, EditError, Family, Individual, Link, Removal, Source};
-use ged_io::{GedcomVersion, GedcomWriter};
+use oxidged::model::{Dataset, EditError, Family, Individual, Link, Removal, Source};
+use oxidged::{GedcomVersion, GedcomWriter};
 
 let mut data = Dataset::parse(
     "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 NAME Ann /Example/\n\
@@ -373,7 +373,7 @@ assert!(data.dangling_references().is_empty());
 data.rename("@I1@", "@ANN@").unwrap();
 // Any field can be edited through a lent record, a copy stored back (its
 // pointers counted again) when the guard is dropped.
-data.get_mut(ann).unwrap().names[0] = ged_io::model::Name::new("Anna /Example/");
+data.get_mut(ann).unwrap().names[0] = oxidged::model::Name::new("Anna /Example/");
 
 let out = GedcomWriter::new().write_to_string(&data).unwrap();
 assert!(out.contains("0 @F1@ FAM\n1 HUSB @ANN@\n1 WIFE @I2@\n"));
@@ -419,7 +419,7 @@ the data holds:
 | Last line | Terminated | Terminated |
 
 Before the lines, the structures are repaired for the target version
-(`ged_io::spec::conform`): an enumeration value outside its set, text
+(`oxidged::spec::conform`): an enumeration value outside its set, text
 where a pointer belongs, a date outside the grammar, a structure the
 version does not permit or permits once, a missing required substructure,
 and in 7.x an `ALIA` to its own record or a pointer that closes a cycle of
@@ -439,7 +439,7 @@ encrypted or a server login) are left out unless
 ### Conversion between 5.5.1 and 7.x
 
 Written in a version of the other family, a dataset is converted first
-(`ged_io::convert`), as the FamilySearch migration guide says and, where it
+(`oxidged::convert`), as the FamilySearch migration guide says and, where it
 leaves a choice, as the gedcom7code conversions do:
 
 | 5.5.1 | 7.x |
@@ -464,8 +464,8 @@ structures 7.x drops are kept as extensions `HEAD.SCHMA` declares with their
 round trip through 7.x.
 
 ```rust
-use ged_io::convert::{convert_dataset, ConversionOptions};
-use ged_io::{Dataset, GedcomVersion, GedcomWriter};
+use oxidged::convert::{convert_dataset, ConversionOptions};
+use oxidged::{Dataset, GedcomVersion, GedcomWriter};
 
 let data = Dataset::parse(
     "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 OBJE\n2 FILE photo.jpg\n3 FORM jpg\n\
@@ -488,10 +488,10 @@ assert_eq!(v7.multimedia().len(), 1);
 ## Streaming
 
 ```rust,no_run
-use ged_io::model::RecordRef;
-use ged_io::{Dataset, GedcomStreamParser};
+use oxidged::model::RecordRef;
+use oxidged::{Dataset, GedcomStreamParser};
 
-fn main() -> Result<(), ged_io::GedcomError> {
+fn main() -> Result<(), oxidged::GedcomError> {
     let file = std::io::BufReader::new(std::fs::File::open("huge.ged")?);
     let mut kept = Dataset::default();
     for record in GedcomStreamParser::new(file)? {
@@ -514,7 +514,7 @@ memory stays bounded by the largest record. Each record comes as a dataset
 of its own, which keeps the record's text and rows; `record.record()` is its
 view. `parser.nodes()` yields the records as lossless
 structures instead; for a whole file as structures, nothing interpreted,
-use `ged_io::tree::Tree` (in memory) or `ged_io::tree::TreeReader`
+use `oxidged::tree::Tree` (in memory) or `oxidged::tree::TreeReader`
 (streaming).
 
 `GedcomStreamWriter` writes the other way: a header, then each record as
@@ -523,8 +523,8 @@ converted for the target version as `GedcomWriter` does, in memory bounded
 by one record and the identifiers written:
 
 ```rust,no_run
-use ged_io::model::{Header, RecordRef};
-use ged_io::{GedcomStreamParser, GedcomStreamWriter, GedcomVersion, WriterConfig};
+use oxidged::model::{Header, RecordRef};
+use oxidged::{GedcomStreamParser, GedcomStreamWriter, GedcomVersion, WriterConfig};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let input = std::io::BufReader::new(std::fs::File::open("huge.ged")?);
@@ -559,8 +559,8 @@ first break, leaving the rest unread:
 
 ```rust
 use std::ops::ControlFlow;
-use ged_io::model::{Individual, View};
-use ged_io::stream::{GedcomStreamParser, StreamedRecord, Visitor};
+use oxidged::model::{Individual, View};
+use oxidged::stream::{GedcomStreamParser, StreamedRecord, Visitor};
 
 struct FirstNamed;
 
@@ -581,8 +581,8 @@ assert_eq!(parser.visit(&mut FirstNamed).unwrap(), ControlFlow::Break("Ann Examp
 ## GEDZIP
 
 ```rust,no_run
-use ged_io::gedzip::{write_gedzip_with_media, GedzipReader};
-use ged_io::GedcomBuilder;
+use oxidged::gedzip::{write_gedzip_with_media, GedzipReader};
+use oxidged::GedcomBuilder;
 use std::collections::HashMap;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -629,13 +629,13 @@ citations) gives each note and citation held in another after it, as
 
 ```rust
 fn main() -> Result<(), serde_json::Error> {
-    let data = ged_io::Dataset::parse("0 HEAD\n0 @I1@ INDI\n1 NAME Ann /Example/\n0 TRLR\n");
+    let data = oxidged::Dataset::parse("0 HEAD\n0 @I1@ INDI\n1 NAME Ann /Example/\n0 TRLR\n");
     let json = serde_json::to_string(&data)?;
     assert_eq!(
         json,
         r#"{"version":"5.5.1","header":{},"individuals":[{"xref":"@I1@","names":[{"value":"Ann /Example/"}]}]}"#
     );
-    let back: ged_io::Dataset = serde_json::from_str(&json)?;
+    let back: oxidged::Dataset = serde_json::from_str(&json)?;
     assert_eq!(back.to_structures(), data.to_structures());
     Ok(())
 }
@@ -645,15 +645,15 @@ fn main() -> Result<(), serde_json::Error> {
 
 ## Validation and Conformance Repair
 
-`ged_io::spec` holds the specifications as data (generated from the
+`oxidged::spec` holds the specifications as data (generated from the
 FamilySearch GEDCOM 7.0.18 tables, the 7.1 draft's and a 5.5.1 transcription checked
 against the PDF; see `NOTICE`). It validates a file, a parsed tree or owned
 structures, and repairs a tree so that it validates:
 
 ```rust
-use ged_io::spec::{conform, validate, validate_bytes};
-use ged_io::tree::parse_tree;
-use ged_io::GedcomVersion;
+use oxidged::spec::{conform, validate, validate_bytes};
+use oxidged::tree::parse_tree;
+use oxidged::GedcomVersion;
 
 let bytes = b"0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 SEX male\n0 TRLR\n";
 for deviation in validate_bytes(bytes) {
@@ -681,15 +681,15 @@ derived from the file's extension. GEDCOM 7.0 output keeps media types.
 ## Dates, Ages and Times
 
 Dates, ages and times are kept exactly as written, and read on demand by
-the grammars of both versions (`ged_io::value`), which never fail: wording
+the grammars of both versions (`oxidged::value`), which never fail: wording
 they do not understand is kept verbatim. `parse_strict` checks a payload
 against one version's grammar; `Date::to_version` and `Age::to_version`
 rewrite a value in the other version's syntax, as the writer does.
 
 ```rust
-use ged_io::model::Date;
-use ged_io::value::{Approximation, Calendar, DateValue};
-use ged_io::{Dataset, GedcomVersion};
+use oxidged::model::Date;
+use oxidged::value::{Approximation, Calendar, DateValue};
+use oxidged::{Dataset, GedcomVersion};
 
 let store = Dataset::default();
 let date = Date::new("ABT @#DJULIAN@ 1700");

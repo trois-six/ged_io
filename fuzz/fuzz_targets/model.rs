@@ -7,9 +7,9 @@
 //! read back gives the same bytes: write(read(write(x))) == write(x).
 #![no_main]
 
-use ged_io::model::{ledger, Dataset};
-use ged_io::{GedcomVersion, GedcomWriter};
 use libfuzzer_sys::fuzz_target;
+use oxidged::model::{ledger, Dataset};
+use oxidged::{GedcomVersion, GedcomWriter};
 
 #[path = "common/left.rs"]
 mod left;

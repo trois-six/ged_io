@@ -27,8 +27,8 @@
 //! chronologically.
 //!
 //! ```rust
-//! use ged_io::value::{Approximation, Calendar, DateValue};
-//! use ged_io::GedcomVersion;
+//! use oxidged::value::{Approximation, Calendar, DateValue};
+//! use oxidged::GedcomVersion;
 //!
 //! let DateValue::Approximated(Approximation::About, date) = DateValue::parse("ABT @#DJULIAN@ 1700")
 //! else {

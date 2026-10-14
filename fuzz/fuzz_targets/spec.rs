@@ -5,10 +5,10 @@
 //! and is written again as it was: write(read(write(x))) == write(x).
 #![no_main]
 
-use ged_io::spec::{conform, validate, validate_bytes, DeviationKind};
-use ged_io::tree::Tree;
-use ged_io::{Bom, GedcomVersion, GedcomWriter};
 use libfuzzer_sys::fuzz_target;
+use oxidged::spec::{conform, validate, validate_bytes, DeviationKind};
+use oxidged::tree::Tree;
+use oxidged::{Bom, GedcomVersion, GedcomWriter};
 
 fuzz_target!(|data: &[u8]| {
     let _ = validate_bytes(data);
@@ -29,7 +29,7 @@ fuzz_target!(|data: &[u8]| {
         assert!(conform(&mut t, version).is_empty(), "{version}");
         // What the writer writes, read back, needs no repair, and is
         // written again as it was: write(read(write(x))) == write(x).
-        let write = |records: &[ged_io::tree::Structure]| {
+        let write = |records: &[oxidged::tree::Structure]| {
             let mut out = Vec::new();
             GedcomWriter::new()
                 .gedcom_version(version)

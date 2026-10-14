@@ -5,8 +5,8 @@
 mod common;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use ged_io::tree::Tree;
-use ged_io::{Dataset, GedcomBuilder, GedcomStreamParser};
+use oxidged::tree::Tree;
+use oxidged::{Dataset, GedcomBuilder, GedcomStreamParser};
 use std::hint::black_box;
 
 fn bench_read(c: &mut Criterion) {

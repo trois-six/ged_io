@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use ged_io::{GedcomBuilder, GedcomVersion};
+use oxidged::{GedcomBuilder, GedcomVersion};
 
 static SEQ: AtomicUsize = AtomicUsize::new(0);
 
@@ -372,7 +372,7 @@ fn sanitize_and_convert_encoding() {
         out.contains("1 CHAR UTF-8\n") && out.contains("1 NAME Renée /Example/\n"),
         "{out}"
     );
-    assert!(ged_io::spec::validate_text(&out).is_empty(), "{out}");
+    assert!(oxidged::spec::validate_text(&out).is_empty(), "{out}");
 
     let output = run(&["--convert-encoding", "ANSEL", file.path()]);
     assert!(output.status.success(), "{}", stderr(&output));

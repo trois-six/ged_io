@@ -6,11 +6,11 @@
 //! grammars with their conversions between versions and calendars.
 #![no_main]
 
-use ged_io::model::{Age, Dataset, Date};
-use ged_io::profile::Interpretation;
-use ged_io::value::{AgeValue, Calendar, DateExact, DatePeriod, DateValue, Time};
-use ged_io::{GedcomBuilder, GedcomVersion, GedcomWriter, IndexedDataset};
 use libfuzzer_sys::fuzz_target;
+use oxidged::model::{Age, Dataset, Date};
+use oxidged::profile::Interpretation;
+use oxidged::value::{AgeValue, Calendar, DateExact, DatePeriod, DateValue, Time};
+use oxidged::{GedcomBuilder, GedcomVersion, GedcomWriter, IndexedDataset};
 
 const VERSIONS: [GedcomVersion; 3] = [
     GedcomVersion::V5_5_1,
@@ -111,19 +111,19 @@ fuzz_target!(|data: &[u8]| {
         .build_from_reader(data);
     if let Ok(text) = std::str::from_utf8(data) {
         let _ = GedcomBuilder::new().build_from_str(text);
-        let _ = ged_io::version::detect_version(text);
+        let _ = oxidged::version::detect_version(text);
         // Each line's payload, after its level and tag, and the whole text.
         for line in text.lines().take(64) {
             values(line.splitn(3, ' ').nth(2).unwrap_or(line));
         }
         values(text);
     }
-    if let Ok(parser) = ged_io::GedcomStreamParser::new(data) {
+    if let Ok(parser) = oxidged::GedcomStreamParser::new(data) {
         let streamed: Dataset = parser.take(10_000).filter_map(Result::ok).collect();
         let _ = streamed.dangling_references();
     }
-    if let Ok(parser) = ged_io::GedcomStreamParser::new(data) {
+    if let Ok(parser) = oxidged::GedcomStreamParser::new(data) {
         let _ = parser.nodes().take(10_000).count();
     }
-    let _ = ged_io::gedzip::read_gedzip(data);
+    let _ = oxidged::gedzip::read_gedzip(data);
 });

@@ -133,7 +133,7 @@ pub(crate) fn standard_index(tag: &str) -> Option<u16> {
 /// specifications define them: `Name` is not `NAME`.
 ///
 /// ```rust
-/// use ged_io::tree::Tag;
+/// use oxidged::tree::Tag;
 ///
 /// let name = Tag::new("NAME");
 /// assert!(name.is_standard());

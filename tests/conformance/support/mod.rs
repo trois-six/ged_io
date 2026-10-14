@@ -1,5 +1,5 @@
 //! Test-side support for the conformance suite. Only `adapter` touches
-//! ged_io; everything else is independent of the crate under test.
+//! oxidged; everything else is independent of the crate under test.
 
 pub mod adapter;
 #[rustfmt::skip]

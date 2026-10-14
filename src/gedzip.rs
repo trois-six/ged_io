@@ -31,9 +31,9 @@
 //! ```rust,no_run
 //! # #[cfg(feature = "gedzip")]
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! use ged_io::gedzip::{GedzipReader, GedzipWriter};
-//! use ged_io::model::Dataset;
-//! use ged_io::GedcomBuilder;
+//! use oxidged::gedzip::{GedzipReader, GedzipWriter};
+//! use oxidged::model::Dataset;
+//! use oxidged::GedcomBuilder;
 //! use std::fs::File;
 //!
 //! // Read a GEDZIP file
@@ -160,14 +160,14 @@ impl From<WriteError> for GedzipError {
 /// ```rust,no_run
 /// # #[cfg(feature = "gedzip")]
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// use ged_io::gedzip::GedzipReader;
+/// use oxidged::gedzip::GedzipReader;
 /// use std::fs::File;
 ///
 /// let file = File::open("family.gdz")?;
 /// let mut reader = GedzipReader::new(file)?;
 ///
 /// // Read the dataset
-/// let data = reader.read_dataset(&ged_io::GedcomBuilder::new())?;
+/// let data = reader.read_dataset(&oxidged::GedcomBuilder::new())?;
 /// println!("Individuals: {}", data.individuals().len());
 ///
 /// // Read a specific media file
@@ -383,8 +383,8 @@ impl<R: Read + Seek> GedzipReader<R> {
 /// ```rust,no_run
 /// # #[cfg(feature = "gedzip")]
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// use ged_io::gedzip::GedzipWriter;
-/// use ged_io::model::Dataset;
+/// use oxidged::gedzip::GedzipWriter;
+/// use oxidged::model::Dataset;
 /// use std::fs::File;
 ///
 /// let source = r#"
@@ -643,7 +643,7 @@ fn entry_key(name: &str) -> String {
 /// ```rust,no_run
 /// # #[cfg(feature = "gedzip")]
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// use ged_io::gedzip::read_gedzip;
+/// use oxidged::gedzip::read_gedzip;
 ///
 /// let bytes = std::fs::read("family.gdz")?;
 /// let data = read_gedzip(&bytes)?;
@@ -666,8 +666,8 @@ pub fn read_gedzip(bytes: &[u8]) -> Result<Dataset, GedcomError> {
 /// ```rust,no_run
 /// # #[cfg(feature = "gedzip")]
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// use ged_io::gedzip::write_gedzip;
-/// use ged_io::model::Dataset;
+/// use oxidged::gedzip::write_gedzip;
+/// use oxidged::model::Dataset;
 ///
 /// let data = Dataset::parse("0 HEAD\n1 GEDC\n2 VERS 7.0\n0 TRLR\n");
 ///
@@ -704,8 +704,8 @@ pub fn write_gedzip(data: &Dataset) -> Result<Vec<u8>, GedzipError> {
 /// ```rust,no_run
 /// # #[cfg(feature = "gedzip")]
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// use ged_io::gedzip::write_gedzip_with_media;
-/// use ged_io::model::Dataset;
+/// use oxidged::gedzip::write_gedzip_with_media;
+/// use oxidged::model::Dataset;
 /// use std::collections::HashMap;
 ///
 /// let data = Dataset::parse("0 HEAD\n1 GEDC\n2 VERS 7.0\n0 TRLR\n");

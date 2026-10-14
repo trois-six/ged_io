@@ -45,16 +45,16 @@
 //! through 7.x.
 //!
 //! ```rust
-//! use ged_io::convert::{convert_dataset, ConversionOptions};
-//! use ged_io::model::Dataset;
-//! use ged_io::GedcomVersion;
+//! use oxidged::convert::{convert_dataset, ConversionOptions};
+//! use oxidged::model::Dataset;
+//! use oxidged::GedcomVersion;
 //!
 //! let data = Dataset::parse(
 //!     "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 ASSO @I2@\n2 RELA Godfather\n\
 //!      0 @I2@ INDI\n0 TRLR\n",
 //! );
 //! let v7 = convert_dataset(&data, GedcomVersion::V7_0, &ConversionOptions::default());
-//! let out = ged_io::GedcomWriter::new().write_to_string(&v7).unwrap();
+//! let out = oxidged::GedcomWriter::new().write_to_string(&v7).unwrap();
 //! assert!(out.contains("1 ASSO @I2@\n2 ROLE GODP\n3 PHRASE Godfather\n"));
 //! ```
 
@@ -102,9 +102,9 @@ impl ConversionOptions {
 /// for [`spec::conform`](crate::spec::conform), which the writer runs next.
 ///
 /// ```rust
-/// use ged_io::convert::{convert_structures, ConversionOptions};
-/// use ged_io::tree::Tree;
-/// use ged_io::GedcomVersion;
+/// use oxidged::convert::{convert_structures, ConversionOptions};
+/// use oxidged::tree::Tree;
+/// use oxidged::GedcomVersion;
 ///
 /// let mut records = Tree::parse(
 ///     "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n1 LANG English\n0 @I1@ INDI\n1 RIN 42\n0 TRLR\n",

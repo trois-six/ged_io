@@ -100,8 +100,8 @@ const STUB: &str = "@U1@";
 /// # Example
 ///
 /// ```rust
-/// use ged_io::{GedcomStreamParser, GedcomStreamWriter, GedcomVersion, WriterConfig};
-/// use ged_io::model::RecordRef;
+/// use oxidged::{GedcomStreamParser, GedcomStreamWriter, GedcomVersion, WriterConfig};
+/// use oxidged::model::RecordRef;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let file: &[u8] = b"0 HEAD\n1 GEDC\n2 VERS 5.5.1\n1 SUBM @U1@\n0 @U1@ SUBM\n1 NAME Ann\n0 @I1@ INDI\n1 NAME Ann /Example/\n0 TRLR\n";

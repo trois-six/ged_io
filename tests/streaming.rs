@@ -12,10 +12,10 @@
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
-use ged_io::encoding::decode;
-use ged_io::model::{Dataset, RecordRef};
-use ged_io::tree::{parse_tree, Structure, Tree, TreeReader};
-use ged_io::{GedcomEncoding, GedcomError, GedcomStreamParser, GedcomVersion, StreamedRecord};
+use oxidged::encoding::decode;
+use oxidged::model::{Dataset, RecordRef};
+use oxidged::tree::{parse_tree, Structure, Tree, TreeReader};
+use oxidged::{GedcomEncoding, GedcomError, GedcomStreamParser, GedcomVersion, StreamedRecord};
 
 const FILE: &str = "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n2 FORM LINEAGE-LINKED\n1 CHAR UTF-8\n\
     0 @I1@ INDI\n1 NAME Zoë /Example/\n1 NOTE a@@b\n2 CONC c\n1 _X y\n1 FAMS @F1@\n\
@@ -197,7 +197,7 @@ fn records_are_typed_one_at_a_time() {
 
     assert_eq!(records[2].record().tag(GedcomVersion::V5_5_1), "FAM");
     let (record, store) = records[2].clone().into_parts();
-    assert!(matches!(record, ged_io::model::Record::Family(_)));
+    assert!(matches!(record, oxidged::model::Record::Family(_)));
     assert!(store.find_xref("@F1@").is_some());
 }
 
@@ -245,7 +245,7 @@ fn the_version_is_known_once_the_header_is_read() {
     let RecordRef::Individual(person) = indi.record() else {
         panic!("not an individual")
     };
-    let ged_io::model::NoteContent::Text(note) = &person.notes().first().unwrap().content() else {
+    let oxidged::model::NoteContent::Text(note) = &person.notes().first().unwrap().content() else {
         panic!("not a note text")
     };
     assert_eq!(note.to_str(&indi), "@a@@b");
@@ -354,8 +354,8 @@ fn an_io_error_mid_stream_ends_it() {
 /// and the parser goes on from there.
 #[test]
 fn visitors_see_records_by_type_and_can_stop() {
-    use ged_io::model::{Family, HeaderRef, Individual, Node, View};
-    use ged_io::stream::{StreamedRecord, Visitor};
+    use oxidged::model::{Family, HeaderRef, Individual, Node, View};
+    use oxidged::stream::{StreamedRecord, Visitor};
     use std::ops::ControlFlow;
 
     #[derive(Default)]

@@ -558,8 +558,8 @@ pub(super) fn jurisdictions(place: &str) -> usize {
 /// Writes datasets for an importer: see the [`profile` documentation](crate::profile).
 ///
 /// ```rust
-/// use ged_io::profile::{Exporter, ExportOptions};
-/// use ged_io::Dataset;
+/// use oxidged::profile::{Exporter, ExportOptions};
+/// use oxidged::Dataset;
 ///
 /// let data = Dataset::parse(
 ///     "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 NAME Ann /Example/\n\

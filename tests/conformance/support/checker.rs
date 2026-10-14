@@ -1,4 +1,4 @@
-//! Output conformance checker, independent of ged_io.
+//! Output conformance checker, independent of oxidged.
 //!
 //! Every byte stream the writer produces in this suite goes through
 //! [`check`]. It reports each deviation from the line grammar and from the

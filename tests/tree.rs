@@ -2,8 +2,8 @@
 //! typing, case by case (ids from the conformance suite and the reviews).
 //! All data is fictitious.
 
-use ged_io::tree::{parse_tree, PayloadRef, Structure, StructureRef, Tree, TreeReader};
-use ged_io::GedcomVersion;
+use oxidged::tree::{parse_tree, PayloadRef, Structure, StructureRef, Tree, TreeReader};
+use oxidged::GedcomVersion;
 
 fn h7(body: &str) -> String {
     format!("0 HEAD\n1 GEDC\n2 VERS 7.0\n{body}0 TRLR\n")
@@ -378,7 +378,7 @@ fn version_detection_reads_the_header_only() {
         "0 HEAD\n1 NOTE {}\n1 GEDC\n2 VERS 7.0\n0 TRLR\n",
         "é".repeat(600)
     );
-    assert_eq!(ged_io::version::detect_version(&late), GedcomVersion::V7_0);
+    assert_eq!(oxidged::version::detect_version(&late), GedcomVersion::V7_0);
     // An SNOTE record or a SCHMA elsewhere does not make a 5.5.1 file 7.0.
     let tree = read(&h5("0 @N1@ SNOTE x\n"));
     assert_eq!(tree.version(), GedcomVersion::V5_5_1);

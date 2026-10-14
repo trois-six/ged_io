@@ -75,8 +75,8 @@ fn old_read(bytes: &[u8]) -> ged_io_published::types::GedcomData {
         .expect("0.17 reads the file")
 }
 
-fn new_read(bytes: &[u8]) -> ged_io::Dataset {
-    ged_io::GedcomBuilder::new()
+fn new_read(bytes: &[u8]) -> oxidged::Dataset {
+    oxidged::GedcomBuilder::new()
         .build_from_bytes(bytes)
         .expect("reading never fails")
 }
@@ -102,7 +102,7 @@ fn main() {
                 .write_to_string(&old_read(&bytes))
                 .expect("0.17 writes")
         } else {
-            ged_io::GedcomWriter::new()
+            oxidged::GedcomWriter::new()
                 .write_to_string(&new_read(&bytes))
                 .expect("writes")
         };
@@ -142,7 +142,7 @@ fn main() {
             let data = new_read(&bytes);
             for _ in 0..iterations {
                 let t = Instant::now();
-                let out = ged_io::GedcomWriter::new()
+                let out = oxidged::GedcomWriter::new()
                     .write_to_string(black_box(&data))
                     .expect("writes");
                 out_len = out.len();
@@ -153,9 +153,9 @@ fn main() {
         (_, "convert") => {
             let new = new_read(&bytes);
             let to = if new.version().is_v7() {
-                ged_io::GedcomVersion::V5_5_1
+                oxidged::GedcomVersion::V5_5_1
             } else {
-                ged_io::GedcomVersion::V7_0
+                oxidged::GedcomVersion::V7_0
             };
             let old = (krate == "old").then(|| old_read(&bytes));
             for _ in 0..iterations {
@@ -165,7 +165,7 @@ fn main() {
                         .gedcom_version(&to.to_string())
                         .write_to_string(black_box(data))
                         .expect("0.17 writes"),
-                    None => ged_io::GedcomWriter::new()
+                    None => oxidged::GedcomWriter::new()
                         .gedcom_version(to)
                         .write_to_string(black_box(&new))
                         .expect("writes"),

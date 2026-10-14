@@ -1582,8 +1582,8 @@ impl Dataset {
     /// [`EditError::ForeignXref`] when an id is not of this dataset.
     ///
     /// ```rust
-    /// use ged_io::model::{ChildLink, Dataset, Family, Individual, IndividualRef};
-    /// use ged_io::GedcomVersion;
+    /// use oxidged::model::{ChildLink, Dataset, Family, Individual, IndividualRef};
+    /// use oxidged::GedcomVersion;
     ///
     /// let mut data = Dataset::new(GedcomVersion::V7_0);
     /// let ann = data.add(Individual::default()).unwrap();
@@ -1715,7 +1715,7 @@ impl Dataset {
     /// [`EditError::StillReferenced`] under [`Removal::Refuse`].
     ///
     /// ```rust
-    /// use ged_io::model::{Dataset, Individual, Removal};
+    /// use oxidged::model::{Dataset, Individual, Removal};
     ///
     /// let mut data = Dataset::parse(
     ///     "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n0 @F1@ FAM\n1 CHIL @I1@\n0 TRLR\n",
@@ -1803,13 +1803,13 @@ impl Dataset {
     /// the dataset has no `xref`.
     ///
     /// ```rust
-    /// use ged_io::model::Dataset;
+    /// use oxidged::model::Dataset;
     ///
     /// let mut data = Dataset::parse(
     ///     "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n0 @F1@ FAM\n1 CHIL @I1@\n0 TRLR\n",
     /// );
     /// data.rename("@I1@", "@ANN@").unwrap();
-    /// let out = ged_io::GedcomWriter::new().write_to_string(&data).unwrap();
+    /// let out = oxidged::GedcomWriter::new().write_to_string(&data).unwrap();
     /// assert!(out.contains("0 @ANN@ INDI\n") && out.contains("1 CHIL @ANN@\n"));
     /// ```
     pub fn rename(&mut self, xref: impl XrefKey, new: &str) -> Result<XrefId, EditError> {
@@ -2043,14 +2043,14 @@ impl Dataset {
     /// record has no identifier.
     ///
     /// ```rust
-    /// use ged_io::model::{Dataset, Family, Individual};
-    /// use ged_io::GedcomVersion;
+    /// use oxidged::model::{Dataset, Family, Individual};
+    /// use oxidged::GedcomVersion;
     ///
     /// let mut data = Dataset::new(GedcomVersion::V7_0);
     /// let family = data.add(Family::default()).unwrap();
     /// let ann = data.add(Individual::default()).unwrap();
     /// data.link_child(family, ann).unwrap();
-    /// let out = ged_io::GedcomWriter::new().write_to_string(&data).unwrap();
+    /// let out = oxidged::GedcomWriter::new().write_to_string(&data).unwrap();
     /// assert!(out.contains("0 @F1@ FAM\n1 CHIL @I1@\n"));
     /// assert!(out.contains("0 @I1@ INDI\n1 FAMC @F1@\n"));
     /// ```

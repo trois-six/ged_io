@@ -121,9 +121,9 @@
 //! invented.
 //!
 //! ```rust
-//! use ged_io::spec::{conform, validate, validate_text, DeviationKind, RepairKind};
-//! use ged_io::tree::parse_tree;
-//! use ged_io::GedcomVersion;
+//! use oxidged::spec::{conform, validate, validate_text, DeviationKind, RepairKind};
+//! use oxidged::tree::parse_tree;
+//! use oxidged::GedcomVersion;
 //!
 //! let text = "0 HEAD\n1 GEDC\n2 VERS 7.0\n0 @I1@ INDI\n1 SEX male\n0 TRLR\n";
 //! let issues = validate(&parse_tree(text), GedcomVersion::V7_0);

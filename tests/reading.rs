@@ -5,13 +5,13 @@
 
 use std::io::BufReader;
 
-use ged_io::encoding::{decode, encode, DecodeReader, GedcomEncoding};
-use ged_io::model::{
+use oxidged::encoding::{decode, encode, DecodeReader, GedcomEncoding};
+use oxidged::model::{
     Address, CharacterSet, Dataset, EventKind, Individual, Multimedia, Note, NoteContent,
     RecordRef, Repository, Sex, SharedNote, Source, Text,
 };
-use ged_io::tree::Structure;
-use ged_io::{GedcomBuilder, GedcomError, GedcomStreamParser, GedcomVersion, GedcomWriter};
+use oxidged::tree::Structure;
+use oxidged::{GedcomBuilder, GedcomError, GedcomStreamParser, GedcomVersion, GedcomWriter};
 
 // ----------------------------------------------------------------------------
 // Helpers
@@ -641,7 +641,7 @@ fn spaces_after_the_conc_and_cont_delimiter_are_kept() {
 }
 
 /// The text of an inline note, from any store.
-fn note_text_in(store: &impl AsRef<ged_io::model::Store>, note: &Note) -> String {
+fn note_text_in(store: &impl AsRef<oxidged::model::Store>, note: &Note) -> String {
     match &note.content {
         NoteContent::Text(text) => text.to_str(store).into_owned(),
         NoteContent::Shared(_) => panic!("shared note"),
@@ -838,8 +838,8 @@ fn carriage_returns_in_values_are_written_as_line_breaks() {
     });
 
     for (line_ending, eol) in [
-        (ged_io::LineEnding::Lf, "\n"),
-        (ged_io::LineEnding::CrLf, "\r\n"),
+        (oxidged::LineEnding::Lf, "\n"),
+        (oxidged::LineEnding::CrLf, "\r\n"),
     ] {
         let written = GedcomWriter::new()
             .line_ending(line_ending)

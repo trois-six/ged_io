@@ -4,8 +4,8 @@
 
 use std::path::{Path, PathBuf};
 
-use ged_io::model::{Dataset, RecordRef};
-use ged_io::GedcomStreamParser;
+use oxidged::model::{Dataset, RecordRef};
+use oxidged::GedcomStreamParser;
 
 /// Every `.ged` file under `dir`.
 fn ged_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -75,7 +75,7 @@ fn every_fixture_round_trips_through_json() {
             "{}",
             path.display()
         );
-        let writer = ged_io::GedcomWriter::new();
+        let writer = oxidged::GedcomWriter::new();
         assert_eq!(
             writer.write_to_string(&back).unwrap(),
             writer.write_to_string(&data).unwrap(),
@@ -175,5 +175,5 @@ fn malformed_json_is_an_error() {
     }
     // Fields it does not know are skipped.
     let data: Dataset = serde_json::from_str(r#"{"version":"7.0","comment":"x"}"#).unwrap();
-    assert_eq!(data.version(), ged_io::GedcomVersion::V7_0);
+    assert_eq!(data.version(), oxidged::GedcomVersion::V7_0);
 }

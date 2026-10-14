@@ -270,7 +270,7 @@ impl<R: BufRead> RecordSource<R> {
 /// `Tree::from_bytes` on the same input, line numbers included.
 ///
 /// ```rust
-/// use ged_io::tree::TreeReader;
+/// use oxidged::tree::TreeReader;
 ///
 /// let bytes: &[u8] = b"0 HEAD\r\n1 GEDC\r\n2 VERS 5.5.1\r\n0 @N1@ NOTE a@@b\r\n1 CONC c\r\n0 TRLR\r\n";
 /// let records = TreeReader::new(bytes)?.collect::<Result<Vec<_>, _>>()?;

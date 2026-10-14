@@ -9,10 +9,10 @@
 //! detected), exporting it again gives the same text.
 #![no_main]
 
-use ged_io::profile::{export_profiles, import_profiles, Exporter, Interpretation};
-use ged_io::spec::{validate_text, DeviationKind};
-use ged_io::{Bom, Dataset, GedcomBuilder, GedcomVersion, GedcomWriter};
 use libfuzzer_sys::fuzz_target;
+use oxidged::profile::{export_profiles, import_profiles, Exporter, Interpretation};
+use oxidged::spec::{validate_text, DeviationKind};
+use oxidged::{Bom, Dataset, GedcomBuilder, GedcomVersion, GedcomWriter};
 
 /// The deviations of `out` but the 5.5.1 records over 32K no note can
 /// bring under the limit.

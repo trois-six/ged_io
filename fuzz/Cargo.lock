@@ -160,25 +160,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ged_io"
-version = "0.17.0"
-dependencies = [
- "calendrical_calculations",
- "calendrier",
- "serde",
- "zip",
-]
-
-[[package]]
-name = "ged_io-fuzz"
-version = "0.0.0"
-dependencies = [
- "ged_io",
- "libfuzzer-sys",
- "serde_json",
-]
-
-[[package]]
 name = "getrandom"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -304,6 +285,25 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+
+[[package]]
+name = "oxidged"
+version = "0.1.0"
+dependencies = [
+ "calendrical_calculations",
+ "calendrier",
+ "serde",
+ "zip",
+]
+
+[[package]]
+name = "oxidged-fuzz"
+version = "0.0.0"
+dependencies = [
+ "libfuzzer-sys",
+ "oxidged",
+ "serde_json",
+]
 
 [[package]]
 name = "pin-project-lite"
