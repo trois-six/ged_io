@@ -247,7 +247,10 @@ conformant GEDCOM, its version, character set, line layout and limits
 chosen for the importer, its data folded into the standard structures the
 importer reads, redundant `_` extensions where the importer needs them
 (`_FREL`/`_MREL`, `_PRIM`, `_PHOTO`, `_SHAR`), data left out only on
-request (`ExportOptions`: media, private records, change dates). Every fold
+request (`ExportOptions`: media, private records, change dates), and the
+program that wrote the data named in `HEAD.SOUR` (`HeadSource`: the
+dataset's when the program set it, with the crate beside it in
+`HEAD.SOUR._OXIDGED`; the crate's for a dataset read from a file). Every fold
 that loses something, and every importer limit the output exceeds, is in
 the `ExportReport`.
 

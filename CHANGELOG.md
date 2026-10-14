@@ -144,6 +144,16 @@ keeps all data; writing is conformant to GEDCOM 5.5.1, 7.0 or 7.1.
 - `Credentials` (`WriterConfig::credentials`, `GedcomWriter::credentials`,
   `ExportOptions::credentials`): whether the credentials a file holds are
   written; see Changed.
+- `HeadSource` (`ExportOptions::source`): the system an export names in
+  `HEAD.SOUR`. By default (`Auto`) the program's, when it set the
+  dataset's `HEAD.SOUR` (the dataset was not read from a file, or the
+  program changed it), its `VERS`, `NAME` and `CORP` kept, with the crate
+  named beside it in `HEAD.SOUR._OXIDGED` (declared in a 7.x
+  `HEAD.SCHMA`); the crate's for a dataset read from a file, which the
+  producer of that file did not export (reported as a fold, as before).
+  `Library` and `Dataset` choose either always. The `oxidged` import
+  profile finds such exports by `_OXIDGED` too, and reading one back keeps
+  the program's `HEAD.SOUR` as the program's.
 - Encodings: Windows-1250, Windows-1251 and ISO-8859-2; the `CHAR` labels
   `IBM`, `OEM` (code page 437) and `ISO8859` (Latin-1).
 - `ged-io --sanitize`, `--convert-encoding`, `--profile`, `--detect`,
