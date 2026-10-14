@@ -673,9 +673,9 @@ impl Converter {
     fn up(&self, c: &mut Structure, parent: &str, grand: &str, cx: &mut Cx<'_>) {
         let tag = c.tag.as_str();
         // Renamed structures (the gedcom7code converter's list).
+        let anywhere = RENAMED_UP.iter().find(|(from, _)| *from == tag);
         let renamed = match tag {
-            "_UID" => Some("UID"),
-            "EMAI" | "_EMAIL" => Some("EMAIL"),
+            _ if anywhere.is_some() => anywhere.map(|&(_, to)| to),
             // An association kept as an extension because it has no
             // pointer stays one.
             "_ASSO" if matches!(c.payload, Payload::Pointer(_)) => Some("ASSO"),
@@ -1235,6 +1235,13 @@ const Y_EVENTS: &[&str] = &[
 ];
 
 /// Whether `text` holds `@#`, the start of a 5.5.1 escape.
+/// The 5.5.1 tags 7.x says with another tag whatever their place, payload
+/// and substructures (the gedcom7code converter's list): converting up
+/// renames them, and nothing else of them but their texts' escapes
+/// (`@#…@`).
+pub(crate) const RENAMED_UP: &[(&str, &str)] =
+    &[("_UID", "UID"), ("EMAI", "EMAIL"), ("_EMAIL", "EMAIL")];
+
 fn has_escape(text: &str) -> bool {
     let mut rest = text;
     while let Some(at) = rest.find('@') {

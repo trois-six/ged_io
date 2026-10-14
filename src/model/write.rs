@@ -11,6 +11,7 @@ use crate::writer::GedcomWriter;
 
 use super::dataset::{Dataset, RecordRef};
 use super::driver::WriteCx;
+use crate::convert::Adoptions;
 
 /// A record of a dataset that writes its structures for the target version
 /// when the writer needs them.
@@ -19,6 +20,9 @@ pub(crate) struct Built<'d> {
     record: Option<RecordRef<'d>>,
     /// The version to write.
     version: GedcomVersion,
+    /// The extension structures written as standard ones
+    /// ([`WriteCx::adopt`]).
+    adopt: Option<&'d Adoptions>,
 }
 
 impl<'d> Built<'d> {
@@ -27,12 +31,15 @@ impl<'d> Built<'d> {
         Self {
             record: Some(record),
             version,
+            adopt: None,
         }
     }
 
     /// How `record`, this one, writes.
     fn cx(&self, record: RecordRef<'d>) -> WriteCx<'d> {
-        WriteCx::of(record.dataset(), self.version, true)
+        let mut cx = WriteCx::of(record.dataset(), self.version, true);
+        cx.adopt = self.adopt;
+        cx
     }
 }
 
@@ -107,13 +114,31 @@ impl<'d> Build<'d> for Built<'d> {
 
 impl Dataset {
     /// The records, to write with `writer` (in its version, unless one is
-    /// configured), then the trailer.
+    /// configured), then the trailer: what the writer's whole pass, which
+    /// the direct write must equal, is tested with.
+    #[cfg(test)]
     pub(crate) fn built(&self, writer: &GedcomWriter) -> Vec<Built<'_>> {
+        self.built_adopting(writer, None)
+    }
+
+    /// [`Dataset::built`], the extension structures `adopt` names written
+    /// as the standard structures they stand for ([`WriteCx::adopt`]).
+    pub(crate) fn built_adopting<'d>(
+        &'d self,
+        writer: &GedcomWriter,
+        adopt: Option<&'d Adoptions>,
+    ) -> Vec<Built<'d>> {
         let version = writer.config().version.unwrap_or(self.version);
         // The records in the order of [`Dataset::records`], one table after
         // the other.
         let mut built = Vec::with_capacity(self.record_count() + 1);
-        let mut add = |record| built.push(Built::new(record, version));
+        let mut add = |record| {
+            built.push(Built {
+                record: Some(record),
+                version,
+                adopt,
+            });
+        };
         if let Some(h) = self.header_ref() {
             add(RecordRef::Header(h));
         }
@@ -148,6 +173,7 @@ impl Dataset {
         built.push(Built {
             record: None,
             version,
+            adopt: None,
         });
         built
     }
@@ -256,6 +282,47 @@ mod tests {
         let restarts = restarts() - before;
         eprintln!("{restarts} of {writes} direct writes restarted: {restarted:#?}");
         assert!(restarts * 4 < writes, "{restarts} of {writes}");
+    }
+
+    /// A 5.5.1 extension that converting to 7.x renames to a structure of
+    /// texts (`_UID`, `_EMAIL`) is written as that structure where its
+    /// record writes itself, its record not converted on its own: what the
+    /// whole pass writes, converting every record. What no field takes, has
+    /// substructures or escapes, is converted with its record.
+    #[test]
+    fn renamed_extensions_are_written_where_they_stand() {
+        let alone = || crate::writer::ALONE.with(std::cell::Cell::get);
+        let writer = GedcomWriter::new().gedcom_version(GedcomVersion::V7_0);
+        let adopted = Dataset::parse(
+            "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 NAME Ann /Example/\n1 _UID 0A1B\n\
+             1 BIRT\n2 DATE 1 JAN 1900\n2 _UID 0C1D\n1 _UID 0a1b\n0 @R1@ REPO\n\
+             1 NAME Sample archive\n1 _EMAIL desk(at)example.invalid\n1 PHON 555\n0 TRLR\n",
+        );
+        let before = alone();
+        let direct = writer.write_to_string_with_report(&adopted).unwrap();
+        assert_eq!(alone(), before, "converted on its own");
+        assert_eq!(direct, writer.write_to_string_whole(&adopted).unwrap());
+        assert!(
+            direct
+                .0
+                .contains("1 BIRT\n2 DATE 1 JAN 1900\n2 UID 0C1D\n1 UID 0A1B\n1 UID 0a1b\n0 @R1@"),
+            "{}",
+            direct.0
+        );
+        assert!(direct
+            .0
+            .contains("1 PHON 555\n1 EMAIL desk(at)example.invalid\n"));
+        for record in [
+            "0 @I1@ INDI\n1 _UID 0A1B\n2 _X x\n",
+            "0 @I1@ INDI\n1 NAME Ann\n2 _UID 0A1B\n",
+            "0 @I1@ INDI\n1 _UID @#DJULIAN@ 0A1B\n",
+        ] {
+            let data = Dataset::parse(format!("0 HEAD\n1 GEDC\n2 VERS 5.5.1\n{record}0 TRLR\n"));
+            let before = alone();
+            let direct = writer.write_to_string_with_report(&data).unwrap();
+            assert_eq!(alone(), before + 1, "{record}");
+            assert_eq!(direct, writer.write_to_string_whole(&data).unwrap());
+        }
     }
 
     /// A dataset whose identifiers are valid and unique is written without
