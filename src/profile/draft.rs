@@ -12,10 +12,10 @@ use std::borrow::Cow;
 use std::fmt;
 
 use crate::model::driver::NodeRef;
-use crate::tree::TextPiece;
 use crate::tree::{
     standard_index, Escaping, Node, Payload, PayloadRef, Structure, StructureRef, Tag, Xref,
 };
+use crate::tree::{Flat, FlatPayload, TextPiece};
 use crate::GedcomVersion;
 
 /// The tag of a [`Draft`].
@@ -284,6 +284,42 @@ impl<'s> Draft<'s> {
             line: node.line(),
             joined: node.joined_pieces(),
         }
+    }
+
+    /// The record written into `flat` (its only one), its texts moved out
+    /// of the arena, which is left empty.
+    pub(crate) fn of_flat(flat: &mut Flat<'s>) -> Option<Self> {
+        let mut open: Vec<Draft<'s>> = Vec::new();
+        let close = |open: &mut Vec<Draft<'s>>| {
+            if let Some(done) = open.pop() {
+                if let Some(parent) = open.last_mut() {
+                    parent.substructures.push(done);
+                } else {
+                    open.push(done);
+                }
+            }
+        };
+        flat.drain_into(|depth, tag, xref, payload, children| {
+            while open.len() > (depth as usize).max(1) {
+                close(&mut open);
+            }
+            open.push(Draft {
+                tag: DraftTag(tag),
+                xref,
+                payload: match payload {
+                    FlatPayload::None => Value::None,
+                    FlatPayload::Pointer(p, _) => Value::Pointer(p),
+                    FlatPayload::Text(t, _) => Value::Text(t),
+                },
+                substructures: Vec::with_capacity(children),
+                line: 0,
+                joined: None,
+            });
+        });
+        while open.len() > 1 {
+            close(&mut open);
+        }
+        open.pop()
     }
 
     /// The structure of a parsed tree, borrowing its texts.

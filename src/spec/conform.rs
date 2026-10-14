@@ -184,7 +184,21 @@ pub(crate) struct Conformed<'n> {
     /// The records that write themselves kept once written
     /// ([`Rec::get`]).
     pub(crate) arena: Flat<'n>,
+    /// The generation of what the records depend on as the pass ended
+    /// ([`Rec::checked`]).
+    pub(crate) state: u32,
 }
+
+/// What a pass found of a record it found clean ([`Rec::checked`]).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Checked {
+    rtype: StructId,
+    size: u32,
+}
+
+/// [`Rec::clean`] of a record known clean ([`Rec::known_clean`]) until
+/// the first pass begins.
+const KNOWN_CLEAN: u32 = u32::MAX;
 
 impl Conformed<'_> {
     /// Whether a record has this identifier. Every record identifier is
@@ -238,6 +252,7 @@ pub(crate) fn conform_records<'n, N: Node<'n>>(
         xrefs: c.xrefs,
         pointed: c.pointed,
         arena: c.arena,
+        state: c.state,
     }
 }
 
@@ -537,6 +552,36 @@ impl<'n, N: Node<'n>> Rec<'n, N> {
         match &mut self.body {
             Body::Owned(s) => std::mem::take(s),
             Body::Given(_) | Body::Built(_) => self.to_structure(arena),
+        }
+    }
+
+    /// What the pass found of a record it left as given and found clean
+    /// as it ended (`state`: [`Conformed::state`]).
+    pub(crate) fn checked(&self, state: u32) -> Option<Checked> {
+        (matches!(self.body, Body::Given(_)) && self.clean == state).then_some(Checked {
+            rtype: self.rtype,
+            size: self.size,
+        })
+    }
+
+    /// The record, known clean: a pass over the same records found it so
+    /// (`checked`), and nothing it depends on changed since but what the
+    /// pass looks at again (its identifiers and the types they name, the
+    /// header). The pass looks at it again only once those change.
+    pub(crate) fn known_clean(mut self, checked: Checked) -> Self {
+        self.clean = KNOWN_CLEAN;
+        self.rtype = checked.rtype;
+        self.size = checked.size;
+        self
+    }
+
+    /// The node of a record given that the pass left as it was; the record
+    /// as an owned structure when the pass rewrote it.
+    pub(crate) fn into_given(self) -> Result<N, Structure> {
+        match self.body {
+            Body::Given(n) => Ok(n),
+            Body::Owned(s) => Err(*s),
+            Body::Built(_) => Err(self.to_structure(&Flat::default())),
         }
     }
 
@@ -980,6 +1025,13 @@ impl<'n> Conformer<'n> {
                 || self.renamed.len() != renamed
             {
                 self.state += 1;
+            }
+        }
+        if pass == 0 {
+            // The records known clean are clean under what they depend on
+            // as the pass begins.
+            for r in records.iter_mut().filter(|r| r.clean == KNOWN_CLEAN) {
+                r.clean = self.state;
             }
         }
         self.submitter = self.submitter.take().or_else(|| {

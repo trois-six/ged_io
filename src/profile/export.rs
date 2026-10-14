@@ -16,18 +16,28 @@
 //! text) is listed in the [`ExportReport`] with the record it was in and
 //! the row of the research it follows; so are the importer's limits the
 //! output exceeds. Nothing is printed.
+//!
+//! The folds rewrite drafts of the records, which borrow the dataset's
+//! texts. They run in the profile's order, as if each ran on every record
+//! before the next; but folds that read nothing of other records that the
+//! folds beside them change run record after record, each record going
+//! through all of them at once. Conformance looks again only at what the
+//! folds changed since it last looked.
 
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
+use std::ops::Range;
 
 use crate::convert::{convert_structures, ConversionOptions};
-use crate::model::Dataset;
+use crate::model::driver::WriteCx;
+use crate::model::{Dataset, RecordRef};
 use std::borrow::Cow;
 
-use crate::tree::{Structure, Xref};
+use crate::spec::conform::{conform_records, Checked, Rec};
+use crate::tree::{Flat, Structure, Xref};
 use crate::writer::{
-    Bom, Credentials, GedcomWriter, LineEnding, OutputEncoding, Repair, WriteError,
+    Bom, Credentials, GedcomWriter, LineEnding, OutputEncoding, Repair, WriteError, XrefIndex,
 };
 use crate::GedcomVersion;
 
@@ -620,10 +630,17 @@ impl Exporter {
     /// records when `limits`.
     fn folded(&self, data: &Dataset, limits: bool) -> (String, ExportReport) {
         let to = self.version();
-        let mut structures = data.to_structures();
-        let options = ConversionOptions::default();
-        convert_structures(&mut structures, data.version(), to, &options);
-        let mut records: Vec<Draft<'_>> = structures.iter().map(Draft::of_structure).collect();
+        let structures;
+        let mut records: Vec<Draft<'_>> = if data.version() == to {
+            structures = Vec::new();
+            drafts(data)
+        } else {
+            let mut owned = data.to_structures();
+            let options = ConversionOptions::default();
+            convert_structures(&mut owned, data.version(), to, &options);
+            structures = owned;
+            structures.iter().map(Draft::of_structure).collect()
+        };
         if to.is_v7() && !data.version().is_v7() {
             if let Some(producer) = data.producer() {
                 let rules = super::RuleSet::of(producer, data.interpretation());
@@ -660,30 +677,47 @@ impl Exporter {
             Op::EscapedNotes | Op::PlainNotes => 2,
             _ => 0,
         };
-        for step in self.profile.steps.iter().filter(|s| round(s) == 0) {
-            run(step, &mut records, &mut cx);
-        }
+        let first: Vec<&Step> = self
+            .profile
+            .steps
+            .iter()
+            .filter(|s| round(s) == 0)
+            .collect();
+        run_steps(&first, &mut records, &mut cx, None);
         let later: Vec<&Step> = self
             .profile
             .steps
             .iter()
             .filter(|s| round(s) == 1)
             .collect();
+        // What conformance found clean of each record.
+        let mut checked = Vec::new();
         if !later.is_empty() {
-            let repairs = conform_drafts(&mut records, to);
+            let (repairs, found) = conform_drafts(&mut records, to, None);
             cx.report.repairs.extend(repairs);
-            for step in later {
-                run(step, &mut records, &mut cx);
-            }
+            checked = found;
         }
-        for step in self.profile.steps.iter().filter(|s| round(s) == 2) {
-            run(step, &mut records, &mut cx);
+        // The extension folds, then the notes: no conformance between them.
+        let last: Vec<&Step> = later
+            .into_iter()
+            .chain(self.profile.steps.iter().filter(|s| round(s) == 2))
+            .collect();
+        // The records they change.
+        let mut touched = vec![false; records.len()];
+        #[cfg(debug_assertions)]
+        let before = records.clone();
+        run_steps(&last, &mut records, &mut cx, Some(&mut touched));
+        media_paths(&mut records, &mut cx, &mut touched);
+        #[cfg(debug_assertions)]
+        for ((b, r), t) in before.iter().zip(&records).zip(&touched) {
+            debug_assert!(*t || b == r, "a record changed untold: {r:?}");
         }
-        media_paths(&mut records, &mut cx);
         if let Some(style) = cx.place_style {
             // As the writer repairs them: the places of what conformance
-            // makes extensions are not the format's.
-            let repairs = conform_drafts(&mut records, to);
+            // makes extensions are not the format's. What it found clean
+            // and the steps since left as it was is clean still.
+            let known = (!checked.is_empty()).then_some((checked.as_slice(), touched.as_slice()));
+            let (repairs, _) = conform_drafts(&mut records, to, known);
             cx.report.repairs.extend(repairs);
             place_form(&mut records, style);
         }
@@ -691,9 +725,20 @@ impl Exporter {
             name_the_crate(&mut records, cx.v7);
         }
         let mut report = cx.report;
-        if limits {
-            self.limits(&records, &mut report);
-        }
+        let room = data.store.input().len();
+        let text = self.text(records, limits.then_some(&mut report), room);
+        drop(structures);
+        (text, report)
+    }
+
+    /// The records as text, each let go once written; with `report`, the
+    /// importer's limits on them reported. `room`: about as long.
+    fn text(
+        &self,
+        records: Vec<Draft<'_>>,
+        report: Option<&mut ExportReport>,
+        room: usize,
+    ) -> String {
         // `@` escaped as the header says: the version the text is read in
         // (the writer converts to the target's).
         let version = records
@@ -702,11 +747,18 @@ impl Exporter {
             .and_then(|h| child(h, "GEDC"))
             .and_then(|g| child_text(g, "VERS"))
             .map_or(GedcomVersion::V5_5_1, GedcomVersion::from_version_str);
-        let mut text = String::new();
-        for r in &records {
+        let mut seen = report.is_some().then(|| self.limits());
+        let mut text = String::with_capacity(room.saturating_add(room / 4));
+        for r in records {
+            if let Some(seen) = &mut seen {
+                seen.record(&r);
+            }
             r.write_gedcom(&mut text, 0, version);
         }
-        (text, report)
+        if let (Some(seen), Some(report)) = (seen, report) {
+            seen.done(report);
+        }
+        text
     }
 
     /// The dataset to write for `data`, and the report so far (what was
@@ -776,11 +828,75 @@ impl Exporter {
         }
     }
 
-    /// The importer's limits on the records.
-    fn limits(&self, records: &[Draft<'_>], report: &mut ExportReport) {
-        let t = &self.profile.target;
+    /// The importer's limits on the records, found record after record.
+    fn limits(&self) -> Limits<'_> {
+        Limits {
+            target: &self.profile.target,
+            individuals: 0,
+            deep: Vec::new(),
+            names: Vec::new(),
+            children: Vec::new(),
+        }
+    }
+}
+
+/// The importer's limits on the records ([`Exporter::limits`]), as the
+/// records go by.
+struct Limits<'a> {
+    target: &'a Target,
+    individuals: usize,
+    deep: Vec<Limit>,
+    names: Vec<Limit>,
+    children: Vec<Limit>,
+}
+
+impl Limits<'_> {
+    fn record(&mut self, r: &Draft<'_>) {
+        let t = self.target;
+        let record = || r.xref.as_deref().map(Xref::new);
+        if is(r, "INDI") {
+            self.individuals += 1;
+        }
+        if let Some(max) = t.max_depth {
+            let depth = depth(r);
+            if depth > max {
+                self.deep.push(Limit {
+                    rows: t.rows,
+                    record: record(),
+                    detail: format!("structures {depth} levels deep, over the importer's {max}"),
+                });
+            }
+        }
+        if let (Some(max), true) = (t.max_name, is(r, "INDI")) {
+            for n in r.substructures.iter().filter(|n| is(n, "NAME")) {
+                let len = payload_str(n).chars().count();
+                if len > max {
+                    self.names.push(Limit {
+                        rows: t.rows,
+                        record: record(),
+                        detail: format!("a name of {len} characters, over the importer's {max}"),
+                    });
+                }
+            }
+        }
+        if let (Some(max), true) = (t.max_children, is(r, "FAM")) {
+            let n = r.substructures.iter().filter(|c| is(c, "CHIL")).count();
+            if n > max {
+                self.children.push(Limit {
+                    rows: t.rows,
+                    record: record(),
+                    detail: format!("{n} children, over the importer's {max}"),
+                });
+            }
+        }
+    }
+
+    /// The limits, in the order of the importer's: the individuals, then
+    /// the depth, the names and the children of each record.
+    fn done(self, report: &mut ExportReport) {
+        let t = self.target;
         if let Some(max) = t.max_individuals {
-            let n = records.iter().filter(|r| is(r, "INDI")).count();
+            let n = self.individuals;
             if n > max {
                 report.limits.push(Limit {
                     rows: t.rows,
@@ -789,49 +905,30 @@ impl Exporter {
                 });
             }
         }
-        if let Some(max) = t.max_depth {
-            for r in records {
-                let depth = depth(r);
-                if depth > max {
-                    report.limits.push(Limit {
-                        rows: t.rows,
-                        record: r.xref.as_deref().map(Xref::new),
-                        detail: format!(
-                            "structures {depth} levels deep, over the importer's {max}"
-                        ),
-                    });
-                }
-            }
-        }
-        if let Some(max) = t.max_name {
-            for r in records.iter().filter(|r| is(r, "INDI")) {
-                for n in r.substructures.iter().filter(|n| is(n, "NAME")) {
-                    let len = payload_str(n).chars().count();
-                    if len > max {
-                        report.limits.push(Limit {
-                            rows: t.rows,
-                            record: r.xref.as_deref().map(Xref::new),
-                            detail: format!(
-                                "a name of {len} characters, over the importer's {max}"
-                            ),
-                        });
-                    }
-                }
-            }
-        }
-        if let Some(max) = t.max_children {
-            for r in records.iter().filter(|r| is(r, "FAM")) {
-                let n = r.substructures.iter().filter(|c| is(c, "CHIL")).count();
-                if n > max {
-                    report.limits.push(Limit {
-                        rows: t.rows,
-                        record: r.xref.as_deref().map(Xref::new),
-                        detail: format!("{n} children, over the importer's {max}"),
-                    });
-                }
-            }
-        }
+        report.limits.extend(self.deep);
+        report.limits.extend(self.names);
+        report.limits.extend(self.children);
     }
+}
+
+/// The records of `data` and the trailer, as [`Dataset::to_structures`]
+/// gives them, their texts borrowed from the dataset.
+fn drafts(data: &Dataset) -> Vec<Draft<'_>> {
+    let cx = WriteCx::of(data, data.version(), false);
+    let mut flat = Flat::default();
+    let mut out = Vec::with_capacity(data.record_count() + 1);
+    for r in data.records() {
+        let draft = if matches!(r, RecordRef::Header(_)) {
+            // The header writes itself owned.
+            Some(Draft::from_owned(r.to_structure(&cx)))
+        } else {
+            r.to_flat(&cx, &mut flat);
+            Draft::of_flat(&mut flat)
+        };
+        out.extend(draft);
+    }
+    out.push(Draft::new("TRLR"));
+    out
 }
 
 /// Counts the bytes written.
@@ -938,65 +1035,87 @@ const UNION_EVENTS: &[&str] = &[
     "MARR", "ENGA", "MARB", "MARC", "MARL", "MARS", "DIV", "DIVF", "ANUL",
 ];
 
-/// The records, indexed by identifier.
-/// What the folds read of other records, and where each is: the records,
-/// a person or a family only with what the folds read of them (names
-/// without their parts, sex, family links), which keeps the copy small.
-fn lookup<'s>(records: &[Draft<'s>]) -> (Vec<Draft<'s>>, HashMap<String, usize>) {
-    let shallow = |s: &Draft<'s>| Draft {
-        tag: s.tag.clone(),
-        xref: s.xref.clone(),
-        payload: s.payload.clone(),
-        substructures: Vec::new(),
-        line: s.line,
-        joined: None,
-    };
-    let slim: Vec<Draft<'s>> = records
-        .iter()
-        .map(|r| {
-            if !(is(r, "INDI") || is(r, "FAM")) {
-                return r.clone();
-            }
-            let mut out = shallow(r);
-            out.substructures = r
-                .substructures
-                .iter()
-                .filter_map(|c| match c.tag.as_str() {
-                    "NAME" => Some(shallow(c)),
-                    "SEX" | "FAMC" | "FAMS" | "HUSB" | "WIFE" | "CHIL" => Some(c.clone()),
-                    _ => None,
-                })
-                .collect();
-            out
+/// Where each record is, by identifier (the last of records that share
+/// one); the identifiers borrowed as the records hold them.
+type Index<'s> = XrefIndex<'s, usize>;
+
+fn index<'s>(records: &[Draft<'s>]) -> Index<'s> {
+    let mut idx = Index::default();
+    idx.reserve(records.len());
+    for (i, r) in records.iter().enumerate() {
+        if let Some(x) = &r.xref {
+            idx.insert(x.clone(), i);
+        }
+    }
+    idx
+}
+
+/// The substructures of a person or a family that the folds read of
+/// other records: names (their values), sex, family links.
+const SLIM: &[&str] = &["NAME", "SEX", "FAMC", "FAMS", "HUSB", "WIFE", "CHIL"];
+
+/// The other records, as a fold that rewrites one reads them: by
+/// identifier, a person or a family showing only [`SLIM`].
+///
+/// A fold reads them before it rewrites a record, then rewrites it, record
+/// after record: what it reads is never what it rewrites, so that each
+/// record reads the others as they were before the fold.
+#[derive(Clone, Copy)]
+struct Lookup<'a, 's> {
+    records: &'a [Draft<'s>],
+    idx: &'a Index<'s>,
+}
+
+/// A record as [`Lookup`] shows it.
+#[derive(Clone, Copy)]
+struct Seen<'a, 's> {
+    record: &'a Draft<'s>,
+    slim: bool,
+}
+
+impl<'a, 's> Lookup<'a, 's> {
+    fn get(self, x: &str) -> Option<Seen<'a, 's>> {
+        let record = self.records.get(*self.idx.get(x)?)?;
+        Some(Seen {
+            record,
+            slim: is(record, "INDI") || is(record, "FAM"),
         })
-        .collect();
-    let idx = index(&slim);
-    (slim, idx)
+    }
+
+    /// A person's name for text: the first name, slashes out.
+    fn person_name(self, x: &str) -> Option<String> {
+        let name = self.get(x)?.child_text("NAME")?;
+        Some(
+            name.replace('/', " ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" "),
+        )
+    }
+
+    fn person_sex(self, x: &str) -> Option<String> {
+        self.get(x)?
+            .child_text("SEX")
+            .map(|s| s.trim().to_ascii_uppercase())
+    }
 }
 
-fn index(records: &[Draft<'_>]) -> HashMap<String, usize> {
-    records
-        .iter()
-        .enumerate()
-        .filter_map(|(i, r)| r.xref.as_ref().map(|x| (x.to_string(), i)))
-        .collect()
-}
+impl<'a, 's> Seen<'a, 's> {
+    fn children(self) -> impl Iterator<Item = &'a Draft<'s>> {
+        let slim = self.slim;
+        self.record
+            .substructures
+            .iter()
+            .filter(move |c| !slim || SLIM.contains(&c.tag.as_str()))
+    }
 
-/// A person's name for text: the first name, slashes out.
-fn person_name(records: &[Draft<'_>], idx: &HashMap<String, usize>, x: &str) -> Option<String> {
-    let r = records.get(*idx.get(x)?)?;
-    let name = child_text(r, "NAME")?;
-    Some(
-        name.replace('/', " ")
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" "),
-    )
-}
+    fn child(self, tag: &str) -> Option<&'a Draft<'s>> {
+        self.children().find(|c| is(c, tag))
+    }
 
-fn person_sex(records: &[Draft<'_>], idx: &HashMap<String, usize>, x: &str) -> Option<String> {
-    let r = records.get(*idx.get(x)?)?;
-    child_text(r, "SEX").map(|s| s.trim().to_ascii_uppercase())
+    fn child_text(self, tag: &str) -> Option<&'a str> {
+        self.child(tag).and_then(Draft::text)
+    }
 }
 
 /// Whether `s` has nothing but a payload.
@@ -1004,8 +1123,349 @@ fn bare(s: &Draft<'_>) -> bool {
     s.substructures.is_empty()
 }
 
+/// What the steps run on the same records share: where each record is,
+/// and what a step reports once it ran on every record.
+#[derive(Default)]
+struct Shared<'s> {
+    idx: Option<Index<'s>>,
+    /// Where the (first) header is, once looked for.
+    head: std::cell::OnceCell<Option<usize>>,
+    places: PlacesSeen,
+}
+
+impl<'s> Shared<'s> {
+    /// Where the header is, when it is in `range`.
+    fn head(&mut self, records: &[Draft<'s>], range: Range<usize>) -> Option<usize> {
+        self.head
+            .get_or_init(|| records.iter().position(|r| is(r, "HEAD")))
+            .filter(|i| range.contains(i))
+    }
+
+    /// Where each record is, found once: the steps that share it neither
+    /// add, remove nor move records.
+    fn index(&mut self, records: &[Draft<'s>]) -> &Index<'s> {
+        self.idx.get_or_insert_with(|| index(records))
+    }
+}
+
+/// How a step goes through the records.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reach {
+    /// It rewrites a record reading that record only.
+    Own,
+    /// It rewrites a record reading others ([`Op::reads`]), or reports
+    /// what it did once it ran on every record ([`finish`]): it runs on a
+    /// range of the records, the others in sight.
+    Range,
+    /// It rewrites other records than the one it reads, adds, removes or
+    /// moves records, or numbers new ones: it runs on every record, alone.
+    Dataset,
+}
+
+/// What a step reads of the records other than the one it rewrites.
+enum Reads {
+    Nothing,
+    /// The structures with these tags (and the payloads and order of
+    /// their substructures with these tags…), from a record down.
+    Tags(&'static [&'static str]),
+    Anything,
+}
+
+impl Op {
+    fn reach(&self) -> Reach {
+        match self {
+            Op::AsEven(_)
+            | Op::Godparents
+            | Op::ChildLinkSources
+            | Op::InlineSources
+            | Op::InlineMedia
+            | Op::AssociationsAsEvents(_)
+            | Op::GodparentText
+            | Op::ParentRelations
+            | Op::Preferred(..)
+            | Op::Places(_)
+            | Op::OneHeadNote
+            | Op::FlatHead => Reach::Range,
+            Op::EventAssociations(style) => {
+                if *style == AssocStyle::Reversed {
+                    Reach::Dataset
+                } else {
+                    Reach::Range
+                }
+            }
+            Op::SourceRecords | Op::HomeFirst | Op::ShortXrefs(_) | Op::CitationRefnToSource => {
+                Reach::Dataset
+            }
+            _ => Reach::Own,
+        }
+    }
+
+    fn reads(&self) -> Reads {
+        match self {
+            Op::AsEven(_)
+            | Op::EventAssociations(_)
+            | Op::AssociationsAsEvents(_)
+            | Op::GodparentText => Reads::Tags(&["NAME"]),
+            Op::Godparents => Reads::Tags(&["SEX"]),
+            // A citation's text: its source's title, author, repositories
+            // and their call numbers and names.
+            Op::ChildLinkSources | Op::InlineSources => {
+                Reads::Tags(&["TITL", "ABBR", "AUTH", "REPO", "CALN", "NAME"])
+            }
+            Op::ParentRelations => Reads::Tags(&["FAMC", "PEDI"]),
+            Op::Preferred(..) => Reads::Tags(&["FILE", "FORM"]),
+            // The header's format.
+            Op::Places(_) => Reads::Tags(&["PLAC", "FORM"]),
+            Op::InlineMedia => Reads::Anything,
+            _ => Reads::Nothing,
+        }
+    }
+
+    /// Whether the step may change structures tagged `tag`: add, remove,
+    /// move, retag (to or from `tag`) them, or change their payloads or
+    /// anything under them. What it changes is always under (or at) a
+    /// structure with one of these tags, below the record.
+    #[allow(clippy::match_same_arms)]
+    fn changes(&self, tag: &str) -> bool {
+        let any = |tags: &[&str]| tags.contains(&tag);
+        match self {
+            Op::OneBaptism | Op::EmptyPacs | Op::BadDates | Op::XreflessRecords => false,
+            Op::OccupationsMerged => any(&["OCCU"]),
+            Op::ProfessionFacts => any(&["FACT", "OCCU"]),
+            Op::SurnamesPacked
+            | Op::ParticleInSurname
+            | Op::UsualNameQuoted
+            | Op::NoColonInNames
+            | Op::NamesInAka
+            | Op::NamesWithSlashes => any(&["NAME"]),
+            Op::NicknamesJoined => any(&["NICK"]),
+            Op::EventsSaidY => Y_EVENTS.contains(&tag),
+            Op::DeathSaidY => any(&["DEAT"]),
+            Op::AsEven(map) => tag == "EVEN" || map.iter().any(|(t, _)| *t == tag),
+            Op::AsFact(map) => any(&["FACT", "EVEN"]) || map.iter().any(|(t, _)| *t == tag),
+            Op::FactsAsEven => any(&["FACT", "EVEN"]),
+            Op::UnionType => any(&["NO", "_NO", "_NMR", "EVEN"]),
+            Op::Godparents => any(&["ASSO", "_ASSO"]),
+            Op::EventAssociations(_) => any(&["ASSO", "_ASSO", "_SHAR", "_WITN", "NOTE"]),
+            Op::Adoptions => any(&["ADOP", "FAMC"]),
+            Op::InlineSources | Op::NoteSourcesLifted => any(&["SOUR"]),
+            Op::EscapedNotes | Op::PlainNotes => any(&["NOTE", "MIME"]),
+            Op::OneHeadNote | Op::BareFactsNoted => any(&["NOTE"]),
+            Op::ChildLinkSources => any(&["SOUR", "NOTE"]),
+            Op::Places(_) => any(&["PLAC"]),
+            Op::AddressesAsNotes => any(&["ADDR", "NOTE"]),
+            Op::AddressesInPlace => any(&["ADDR", "PLAC"]),
+            Op::ExtensionsAsNotes => tag.starts_with('_') || tag == "NOTE",
+            Op::ExtensionsAsEvents => tag.starts_with('_') || tag == "EVEN",
+            Op::InlineMedia => any(&["OBJE"]),
+            Op::AssociationsAsEvents(_) => any(&["ASSO", "EVEN"]),
+            Op::FieldsAsNotes(fields) => {
+                any(&["HUSB", "WIFE", "NOTE"]) || fields.iter().any(|(t, _)| *t == tag)
+            }
+            Op::CausesAsNotes => any(&["CAUS", "NOTE"]),
+            Op::RecordNotesAsEvent(_) => any(&["NOTE", "EVEN"]),
+            Op::RecordCitationsOnEvent(_) => any(&["SOUR", "EVEN"]),
+            Op::SourceFieldsAsNote => any(&["TITL", "ABBR", "PUBL", "TEXT", "NOTE"]),
+            Op::RepositoryContactsAsNote => {
+                any(&["ADDR", "PHON", "EMAIL", "FAX", "WWW", "REFN", "NOTE"])
+            }
+            Op::ParentRelations => any(&["_FREL", "_MREL"]),
+            Op::Photo => any(&["_PHOTO"]),
+            Op::Preferred(flags, _) => tag == "_TYPE" || flags.contains(&tag),
+            Op::PrefixAsTitle => any(&["NAME", "TITL"]),
+            Op::NameValueComplete => any(&["NAME", "NOTE"]),
+            Op::UsualNameAsNick | Op::UsualNameAsNote => {
+                any(&["_RUFNAME", "_USED", "NICK", "NOTE"])
+            }
+            Op::IdentifiersAsNote(tags) => tag == "NOTE" || tags.contains(&tag),
+            Op::InterpretedDatesAsNote => any(&["DATE", "NOTE"]),
+            Op::PafUids => any(&["UID", "_UID"]),
+            Op::Retag(map) => map.iter().any(|(a, b)| *a == tag || *b == tag),
+            Op::MarriageStatus => any(&["NO", "_NO", "_STAT"]),
+            Op::ContactsJoined | Op::FaxAsPhone => any(&["FAX", "PHON", "EMAIL", "WWW"]),
+            Op::OnePlace => any(&["PLAC", "NOTE"]),
+            Op::UnionsAsMarriage => any(&["NO", "_NO", "EVEN", "MARR"]),
+            Op::SexSaid => any(&["SEX"]),
+            Op::GodparentText => any(&["_GODP"]),
+            Op::FlatHead
+            | Op::SourceRecords
+            | Op::HomeFirst
+            | Op::ShortXrefs(_)
+            | Op::CitationRefnToSource => true,
+        }
+    }
+
+    /// Whether the step reports a fold of every record it changes, as it
+    /// changes it.
+    fn folds_each_change(&self) -> bool {
+        matches!(
+            self,
+            Op::SexSaid
+                | Op::ExtensionsAsNotes
+                | Op::ExtensionsAsEvents
+                | Op::EscapedNotes
+                | Op::PlainNotes
+        )
+    }
+
+    /// Whether the step only reports.
+    fn reports_only(&self) -> bool {
+        matches!(
+            self,
+            Op::OneBaptism | Op::EmptyPacs | Op::BadDates | Op::XreflessRecords
+        )
+    }
+
+    /// Whether what `self` reads of other records is what `other` may
+    /// change: the two then run one after the other on every record.
+    fn reads_what_changes(&self, other: &Op) -> bool {
+        match self.reads() {
+            Reads::Nothing => false,
+            Reads::Tags(tags) => tags.iter().any(|t| other.changes(t)),
+            Reads::Anything => !other.reports_only(),
+        }
+    }
+}
+
+/// Runs `steps` in order on `records`, as [`run`] runs each on every
+/// record, one after the other; but where nothing a step reads of the
+/// other records is what the steps run with it change, those steps run
+/// record after record, each record going through all of them while it is
+/// at hand (which gives the same records, and the same report).
+///
+/// With `touched`, marks the records the steps change.
+fn run_steps(
+    steps: &[&Step],
+    records: &mut Vec<Draft<'_>>,
+    cx: &mut Cx<'_>,
+    mut touched: Option<&mut [bool]>,
+) {
+    // The records a step changes are those it reports a fold of.
+    let told = steps.iter().all(|s| s.fold.folds_each_change());
+    if !told {
+        if let Some(t) = touched.as_deref_mut() {
+            t.fill(true);
+        }
+    }
+    let mut at = 0;
+    while let Some(rest) = steps.get(at..).filter(|r| !r.is_empty()) {
+        let n = together(rest);
+        match rest.get(..n) {
+            Some([one]) if !(told && touched.is_some()) => {
+                let mut shared = Shared::default();
+                run(one, records, 0..records.len(), cx, &mut shared);
+                finish(one, cx, &mut shared);
+            }
+            Some(some) => run_together(some, records, cx, touched.as_deref_mut().filter(|_| told)),
+            None => break,
+        }
+        at += n.max(1);
+    }
+}
+
+/// How many of the first `steps` run record after record together.
+fn together(steps: &[&Step]) -> usize {
+    for (k, step) in steps.iter().enumerate() {
+        let before = steps.get(..k).unwrap_or_default();
+        let clash = step.fold.reach() == Reach::Dataset
+            || before.iter().any(|b| {
+                b.fold.reach() == Reach::Dataset
+                    || b.fold.reads_what_changes(&step.fold)
+                    || step.fold.reads_what_changes(&b.fold)
+                    || matches!((b.fold, step.fold), (Op::Places(_), Op::Places(_)))
+            });
+        if clash {
+            return k.max(1);
+        }
+    }
+    steps.len()
+}
+
+/// Runs `steps` record after record (see [`run_steps`]); their reports in
+/// the order running them one after the other gives.
+fn run_together(
+    steps: &[&Step],
+    records: &mut Vec<Draft<'_>>,
+    cx: &mut Cx<'_>,
+    mut touched: Option<&mut [bool]>,
+) {
+    let (folds, limits) = (cx.report.folds.len(), cx.report.limits.len());
+    // The step each fold and limit reported is of.
+    let mut fold_of: Vec<usize> = Vec::new();
+    let mut limit_of: Vec<usize> = Vec::new();
+    let mark = |cx: &Cx<'_>, k: usize, fold_of: &mut Vec<usize>, limit_of: &mut Vec<usize>| {
+        fold_of.resize(cx.report.folds.len() - folds, k);
+        limit_of.resize(cx.report.limits.len() - limits, k);
+    };
+    let mut shared = Shared::default();
+    for i in 0..records.len() {
+        for (k, step) in steps.iter().enumerate() {
+            if step.fold.reach() == Reach::Own {
+                // On the record alone.
+                let Some(r) = records.get_mut(i) else { break };
+                run_on(step, std::slice::from_mut(r), 0..1, cx, &mut shared);
+            } else {
+                run(step, records, i..i + 1, cx, &mut shared);
+            }
+            let reported = cx.report.folds.len() - folds > fold_of.len()
+                || cx.report.limits.len() - limits > limit_of.len();
+            if let (true, Some(t)) = (reported, touched.as_deref_mut().and_then(|t| t.get_mut(i))) {
+                *t = true;
+            }
+            mark(cx, k, &mut fold_of, &mut limit_of);
+        }
+    }
+    for (k, step) in steps.iter().enumerate() {
+        finish(step, cx, &mut shared);
+        mark(cx, k, &mut fold_of, &mut limit_of);
+    }
+    order_by_step(&mut cx.report.folds, folds, &fold_of);
+    order_by_step(&mut cx.report.limits, limits, &limit_of);
+}
+
+/// Puts the entries of `list` from `from` on in the order of the steps
+/// that made them (`step_of`), in the order made for each step.
+fn order_by_step<T>(list: &mut Vec<T>, from: usize, step_of: &[usize]) {
+    if step_of.windows(2).all(|w| w[0] <= w[1]) {
+        return;
+    }
+    let mut tail: Vec<(usize, T)> = step_of.iter().copied().zip(list.drain(from..)).collect();
+    tail.sort_by_key(|(k, _)| *k);
+    list.extend(tail.into_iter().map(|(_, t)| t));
+}
+
+/// Reports what `step` did once it ran on every record.
+fn finish(step: &Step, cx: &mut Cx<'_>, shared: &mut Shared<'_>) {
+    if let Op::Places(style) = step.fold {
+        places_done(step.rows, style, &std::mem::take(&mut shared.places), cx);
+    }
+}
+
+/// Runs `step` on the records in `range` (all of them for a step of
+/// [`Reach::Dataset`]).
+fn run<'s>(
+    step: &Step,
+    records: &mut Vec<Draft<'s>>,
+    range: Range<usize>,
+    cx: &mut Cx<'_>,
+    shared: &mut Shared<'s>,
+) {
+    match step.fold {
+        // The one step that adds records.
+        Op::SourceRecords => source_records(records, step.rows, cx),
+        _ => run_on(step, records, range, cx, shared),
+    }
+}
+
+/// [`run`], for a step that adds no record.
 #[allow(clippy::too_many_lines)]
-fn run<'s>(step: &Step, records: &mut Vec<Draft<'s>>, cx: &mut Cx<'_>) {
+fn run_on<'s>(
+    step: &Step,
+    records: &mut [Draft<'s>],
+    range: Range<usize>,
+    cx: &mut Cx<'_>,
+    shared: &mut Shared<'s>,
+) {
     let rows = step.rows;
     match step.fold {
         Op::OccupationsMerged => {
@@ -1334,33 +1794,47 @@ fn run<'s>(step: &Step, records: &mut Vec<Draft<'s>>, cx: &mut Cx<'_>) {
             }
         }
         Op::AsEven(map) => {
+            let mapped = |c: &Draft<'_>| map.iter().find(|(t, _)| *t == c.tag.as_str());
             // The names of the persons pointers name, when one does.
             let pointed = records
+                .get(range.clone())
+                .unwrap_or_default()
                 .iter()
                 .filter(|r| is(r, "INDI") || is(r, "FAM"))
                 .flat_map(|r| &r.substructures)
-                .any(|c| {
-                    matches!(c.payload, Value::Pointer(_))
-                        && map.iter().any(|(t, _)| *t == c.tag.as_str())
-                });
-            let names: HashMap<String, String> = if pointed {
-                let idx = index(records);
-                idx.keys()
-                    .filter_map(|x| person_name(records, &idx, x).map(|n| (x.clone(), n)))
-                    .collect()
+                .any(|c| matches!(c.payload, Value::Pointer(_)) && mapped(c).is_some());
+            let idx = if pointed {
+                shared.index(records)
             } else {
-                HashMap::new()
+                &Index::default()
             };
-            for r in records.iter_mut().filter(|r| is(r, "INDI") || is(r, "FAM")) {
+            for i in range {
+                let names: Vec<Option<String>> = match records.get(i) {
+                    Some(r) if pointed && (is(r, "INDI") || is(r, "FAM")) => {
+                        let look = Lookup { records, idx };
+                        r.substructures
+                            .iter()
+                            .filter(|c| mapped(c).is_some())
+                            .filter_map(Draft::pointer)
+                            .map(|p| look.person_name(p))
+                            .collect()
+                    }
+                    _ => Vec::new(),
+                };
+                let mut names = names.into_iter();
+                let Some(r) = records.get_mut(i) else { break };
+                if !(is(r, "INDI") || is(r, "FAM")) {
+                    continue;
+                }
                 let x = r.xref.clone();
                 for c in &mut r.substructures {
-                    let Some(&(_, label)) = map.iter().find(|(t, _)| *t == c.tag.as_str()) else {
+                    let Some(&(_, label)) = mapped(c) else {
                         continue;
                     };
                     let tag = c.tag.as_str().to_string();
                     let value = match &c.payload {
                         Value::Pointer(p) => {
-                            names.get(&**p).cloned().unwrap_or_else(|| p.to_string())
+                            names.next().flatten().unwrap_or_else(|| p.to_string())
                         }
                         Value::Text(t)
                             if Y_EVENTS.contains(&tag.as_str())
@@ -1511,8 +1985,10 @@ fn run<'s>(step: &Step, records: &mut Vec<Draft<'s>>, cx: &mut Cx<'_>) {
                 }
             }
         }
-        Op::Godparents => godparents(records, rows, cx),
-        Op::EventAssociations(style) => event_associations(records, rows, style, cx),
+        Op::Godparents => godparents(records, range, rows, cx, shared),
+        Op::EventAssociations(style) => {
+            event_associations(records, range, rows, style, cx, shared);
+        }
         Op::Adoptions => {
             let adopted = if cx.v7 { "ADOPTED" } else { "adopted" };
             for r in records.iter_mut().filter(|r| is(r, "INDI")) {
@@ -1575,8 +2051,8 @@ fn run<'s>(step: &Step, records: &mut Vec<Draft<'s>>, cx: &mut Cx<'_>) {
                 }
             }
         }
-        Op::InlineSources => inline_sources(records, rows, cx),
-        Op::SourceRecords => source_records(records, rows, cx),
+        Op::InlineSources => inline_sources(records, range, rows, cx, shared),
+        Op::SourceRecords => debug_assert!(false, "SourceRecords adds records: run it with run"),
         Op::EscapedNotes => {
             for r in records.iter_mut() {
                 let x = r.xref.clone();
@@ -1640,7 +2116,7 @@ fn run<'s>(step: &Step, records: &mut Vec<Draft<'s>>, cx: &mut Cx<'_>) {
             }
         }
         Op::OneHeadNote => {
-            if let Some(head) = records.iter_mut().find(|r| is(r, "HEAD")) {
+            if let Some(head) = shared.head(records, range).and_then(|i| records.get_mut(i)) {
                 let notes: Vec<usize> = head
                     .substructures
                     .iter()
@@ -1676,21 +2152,25 @@ fn run<'s>(step: &Step, records: &mut Vec<Draft<'s>>, cx: &mut Cx<'_>) {
             }
         }
         Op::ChildLinkSources => {
-            let (snapshot, idx) = lookup(records);
-            for r in records.iter_mut().filter(|r| is(r, "INDI")) {
-                let x = r.xref.clone();
-                let mut texts = Vec::new();
-                for famc in r.substructures.iter_mut().filter(|c| is(c, "FAMC")) {
-                    let sources: Vec<Draft<'s>> = famc
-                        .substructures
-                        .iter()
-                        .filter(|s| is(s, "SOUR"))
-                        .cloned()
-                        .collect();
-                    famc.substructures.retain(|s| !is(s, "SOUR"));
-                    for s in sources {
-                        texts.push(citation_text(&s, &snapshot, &idx));
+            let idx = shared.index(records);
+            for i in range {
+                let texts: Vec<String> = match records.get(i) {
+                    Some(r) if is(r, "INDI") => {
+                        let look = Lookup { records, idx };
+                        r.substructures
+                            .iter()
+                            .filter(|c| is(c, "FAMC"))
+                            .flat_map(|famc| &famc.substructures)
+                            .filter(|s| is(s, "SOUR"))
+                            .map(|s| citation_text(s, look))
+                            .collect()
                     }
+                    _ => continue,
+                };
+                let Some(r) = records.get_mut(i) else { break };
+                let x = r.xref.clone();
+                for famc in r.substructures.iter_mut().filter(|c| is(c, "FAMC")) {
+                    famc.substructures.retain(|s| !is(s, "SOUR"));
                 }
                 if !texts.is_empty() {
                     let n = texts.len();
@@ -1708,7 +2188,7 @@ fn run<'s>(step: &Step, records: &mut Vec<Draft<'s>>, cx: &mut Cx<'_>) {
                 }
             }
         }
-        Op::Places(style) => places(records, rows, style, cx),
+        Op::Places(style) => places(records, range, style, cx, shared),
         Op::AddressesAsNotes | Op::AddressesInPlace => {
             let in_place = matches!(step.fold, Op::AddressesInPlace);
             for r in records.iter_mut().filter(|r| is(r, "INDI") || is(r, "FAM")) {
@@ -1771,7 +2251,8 @@ fn run<'s>(step: &Step, records: &mut Vec<Draft<'s>>, cx: &mut Cx<'_>) {
             }
         }
         Op::ExtensionsAsNotes => {
-            for r in records.iter_mut() {
+            // (A record without extension structures has nothing to fold.)
+            for r in records.iter_mut().filter(|r| has_extension_below(r)) {
                 let x = r.xref.clone();
                 let mut lost = Vec::new();
                 let _ = extensions_as_notes(r, &mut Vec::new(), &mut lost);
@@ -1816,9 +2297,9 @@ fn run<'s>(step: &Step, records: &mut Vec<Draft<'s>>, cx: &mut Cx<'_>) {
                 }
             }
         }
-        Op::InlineMedia => inline_media(records, rows, cx),
+        Op::InlineMedia => inline_media(records, range, rows, cx, shared),
         Op::AssociationsAsEvents(name_in_payload) => {
-            associations_as_events(records, rows, name_in_payload, cx);
+            associations_as_events(records, range, rows, name_in_payload, cx, shared);
         }
         Op::FieldsAsNotes(fields) => {
             for r in records.iter_mut().filter(|r| is(r, "INDI") || is(r, "FAM")) {
@@ -2014,26 +2495,40 @@ fn run<'s>(step: &Step, records: &mut Vec<Draft<'s>>, cx: &mut Cx<'_>) {
             }
         }
         Op::ParentRelations => {
-            let (snapshot, idx) = lookup(records);
-            for f in records.iter_mut().filter(|r| is(r, "FAM")) {
+            let idx = shared.index(records);
+            for i in range {
+                // The pedigree each child's link says, before the fold.
+                let pedis: Vec<Option<String>> = match records.get(i) {
+                    Some(f) if is(f, "FAM") => {
+                        let Some(fx) = f.xref.as_deref() else {
+                            continue;
+                        };
+                        let look = Lookup { records, idx };
+                        f.substructures
+                            .iter()
+                            .filter(|c| is(c, "CHIL"))
+                            .map(|c| {
+                                look.get(c.pointer()?)?
+                                    .children()
+                                    .find(|s| is(s, "FAMC") && s.pointer() == Some(fx))
+                                    .and_then(|famc| child_text(famc, "PEDI"))
+                                    .map(|p| p.trim().to_ascii_lowercase())
+                            })
+                            .collect()
+                    }
+                    _ => continue,
+                };
+                let Some(f) = records.get_mut(i) else { break };
                 let Some(fx) = f.xref.clone() else { continue };
+                let mut pedis = pedis.into_iter();
                 for c in f.substructures.iter_mut().filter(|c| is(c, "CHIL")) {
+                    let pedi = pedis.next().flatten();
                     if has(c, "_FREL") || has(c, "_MREL") {
                         continue;
                     }
-                    let Some(child_x) = c.pointer().map(Xref::new) else {
+                    if c.pointer().is_none() {
                         continue;
-                    };
-                    let pedi = idx
-                        .get(child_x.as_str())
-                        .and_then(|&i| snapshot.get(i))
-                        .and_then(|p| {
-                            p.substructures
-                                .iter()
-                                .find(|s| is(s, "FAMC") && s.pointer() == Some(&fx))
-                        })
-                        .and_then(|famc| child_text(famc, "PEDI"))
-                        .map(|p| p.trim().to_ascii_lowercase());
+                    }
                     let Some(word) = pedi.as_deref().map(|p| match p {
                         "birth" => "Natural",
                         "adopted" => "Adopted",
@@ -2080,8 +2575,30 @@ fn run<'s>(step: &Step, records: &mut Vec<Draft<'s>>, cx: &mut Cx<'_>) {
             }
         }
         Op::Preferred(flags, media_type) => {
-            let (snapshot, idx) = lookup(records);
-            for r in records.iter_mut().filter(|r| is(r, "INDI")) {
+            let idx = if media_type {
+                shared.index(records)
+            } else {
+                &Index::default()
+            };
+            for i in range {
+                // The media type of each link, before the fold.
+                let forms: Vec<Option<String>> = match records.get(i) {
+                    Some(r) if is(r, "INDI") => {
+                        if media_type {
+                            let look = Lookup { records, idx };
+                            r.substructures
+                                .iter()
+                                .filter(|c| is(c, "OBJE"))
+                                .map(|o| media_form(o, look))
+                                .collect()
+                        } else {
+                            Vec::new()
+                        }
+                    }
+                    _ => continue,
+                };
+                let mut forms = forms.into_iter();
+                let Some(r) = records.get_mut(i) else { break };
                 let x = r.xref.clone();
                 let mut first = true;
                 for o in r.substructures.iter_mut().filter(|c| is(c, "OBJE")) {
@@ -2102,8 +2619,8 @@ fn run<'s>(step: &Step, records: &mut Vec<Draft<'s>>, cx: &mut Cx<'_>) {
                             );
                         }
                     }
+                    let form = forms.next().flatten();
                     if media_type && !has(o, "_TYPE") {
-                        let form = media_form(o, &snapshot, &idx);
                         let photo = form.is_some_and(|f| {
                             let f = f.to_ascii_lowercase();
                             f.starts_with("image/")
@@ -2310,7 +2827,7 @@ fn run<'s>(step: &Step, records: &mut Vec<Draft<'s>>, cx: &mut Cx<'_>) {
             }
         }
         Op::FlatHead => {
-            if let Some(head) = records.iter_mut().find(|r| is(r, "HEAD")) {
+            if let Some(head) = shared.head(records, range).and_then(|i| records.get_mut(i)) {
                 let mut changed = false;
                 flatten_lines(head, &mut changed);
                 if changed {
@@ -2457,9 +2974,10 @@ fn run<'s>(step: &Step, records: &mut Vec<Draft<'s>>, cx: &mut Cx<'_>) {
                     .position(|r| is(r, "INDI") && r.xref.as_deref().is_some_and(|x| x == home));
                 if let (Some(first), Some(at)) = (first_indi, at) {
                     if at != first {
-                        let moved = records.remove(at);
-                        let x = moved.xref.clone();
-                        records.insert(first, moved);
+                        let x = records.get(at).and_then(|r| r.xref.clone());
+                        if let Some(moved) = records.get_mut(first..=at) {
+                            moved.rotate_right(1);
+                        }
                         cx.fold(
                             rows,
                             FoldKind::Reordered,
@@ -2624,7 +3142,7 @@ fn run<'s>(step: &Step, records: &mut Vec<Draft<'s>>, cx: &mut Cx<'_>) {
             }
             let idx = index(records);
             for (source, refn) in moves {
-                if let Some(s) = idx.get(&source).and_then(|&i| records.get_mut(i)) {
+                if let Some(s) = idx.get(source.as_str()).and_then(|&i| records.get_mut(i)) {
                     let x = s.xref.clone();
                     if !s.substructures.contains(&refn) {
                         s.substructures.push(refn);
@@ -2697,19 +3215,25 @@ fn run<'s>(step: &Step, records: &mut Vec<Draft<'s>>, cx: &mut Cx<'_>) {
             }
         }
         Op::GodparentText => {
-            let (snapshot, idx) = lookup(records);
-            for r in records.iter_mut().filter(|r| is(r, "INDI")) {
+            let idx = shared.index(records);
+            for i in range {
+                let godparents: Vec<String> = match records.get(i) {
+                    Some(r) if is(r, "INDI") => {
+                        let look = Lookup { records, idx };
+                        r.substructures
+                            .iter()
+                            .filter(|c| {
+                                is(c, "ASSO")
+                                    && child_text(c, "RELA")
+                                        .is_some_and(|t| t.to_ascii_lowercase().starts_with("god"))
+                            })
+                            .filter_map(|c| c.pointer().and_then(|p| look.person_name(p)))
+                            .collect()
+                    }
+                    _ => continue,
+                };
+                let Some(r) = records.get_mut(i) else { break };
                 let x = r.xref.clone();
-                let godparents: Vec<String> = r
-                    .substructures
-                    .iter()
-                    .filter(|c| {
-                        is(c, "ASSO")
-                            && child_text(c, "RELA")
-                                .is_some_and(|t| t.to_ascii_lowercase().starts_with("god"))
-                    })
-                    .filter_map(|c| c.pointer().and_then(|p| person_name(&snapshot, &idx, p)))
-                    .collect();
                 if godparents.is_empty() {
                     continue;
                 }
@@ -2989,6 +3513,13 @@ fn takes_note(path: &[&str]) -> bool {
 /// Every extension structure under `s` (at `path`) as a note of the
 /// nearest structure that takes one: the texts that found none, for the
 /// caller; `lost` the tags folded (and whether as a note).
+/// Whether a structure below `s` has an extension tag.
+fn has_extension_below(s: &Draft<'_>) -> bool {
+    s.substructures
+        .iter()
+        .any(|c| c.tag.is_extension() || has_extension_below(c))
+}
+
 fn extensions_as_notes(
     s: &mut Draft<'_>,
     path: &mut Vec<String>,
@@ -3158,71 +3689,99 @@ fn collect_citation_refns<'s>(s: &mut Draft<'s>, out: &mut Vec<(String, Draft<'s
 
 /// The media type or format of a multimedia link (its own `FILE.FORM`, or
 /// its record's).
-fn media_form<'s>(
-    link: &Draft<'s>,
-    records: &[Draft<'s>],
-    idx: &HashMap<String, usize>,
-) -> Option<String> {
-    let of = |s: &Draft<'s>| {
-        child(s, "FILE")
-            .and_then(|f| child_text(f, "FORM"))
-            .or_else(|| child_text(s, "FORM"))
-            .map(str::to_string)
-    };
+fn media_form(link: &Draft<'_>, look: Lookup<'_, '_>) -> Option<String> {
     match link.pointer() {
-        Some(p) => idx.get(p).and_then(|&i| records.get(i)).and_then(of),
-        None => of(link),
+        Some(p) => {
+            let record = look.get(p)?;
+            record
+                .child("FILE")
+                .and_then(|f| child_text(f, "FORM"))
+                .or_else(|| record.child_text("FORM"))
+                .map(str::to_string)
+        }
+        None => child(link, "FILE")
+            .and_then(|f| child_text(f, "FORM"))
+            .or_else(|| child_text(link, "FORM"))
+            .map(str::to_string),
     }
 }
 
 /// A citation as one text: the source's title, the page, the repository.
-fn citation_text<'s>(c: &Draft<'s>, records: &[Draft<'s>], idx: &HashMap<String, usize>) -> String {
-    let mut parts: Vec<String> = Vec::new();
+fn citation_text(c: &Draft<'_>, look: Lookup<'_, '_>) -> String {
+    // The parts that say something, `, ` between; line breaks as spaces
+    // in those that are `flat`.
+    let mut out = String::new();
+    let mut part = |p: &str, flat: bool| {
+        if p.trim().is_empty() {
+            return;
+        }
+        if !out.is_empty() {
+            out.push_str(", ");
+        }
+        if flat && p.contains('\n') {
+            out.push_str(&p.replace('\n', " "));
+        } else {
+            out.push_str(p);
+        }
+    };
     match c.pointer() {
         Some(p) => {
-            if let Some(s) = idx.get(p).and_then(|&i| records.get(i)) {
-                let title = child_text(s, "TITL")
-                    .or_else(|| child_text(s, "ABBR"))
-                    .map(|t| t.replace('\n', " "));
-                parts.extend(title);
-                if let Some(auth) = child_text(s, "AUTH") {
-                    parts.push(auth.replace('\n', " "));
+            if let Some(s) = look.get(p) {
+                if let Some(title) = s.child_text("TITL").or_else(|| s.child_text("ABBR")) {
+                    part(title, true);
                 }
-                for repo in s.substructures.iter().filter(|r| is(r, "REPO")) {
+                if let Some(auth) = s.child_text("AUTH") {
+                    part(auth, true);
+                }
+                for repo in s.children().filter(|r| is(r, "REPO")) {
                     if let Some(name) = repo
                         .pointer()
-                        .and_then(|r| idx.get(r))
-                        .and_then(|&i| records.get(i))
-                        .and_then(|r| child_text(r, "NAME"))
+                        .and_then(|r| look.get(r))
+                        .and_then(|r| r.child_text("NAME"))
                     {
-                        parts.push(name.to_string());
+                        part(name, false);
                     }
                     if let Some(caln) = child_text(repo, "CALN") {
-                        parts.push(caln.to_string());
+                        part(caln, false);
                     }
                 }
             }
         }
-        None => parts.extend(c.text().map(|t| t.replace('\n', " "))),
+        None => {
+            if let Some(t) = c.text() {
+                part(t, true);
+            }
+        }
     }
     if let Some(page) = child_text(c, "PAGE") {
-        parts.push(page.replace('\n', " "));
+        part(page, true);
     }
-    parts.retain(|p| !p.trim().is_empty());
-    parts.join(", ")
+    out
 }
 
 /// Every citation of a source record written inline.
-fn inline_sources(records: &mut [Draft<'_>], rows: &'static [&'static str], cx: &mut Cx<'_>) {
-    let (snapshot, idx) = lookup(records);
-    for r in records
-        .iter_mut()
-        .filter(|r| !matches!(r.tag.as_str(), "HEAD" | "SOUR" | "REPO" | "TRLR"))
-    {
+fn inline_sources<'s>(
+    records: &mut [Draft<'s>],
+    range: Range<usize>,
+    rows: &'static [&'static str],
+    cx: &mut Cx<'_>,
+    shared: &mut Shared<'s>,
+) {
+    let idx = shared.index(records);
+    for i in range {
+        let mut texts = Vec::new();
+        match records.get(i) {
+            Some(r) if !matches!(r.tag.as_str(), "HEAD" | "SOUR" | "REPO" | "TRLR") => {
+                let look = Lookup { records, idx };
+                citation_texts(&r.substructures, look, &mut texts);
+            }
+            _ => continue,
+        }
+        let Some(r) = records.get_mut(i) else { break };
         let x = r.xref.clone();
         let mut n = 0;
         let mut lossy = false;
-        inline_citations(r, &snapshot, &idx, &mut n, &mut lossy);
+        inline_citations(r, &mut texts.into_iter(), &mut n, &mut lossy);
         if n > 0 {
             cx.fold(
                 rows,
@@ -3235,16 +3794,43 @@ fn inline_sources(records: &mut [Draft<'_>], rows: &'static [&'static str], cx: 
     }
 }
 
-fn inline_citations<'s>(
-    s: &mut Draft<'s>,
-    records: &[Draft<'s>],
-    idx: &HashMap<String, usize>,
+/// The texts of the citations of records [`inline_citations`] writes
+/// inline among `structures`, in the order it writes them.
+fn citation_texts<'s>(structures: &[Draft<'s>], look: Lookup<'_, 's>, out: &mut Vec<String>) {
+    for c in structures {
+        citation_texts_in(c, look, out);
+    }
+}
+
+fn citation_texts_in<'s>(c: &Draft<'s>, look: Lookup<'_, 's>, out: &mut Vec<String>) {
+    if !(is(c, "SOUR") && c.pointer().is_some()) {
+        citation_texts(&c.substructures, look, out);
+        return;
+    }
+    out.push(citation_text(c, look));
+    // The substructures it keeps, in their order.
+    for sub in &c.substructures {
+        match sub.tag.as_str() {
+            "DATA" => {
+                for d in sub.substructures.iter().filter(|d| is(d, "TEXT")) {
+                    citation_texts_in(d, look, out);
+                }
+            }
+            "NOTE" | "QUAY" | "OBJE" => citation_texts_in(sub, look, out),
+            _ => {}
+        }
+    }
+}
+
+fn inline_citations(
+    s: &mut Draft<'_>,
+    texts: &mut std::vec::IntoIter<String>,
     n: &mut usize,
     lossy: &mut bool,
 ) {
     for c in &mut s.substructures {
         if is(c, "SOUR") && c.pointer().is_some() {
-            let text = citation_text(c, records, idx);
+            let text = texts.next().unwrap_or_default();
             let mut inline = text_node("SOUR", if text.is_empty() { "Source" } else { &text });
             for sub in &c.substructures {
                 match sub.tag.as_str() {
@@ -3262,11 +3848,11 @@ fn inline_citations<'s>(
                 }
             }
             // Citations in its notes too, now that it is written inline.
-            inline_citations(&mut inline, records, idx, n, lossy);
+            inline_citations(&mut inline, texts, n, lossy);
             *c = inline;
             *n += 1;
         } else {
-            inline_citations(c, records, idx, n, lossy);
+            inline_citations(c, texts, n, lossy);
         }
     }
 }
@@ -3360,10 +3946,32 @@ fn source_pointers<'s>(s: &mut Draft<'s>, make: &mut dyn FnMut(&str) -> Xref, n:
 }
 
 /// Godparents of a baptism as person-level associations.
-fn godparents(records: &mut [Draft<'_>], rows: &'static [&'static str], cx: &mut Cx<'_>) {
-    let (snapshot, idx) = lookup(records);
-    for r in records.iter_mut().filter(|r| is(r, "INDI")) {
-        let x = r.xref.clone();
+fn godparents<'s>(
+    records: &mut [Draft<'s>],
+    range: Range<usize>,
+    rows: &'static [&'static str],
+    cx: &mut Cx<'_>,
+    shared: &mut Shared<'s>,
+) {
+    let idx = shared.index(records);
+    for i in range {
+        // The sex of each godparent, before the fold.
+        let sexes: Vec<Option<String>> = match records.get(i) {
+            Some(r) if is(r, "INDI") => {
+                let look = Lookup { records, idx };
+                r.substructures
+                    .iter()
+                    .filter(|e| matches!(e.tag.as_str(), "BAPM" | "CHR" | "CHRA"))
+                    .flat_map(|e| &e.substructures)
+                    .filter(|a| is_godparent_link(a))
+                    .map(|a| a.pointer().and_then(|p| look.person_sex(p)))
+                    .collect()
+            }
+            _ => continue,
+        };
+        let mut sexes = sexes.into_iter();
+        let Some(r) = records.get_mut(i) else { break };
+        let holder = r.xref.clone();
         let mut found: Vec<(Xref, String)> = Vec::new();
         for e in r
             .substructures
@@ -3372,15 +3980,10 @@ fn godparents(records: &mut [Draft<'_>], rows: &'static [&'static str], cx: &mut
         {
             let mut k = 0;
             while k < e.substructures.len() {
-                let godparent = e.substructures.get(k).is_some_and(|a| {
-                    (is(a, "ASSO") || is(a, "_ASSO"))
-                        && a.pointer().is_some_and(|p| p != Xref::VOID)
-                        && is_godparent(a)
-                });
-                if godparent {
+                if e.substructures.get(k).is_some_and(is_godparent_link) {
                     let a = e.substructures.remove(k);
+                    let sex = sexes.next().flatten();
                     if let Some(p) = a.pointer() {
-                        let sex = person_sex(&snapshot, &idx, p);
                         let word = match sex.as_deref() {
                             Some("M") => "Godfather",
                             Some("F") => "Godmother",
@@ -3434,10 +4037,17 @@ fn godparents(records: &mut [Draft<'_>], rows: &'static [&'static str], cx: &mut
             rows,
             FoldKind::Moved,
             false,
-            x.as_deref(),
+            holder.as_deref(),
             format!("{n} godparents of a baptism as associations of the person"),
         );
     }
+}
+
+/// Whether `a` links a godparent: an association to a person.
+fn is_godparent_link(a: &Draft<'_>) -> bool {
+    (is(a, "ASSO") || is(a, "_ASSO"))
+        && a.pointer().is_some_and(|p| p != Xref::VOID)
+        && is_godparent(a)
 }
 
 fn is_godparent(a: &Draft<'_>) -> bool {
@@ -3456,21 +4066,38 @@ fn is_godparent(a: &Draft<'_>) -> bool {
 /// The event associations 5.5.1 has no place for, written in `style`.
 fn event_associations<'s>(
     records: &mut [Draft<'s>],
+    range: Range<usize>,
     rows: &'static [&'static str],
     style: AssocStyle,
     cx: &mut Cx<'_>,
+    shared: &mut Shared<'s>,
 ) {
     if cx.v7 {
         return;
     }
-    let (snapshot, idx) = lookup(records);
+    let idx = shared.index(records);
     let mut reversed: Vec<(String, Draft<'s>)> = Vec::new();
-    for r in records.iter_mut().filter(|r| is(r, "INDI") || is(r, "FAM")) {
+    for i in range {
+        // The name of each associated person, before the fold.
+        let names: Vec<Option<String>> = match records.get(i) {
+            Some(r) if is(r, "INDI") || is(r, "FAM") => {
+                let look = Lookup { records, idx };
+                r.substructures
+                    .iter()
+                    .flat_map(|o| &o.substructures)
+                    .filter(|c| is(c, "ASSO") || is(c, "_ASSO"))
+                    .map(|c| association_target(c).and_then(|p| look.person_name(p.as_str())))
+                    .collect()
+            }
+            _ => continue,
+        };
+        let mut names = names.into_iter();
+        let Some(r) = records.get_mut(i) else { break };
         let holder = r.xref.clone();
         let owner = holder.clone();
-        let record_tag = r.tag.as_str().to_string();
+        let record_tag = r.tag.clone();
         for occasion in &mut r.substructures {
-            let event = occasion.tag.as_str().to_string();
+            let event = occasion.tag.clone();
             let mut at = 0;
             let mut notes = Vec::new();
             while at < occasion.substructures.len() {
@@ -3483,7 +4110,7 @@ fn event_associations<'s>(
                     continue;
                 }
                 let found = occasion.substructures.remove(at);
-                let (role, target, name, rest) = association_parts(&found, &snapshot, &idx);
+                let (role, target, name, rest) = association_parts(&found, names.next().flatten());
                 let kept_as = match style {
                     AssocStyle::Shar => Some(("_SHAR", "ROLE")),
                     AssocStyle::Witn => Some(("_WITN", "TYPE")),
@@ -3541,20 +4168,23 @@ fn event_associations<'s>(
     if reversed.is_empty() {
         return;
     }
-    let idx = index(records);
     for (person, assoc) in reversed {
-        if let Some(r) = idx.get(&person).and_then(|&i| records.get_mut(i)) {
+        if let Some(r) = idx.get(person.as_str()).and_then(|&i| records.get_mut(i)) {
             r.substructures.push(assoc);
         }
     }
+}
+
+/// The person an association points to.
+fn association_target(found: &Draft<'_>) -> Option<Xref> {
+    found.pointer().filter(|p| *p != Xref::VOID).map(Xref::new)
 }
 
 /// What an association says: its role, the person it points to, that
 /// person's name (or the phrase naming them) and its other substructures.
 fn association_parts<'s>(
     found: &Draft<'s>,
-    records: &[Draft<'s>],
-    idx: &HashMap<String, usize>,
+    target_name: Option<String>,
 ) -> (String, Option<Xref>, String, Vec<Draft<'s>>) {
     let role = child_text(found, "RELA")
         .or_else(|| child(found, "ROLE").and_then(|r| child_text(r, "PHRASE")))
@@ -3562,10 +4192,8 @@ fn association_parts<'s>(
         .unwrap_or("Witness")
         .trim()
         .to_string();
-    let target = found.pointer().filter(|p| *p != Xref::VOID).map(Xref::new);
-    let name = target
-        .as_ref()
-        .and_then(|p| person_name(records, idx, p.as_str()))
+    let target = association_target(found);
+    let name = target_name
         .or_else(|| child_text(found, "PHRASE").map(str::to_string))
         .unwrap_or_default();
     let rest = found
@@ -3578,14 +4206,32 @@ fn association_parts<'s>(
 }
 
 /// Each association as an `EVEN` + `TYPE Associate`.
-fn associations_as_events(
-    records: &mut [Draft<'_>],
+fn associations_as_events<'s>(
+    records: &mut [Draft<'s>],
+    range: Range<usize>,
     rows: &'static [&'static str],
     name_in_payload: bool,
     cx: &mut Cx<'_>,
+    shared: &mut Shared<'s>,
 ) {
-    let (snapshot, idx) = lookup(records);
-    for r in records.iter_mut().filter(|r| is(r, "INDI") || is(r, "FAM")) {
+    let idx = shared.index(records);
+    for i in range {
+        // The name of each associated person, before the fold, by
+        // identifier.
+        let names: HashMap<String, Option<String>> = match records.get(i) {
+            Some(r) if is(r, "INDI") || is(r, "FAM") => {
+                let look = Lookup { records, idx };
+                r.substructures
+                    .iter()
+                    .chain(r.substructures.iter().flat_map(|e| &e.substructures))
+                    .filter(|a| is(a, "ASSO"))
+                    .filter_map(|a| a.pointer().filter(|p| *p != Xref::VOID))
+                    .map(|p| (p.to_string(), look.person_name(p)))
+                    .collect()
+            }
+            _ => continue,
+        };
+        let Some(r) = records.get_mut(i) else { break };
         let x = r.xref.clone();
         let mut assocs = Vec::new();
         let mut k = 0;
@@ -3610,7 +4256,7 @@ fn associations_as_events(
             let name = a
                 .pointer()
                 .filter(|p| *p != Xref::VOID)
-                .and_then(|p| person_name(&snapshot, &idx, p))
+                .and_then(|p| names.get(p).cloned().flatten())
                 .or_else(|| child_text(&a, "PHRASE").map(str::to_string))
                 .unwrap_or_default();
             let rela = child_text(&a, "RELA")
@@ -3636,42 +4282,72 @@ fn associations_as_events(
     }
 }
 
+/// What a link to a multimedia record written inline takes of the record.
+struct MediaRecord<'s> {
+    /// Its first file.
+    file: Draft<'s>,
+    /// Its title.
+    title: Option<Draft<'s>>,
+    /// Whether it holds more than files, a title and a change date.
+    more: bool,
+}
+
 /// Links to multimedia records written inline.
-fn inline_media(records: &mut [Draft<'_>], rows: &'static [&'static str], cx: &mut Cx<'_>) {
+fn inline_media<'s>(
+    records: &mut [Draft<'s>],
+    range: Range<usize>,
+    rows: &'static [&'static str],
+    cx: &mut Cx<'_>,
+    shared: &mut Shared<'s>,
+) {
     if cx.v7 {
         return;
     }
-    let (snapshot, idx) = lookup(records);
-    for r in records.iter_mut().filter(|r| is(r, "INDI") || is(r, "FAM")) {
+    let idx = shared.index(records);
+    for i in range {
+        // What each link's record gives: its first file, its title, and
+        // whether it holds more.
+        let found: Vec<Option<MediaRecord<'_>>> = match records.get(i) {
+            Some(r) if is(r, "INDI") || is(r, "FAM") => {
+                let look = Lookup { records, idx };
+                r.substructures
+                    .iter()
+                    .filter(|c| is(c, "OBJE"))
+                    .map(|link| {
+                        let record = look.get(link.pointer()?)?;
+                        let file = record.child("FILE")?.clone();
+                        Some(MediaRecord {
+                            file,
+                            title: record.child("TITL").cloned(),
+                            more: record
+                                .children()
+                                .any(|s| !matches!(s.tag.as_str(), "FILE" | "TITL" | "CHAN")),
+                        })
+                    })
+                    .collect()
+            }
+            _ => continue,
+        };
+        let mut found = found.into_iter();
+        let Some(r) = records.get_mut(i) else { break };
         let x = r.xref.clone();
         let mut n = 0;
         let mut lossy = false;
         for link in r.substructures.iter_mut().filter(|c| is(c, "OBJE")) {
-            let Some(p) = link.pointer().map(Xref::new) else {
-                continue;
-            };
-            let Some(record) = idx.get(p.as_str()).and_then(|&i| snapshot.get(i)) else {
-                continue;
-            };
-            let Some(file) = child(record, "FILE") else {
+            let Some(record) = found.next().flatten() else {
                 continue;
             };
             // 5.5.1: `OBJE` + `FILE` (+ `FORM` + `TYPE`) + `TITL`.
             let mut inline = Draft::new("OBJE");
-            let mut first = file.clone();
+            let mut first = record.file;
             first
                 .substructures
                 .retain(|s| is(s, "FORM") || is(s, "TITL"));
-            let title = child(&first, "TITL")
-                .cloned()
-                .or_else(|| child(record, "TITL").cloned());
+            let title = child(&first, "TITL").cloned().or(record.title);
             first.substructures.retain(|s| !is(s, "TITL"));
             inline.substructures.push(first);
             inline.substructures.extend(title);
-            lossy |= record
-                .substructures
-                .iter()
-                .any(|s| !matches!(s.tag.as_str(), "FILE" | "TITL" | "CHAN"));
+            lossy |= record.more;
             inline.substructures.extend(
                 link.substructures
                     .iter()
@@ -3827,35 +4503,54 @@ fn place_form(records: &mut [Draft<'_>], style: PlaceStyle) {
 }
 
 /// Places in a target's format.
-fn places(
-    records: &mut [Draft<'_>],
-    rows: &'static [&'static str],
+/// What [`places`] found so far, to report once it is done.
+#[derive(Default)]
+struct PlacesSeen {
+    /// The jurisdictions the header names, as slots of the target's, and
+    /// whether each is known; read once.
+    form: Option<(Vec<Option<usize>>, bool)>,
+    changed: usize,
+    guessed: usize,
+    skipped: usize,
+}
+
+fn places<'s>(
+    records: &mut [Draft<'s>],
+    range: Range<usize>,
     style: PlaceStyle,
     cx: &mut Cx<'_>,
+    shared: &mut Shared<'s>,
 ) {
-    // The jurisdictions the header names, in order.
-    let form: Vec<String> = records
-        .iter()
-        .find(|r| is(r, "HEAD"))
-        .and_then(|h| child(h, "PLAC"))
-        .and_then(|p| child_text(p, "FORM"))
-        .map(|f| {
-            f.split(',')
-                .map(|j| j.trim().to_ascii_lowercase())
-                .collect()
-        })
-        .unwrap_or_default();
-    let slot = |name: &str| -> Option<usize> {
-        [TOWN, CODE, COUNTY, REGION, COUNTRY, SUB]
+    let seen = &mut shared.places;
+    let (mapping, known) = seen.form.get_or_insert_with(|| {
+        // The jurisdictions the header names, in order.
+        let form: Vec<String> = records
             .iter()
-            .position(|names| names.contains(&name))
-    };
-    let mapping: Vec<Option<usize>> = form.iter().map(|j| slot(j)).collect();
-    let known = !form.is_empty() && mapping.iter().all(Option::is_some);
-    let mut n = 0;
-    let mut guessed = 0;
-    let mut skipped = 0;
-    for r in records.iter_mut().filter(|r| !is(r, "HEAD")) {
+            .find(|r| is(r, "HEAD"))
+            .and_then(|h| child(h, "PLAC"))
+            .and_then(|p| child_text(p, "FORM"))
+            .map(|f| {
+                f.split(',')
+                    .map(|j| j.trim().to_ascii_lowercase())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let slot = |name: &str| -> Option<usize> {
+            [TOWN, CODE, COUNTY, REGION, COUNTRY, SUB]
+                .iter()
+                .position(|names| names.contains(&name))
+        };
+        let mapping: Vec<Option<usize>> = form.iter().map(|j| slot(j)).collect();
+        let known = !form.is_empty() && mapping.iter().all(Option::is_some);
+        (mapping, known)
+    });
+    let known = *known;
+    for r in records
+        .get_mut(range)
+        .unwrap_or_default()
+        .iter_mut()
+        .filter(|r| !is(r, "HEAD"))
+    {
         each_tag(r, "PLAC", &mut |p| {
             let Some(text) = p.text() else { return };
             if text.trim_start().starts_with('[') {
@@ -3873,24 +4568,39 @@ fn places(
             let new = match place_in(text, mapping, known, style) {
                 Placed::Mapped(new) => new,
                 Placed::Guessed(new) => {
-                    guessed += 1;
+                    seen.guessed += 1;
                     new
                 }
                 Placed::TooMany => {
-                    skipped += 1;
+                    seen.skipped += 1;
                     return;
                 }
             };
             if new != text {
                 set_text(p, &new);
-                n += 1;
+                seen.changed += 1;
             }
         });
     }
-    let form_text = style.form();
     // The header names the format once the folds are done, when every
     // place written follows it ([`place_form`]).
     cx.place_style = Some(style);
+}
+
+/// Reports what [`places`] did, once it ran on every record.
+fn places_done(
+    rows: &'static [&'static str],
+    style: PlaceStyle,
+    seen: &PlacesSeen,
+    cx: &mut Cx<'_>,
+) {
+    let form_text = style.form();
+    let PlacesSeen {
+        changed: n,
+        guessed,
+        skipped,
+        ..
+    } = *seen;
     if skipped > 0 {
         cx.limit(
             rows,
@@ -4111,14 +4821,15 @@ fn omit_change_dates(records: &mut [Draft<'_>], cx: &mut Cx<'_>) {
 }
 
 /// Media paths in the target's form.
-fn media_paths(records: &mut [Draft<'_>], cx: &mut Cx<'_>) {
+fn media_paths(records: &mut [Draft<'_>], cx: &mut Cx<'_>, touched: &mut [bool]) {
     let style = cx.target.media;
     if style == MediaPaths::Keep {
         return;
     }
     let root = cx.options.media_root.clone().map(|r| r.replace('\\', "/"));
     let mut n = 0;
-    for r in records.iter_mut() {
+    for (r, t) in records.iter_mut().zip(touched.iter_mut()) {
+        let before = n;
         each_media_file(r, &mut |f| {
             let Some(path) = f.text().map(str::to_string) else {
                 return;
@@ -4152,6 +4863,7 @@ fn media_paths(records: &mut [Draft<'_>], cx: &mut Cx<'_>) {
                 n += 1;
             }
         });
+        *t |= n != before;
     }
     if n > 0 {
         let rows = cx.target.rows;
@@ -4245,11 +4957,58 @@ fn remap(s: &mut Draft<'_>, map: &HashMap<String, Xref>) {
 }
 
 /// The conformance repair of drafts, as the writer makes it.
-fn conform_drafts(records: &mut Vec<Draft<'_>>, to: GedcomVersion) -> Vec<Repair> {
-    let mut structures: Vec<Structure> = records.iter().map(Draft::to_structure).collect();
-    let repairs = crate::spec::conform(&mut structures, to);
-    *records = structures.into_iter().map(Draft::from_owned).collect();
-    repairs
+/// Repairs the records as [`crate::spec::conform`] does, and what it
+/// found clean of each record it left as it was ([`Rec::checked`]); with
+/// `known`, what a conformance of the same records found clean of each, and
+/// whether each changed since (not the header, which is looked at again).
+fn conform_drafts(
+    records: &mut Vec<Draft<'_>>,
+    to: GedcomVersion,
+    known: Option<(&[Option<Checked>], &[bool])>,
+) -> (Vec<Repair>, Vec<Option<Checked>>) {
+    // The records the pass leaves as they are stay drafts; only those it
+    // rewrites are copied, and come back as owned drafts.
+    let mut recs: Vec<Rec<'_, &Draft<'_>>> = records
+        .iter()
+        .enumerate()
+        .map(|(i, d)| {
+            let rec = Rec::given(d);
+            let still = known.and_then(|(checked, touched)| {
+                let unchanged = touched.get(i) == Some(&false) && !is(d, "HEAD");
+                checked.get(i).copied().flatten().filter(|_| unchanged)
+            });
+            match still {
+                Some(c) => rec.known_clean(c),
+                None => rec,
+            }
+        })
+        .collect();
+    // (The pass may complete the header without a repair to report.)
+    let conformed = conform_records(&mut recs, to, None);
+    let (repairs, state) = (conformed.repairs, conformed.state);
+    let checked: Vec<Option<Checked>> = recs.iter().map(|r| r.checked(state)).collect();
+    let base = records.as_ptr();
+    let size = std::mem::size_of::<Draft<'_>>().max(1);
+    let placed: Vec<Result<usize, Structure>> = recs
+        .into_iter()
+        .map(|r| {
+            r.into_given()
+                .map(|d| (std::ptr::from_ref(d) as usize - base as usize) / size)
+        })
+        .collect();
+    let mut old: Vec<Option<Draft<'_>>> = std::mem::take(records).into_iter().map(Some).collect();
+    records.reserve(placed.len());
+    for p in placed {
+        records.push(match p {
+            Ok(i) => {
+                let d = old.get_mut(i).and_then(Option::take);
+                debug_assert!(d.is_some(), "a record given twice");
+                d.unwrap_or_default()
+            }
+            Err(s) => Draft::from_owned(s),
+        });
+    }
+    (repairs, checked)
 }
 
 #[cfg(test)]

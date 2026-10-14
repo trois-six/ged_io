@@ -468,6 +468,31 @@ impl<'s> Flat<'s> {
         self.begin();
     }
 
+    /// Empties the arena, handing its structures to `f` in write order,
+    /// each with the number of structures above it, their texts moved out.
+    /// Each also with the number of its substructures.
+    pub(crate) fn drain_into(
+        &mut self,
+        mut f: impl FnMut(u32, Cow<'s, str>, Option<Cow<'s, str>>, FlatPayload<'s>, usize),
+    ) {
+        let counts: Vec<usize> = (0..self.nodes.len())
+            .map(|i| {
+                let end = self.nodes.get(i).map_or(0, |n| n.end as usize);
+                let mut n = 0;
+                let mut j = i + 1;
+                while let Some(c) = self.nodes.get(j).filter(|_| j < end) {
+                    n += 1;
+                    j = (c.end as usize).max(j + 1);
+                }
+                n
+            })
+            .collect();
+        for (n, count) in self.nodes.drain(..).zip(counts) {
+            f(n.depth, n.tag, n.xref, n.payload, count);
+        }
+        self.begin();
+    }
+
     /// Starts a record after those written: where it starts.
     pub(crate) fn begin(&mut self) -> usize {
         self.start = self.nodes.len();
