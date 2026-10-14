@@ -749,6 +749,10 @@ pub(crate) struct WriteCx<'s> {
     /// Whether values are converted to `version`'s grammars (dates, ages,
     /// times), as for writing a file, or given as the model holds them.
     pub(crate) convert: bool,
+    /// The extension structures written as the standard structures a
+    /// conversion makes of them, where their structure's type has a field
+    /// for them ([`crate::convert::Adoptions`]).
+    pub(crate) adopt: Option<&'s crate::convert::Adoptions>,
 }
 
 impl<'a> WriteCx<'a> {
@@ -810,6 +814,7 @@ impl<'a> WriteCx<'a> {
             tables: &data.tables,
             version,
             convert,
+            adopt: None,
         }
     }
 
@@ -820,6 +825,7 @@ impl<'a> WriteCx<'a> {
             tables: &EMPTY_TABLES,
             version,
             convert,
+            adopt: None,
         }
     }
 
@@ -935,6 +941,13 @@ pub(crate) trait PayloadField: Sized {
     fn copy_raw(raw: &Self::Raw, cx: &mut CopyCx<'_>) -> Self::Raw;
     /// The view of the payload.
     fn view_raw(raw: Self::Raw, data: &super::Dataset) -> Self::View<'_>;
+    /// Whether the payload is a text ([`PayloadField::raw_text`]).
+    const TEXT: bool = false;
+    /// A row's payload, when it is a text.
+    fn raw_text(raw: &Self::Raw) -> Option<Span> {
+        let _ = raw;
+        None
+    }
 }
 
 /// A table of leaf values of one kind: where lists of them are kept.
@@ -999,6 +1012,11 @@ impl PayloadField for Text {
 
     type Raw = Span;
     type View<'a> = TextRef<'a>;
+    const TEXT: bool = true;
+
+    fn raw_text(raw: &Span) -> Option<Span> {
+        Some(*raw)
+    }
 
     #[inline]
     fn read_raw(node: NodeRef<'_>, cx: &mut ReadCx<'_>) -> Option<Span> {
@@ -1486,6 +1504,11 @@ macro_rules! leaf_item {
 
         impl<$($gen)*> $crate::model::table::Item for $ty {
             type One = <$ty as $crate::model::driver::LeafOne>::One;
+            const TEXT: bool = <$ty as $crate::model::driver::PayloadField>::TEXT;
+
+            fn text_of(e: &Self::Elem) -> Option<$crate::model::text::Span> {
+                <$ty as $crate::model::driver::PayloadField>::raw_text(e)
+            }
 
             fn elems(t: &$crate::model::table::Tables) -> &[Self::Elem] {
                 <Self::Elem as $crate::model::driver::RawTable>::table(t)
@@ -1962,6 +1985,21 @@ pub(crate) trait RowWrite {
         tag: &'static str,
         cx: &WriteCx<'_>,
     ) -> Option<Structure>;
+    /// The fields of the type ([`Struct::FIELDS`]).
+    fn field_descs(&self) -> &'static [FieldDesc];
+    /// [`RowWrite::write_fields`], calling `after` with the index of each
+    /// field (in [`RowWrite::field_descs`]) once its structures are
+    /// written, when the field has none too.
+    fn write_fields_with<'s>(
+        &self,
+        cx: &WriteCx<'s>,
+        out: &mut Flat<'s>,
+        after: &mut dyn FnMut(usize, &mut Flat<'s>),
+    );
+    /// The texts of field `field`, when it holds texts
+    /// ([`RowSlot::texts`](super::table::RowSlot::texts)): how many it
+    /// holds, `f` called with each.
+    fn field_texts(&self, field: usize, t: &Tables, f: &mut dyn FnMut(Span)) -> Option<usize>;
 }
 
 /// Writes a row of a dataset's tables into a flat arena, its texts
@@ -1987,6 +2025,72 @@ pub(crate) fn write_row_flat<'s, R: RowWrite + ?Sized>(
     let at = out.open_typed(tag.name, tag.index, xref, payload, claim);
     s.write_fields(cx, out);
     out.close(at);
+}
+
+/// An untyped substructure written as the standard structure it stands for
+/// ([`crate::convert::Adoptions`]).
+struct Adopted {
+    /// Its index among the untyped substructures.
+    node: usize,
+    /// The field that takes it, and how many structures it holds before.
+    field: usize,
+    after: usize,
+    tag: StdTag,
+    text: Span,
+}
+
+/// The untyped substructures `nodes` of the structure `s` that `adopt`
+/// writes as the standard structures they stand for (`_UID` as `UID`):
+/// texts without identifier, substructure or `@`, which a field of `s`
+/// holding texts takes.
+fn adoptions(
+    s: &dyn RowWrite,
+    nodes: &[NodeRow],
+    adopt: &crate::convert::Adoptions,
+    cx: &WriteCx<'_>,
+) -> Vec<Adopted> {
+    let mut out: Vec<Adopted> = Vec::new();
+    for (k, n) in nodes.iter().enumerate() {
+        if n.tag == TagId::ASIDE || n.xref.is_some() || !n.children.is_empty() {
+            continue;
+        }
+        let Some(target) = adopt.target(cx.store.tag(n.tag)) else {
+            continue;
+        };
+        let Some(text) = n
+            .payload
+            .filter(|p| p.as_pointer().is_none() && !p.is_empty())
+        else {
+            continue;
+        };
+        let tag = StdTag::of(target);
+        let Some(field) = tag
+            .index
+            .and_then(|i| s.lookup().get(usize::from(i)).copied())
+            .filter(|&f| f > 0)
+            .map(|f| usize::from(f - 1))
+        else {
+            continue;
+        };
+        if !s.field_descs().get(field).is_some_and(|d| d.many && d.leaf) {
+            continue;
+        }
+        if cx.store.span_str(text).contains('@') {
+            continue;
+        }
+        let Some(held) = s.field_texts(field, cx.tables, &mut |_| {}) else {
+            continue;
+        };
+        let before = out.iter().filter(|a| a.field == field).count();
+        out.push(Adopted {
+            node: k,
+            field,
+            after: held + before,
+            tag,
+            text,
+        });
+    }
+    out
 }
 
 /// [`write_row_flat`] for a structure with untyped substructures: one
@@ -2016,9 +2120,25 @@ fn write_row_extra<'s>(
         }
     }
     let at = out.open_typed(tag.name, tag.index, xref, payload, claim);
-    s.write_fields(cx, out);
+    let adopted = cx
+        .adopt
+        .map(|a| adoptions(s, nodes, a, cx))
+        .unwrap_or_default();
+    if adopted.is_empty() {
+        s.write_fields(cx, out);
+    } else {
+        s.write_fields_with(cx, out, &mut |field, out| {
+            for a in adopted.iter().filter(|a| a.field == field) {
+                out.repeat(a.after > 0);
+                <Text as super::table::Item>::write_elem(&a.text, 0, a.tag, cx, out);
+            }
+        });
+    }
     let lookup = s.lookup();
-    for node in nodes.iter().filter(|n| n.tag != TagId::ASIDE) {
+    for (k, node) in nodes.iter().enumerate() {
+        if node.tag == TagId::ASIDE || adopted.iter().any(|a| a.node == k) {
+            continue;
+        }
         // A node a field takes is written as its type writes its values.
         let index = node.tag.get() as usize;
         let field = lookup.get(index).copied().unwrap_or(0);
@@ -2973,6 +3093,85 @@ macro_rules! gedcom_struct {
                     }
                     i += 1;
                 )*)?
+                None
+            }
+
+            fn field_descs(&self) -> &'static [$crate::model::driver::FieldDesc] {
+                <$name as $crate::model::driver::Struct>::FIELDS
+            }
+
+            #[allow(unused_variables, unused_assignments, unused_mut)]
+            fn write_fields_with<'s>(
+                &self,
+                cx: &$crate::model::driver::WriteCx<'s>,
+                out: &mut $crate::tree::Flat<'s>,
+                after: &mut dyn FnMut(usize, &mut $crate::tree::Flat<'s>),
+            ) {
+                let mut i = 0_usize;
+                $(
+                    <$fty as $crate::model::table::RowSlot>::write(
+                        &self.$field,
+                        const { $crate::model::driver::StdTag::new($tag) },
+                        cx,
+                        out,
+                    );
+                    after(i, out);
+                    i += 1;
+                )*
+                $(
+                    // An empty detail when there is none: its fields hold
+                    // nothing.
+                    let d: $drow = self
+                        .detail
+                        .and_then(|d| {
+                            <$dname as $crate::model::table::Item>::elems(cx.tables)
+                                .get(d.get() as usize)
+                                .copied()
+                        })
+                        .unwrap_or_default();
+                    $(
+                        <$gty as $crate::model::table::RowSlot>::write(
+                            &d.$gfield,
+                            const { $crate::model::driver::StdTag::new($gtag) },
+                            cx,
+                            out,
+                        );
+                        after(i, out);
+                        i += 1;
+                    )*
+                )?
+            }
+
+            #[allow(unused_variables, unused_assignments, unused_mut)]
+            fn field_texts(
+                &self,
+                field: usize,
+                t: &$crate::model::table::Tables,
+                f: &mut dyn FnMut($crate::model::text::Span),
+            ) -> Option<usize> {
+                let mut i = 0_usize;
+                $(
+                    if field == i {
+                        return <$fty as $crate::model::table::RowSlot>::texts(&self.$field, t, f);
+                    }
+                    i += 1;
+                )*
+                $(
+                    let d: $drow = self
+                        .detail
+                        .and_then(|d| {
+                            <$dname as $crate::model::table::Item>::elems(t)
+                                .get(d.get() as usize)
+                                .copied()
+                        })
+                        .unwrap_or_default();
+                    $(
+                        if field == i {
+                            return <$gty as $crate::model::table::RowSlot>::texts(&d.$gfield, t, f);
+                        }
+                        i += 1;
+                    )*
+                )?
                 None
             }
         }

@@ -227,6 +227,27 @@ enum Action {
 /// is written, so that its memory stays bounded.
 const KEEP_CONVERTED: usize = 1 << 16;
 
+/// The extension structures converting renames to standard structures
+/// holding a text (`_UID` as `UID`, [`rules::RENAMED_UP`]): the writer,
+/// converting a 5.5.1 dataset to 7.x, writes each such structure that is a
+/// text without substructure or `@` as that structure, where its parent's
+/// type has a field of texts for it, as its record is written
+/// ([`crate::model`]'s `WriteCx::adopt`): such a record is then written as
+/// it is, not converted on its own as owned structures, and its lines are
+/// those converting it writes.
+#[derive(Debug)]
+pub(crate) struct Adoptions(&'static [(&'static str, &'static str)]);
+
+impl Adoptions {
+    /// The standard tag the extension `tag` is written as.
+    pub(crate) fn target(&self, tag: &str) -> Option<&'static str> {
+        self.0.iter().find(|(t, _)| *t == tag).map(|&(_, to)| to)
+    }
+}
+
+/// [`Adoptions`] of a conversion from 5.5.1 to 7.x.
+pub(crate) static ADOPTED_UP: Adoptions = Adoptions(rules::RENAMED_UP);
+
 /// The structures of `s`, itself included.
 fn size(s: &Structure) -> usize {
     1 + s.substructures.iter().map(size).sum::<usize>()

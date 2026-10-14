@@ -546,7 +546,7 @@ impl GedcomWriter {
             report.repairs.extend(more.repairs);
             return Ok(report);
         }
-        let built = data.built(self);
+        let built = data.built_adopting(self, self.adoptions(data));
         let store = Some(data.store());
         let order = crate::model::field_order;
         if let Some(plan) = self.plan_for(data, &built, false) {
@@ -676,7 +676,7 @@ impl GedcomWriter {
         rules: crate::profile::RuleSet,
         text: Option<usize>,
     ) -> Result<Option<(LineSink<'static>, WriteReport)>, WriteError> {
-        let built = data.built(self);
+        let built = data.built_adopting(self, self.adoptions(data));
         let Some(plan) = self.plan_for(data, &built, false) else {
             return Ok(None);
         };
@@ -736,6 +736,15 @@ impl GedcomWriter {
             Some(data),
         )?;
         Ok(out)
+    }
+
+    /// What the records of `data` write as the standard structures
+    /// converting them makes of their extensions, as they write
+    /// themselves ([`crate::convert::Adoptions`]): when a 5.5.1 dataset is
+    /// written in 7.x.
+    fn adoptions(&self, data: &Dataset) -> Option<&'static crate::convert::Adoptions> {
+        let to = self.config.version?;
+        (to.is_v7() && !data.version().is_v7()).then_some(&crate::convert::ADOPTED_UP)
     }
 
     /// The conversion of `data`, whose records are `built`, to the target
@@ -809,7 +818,7 @@ impl GedcomWriter {
     /// without the interpretation a dataset's producer may still need in
     /// 7.x.
     fn write_to_string_plain(&self, data: &Dataset) -> Result<(String, WriteReport), WriteError> {
-        let built = data.built(self);
+        let built = data.built_adopting(self, self.adoptions(data));
         let size = data.store().input_len();
         let store = Some(data.store());
         let order = crate::model::field_order;
@@ -1390,6 +1399,9 @@ thread_local! {
     /// The direct writes of this thread that started again with the whole
     /// conformance pass.
     pub(crate) static RESTARTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// The records of this thread's direct writes converted on their own
+    /// as owned structures.
+    pub(crate) static ALONE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Writes a typed dataset's records (the header first, the trailer last)
@@ -1533,6 +1545,8 @@ fn place_record<'n>(
         };
         let alone = match (&place, watch) {
             (None, Some(w)) if !converted && direct.wants_converting() => {
+                #[cfg(test)]
+                ALONE.with(|n| n.set(n.get() + 1));
                 let mut s = record.to_structure(direct.c_arena());
                 w.rewrite_alone(&mut s).map(|changed| changed.then_some(s))
             }

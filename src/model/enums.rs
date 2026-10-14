@@ -1433,6 +1433,29 @@ impl<E: Enumeration> super::driver::RowWrite for PhrasedWrite<'_, E> {
     ) -> Option<Structure> {
         None
     }
+
+    fn field_descs(&self) -> &'static [super::driver::FieldDesc] {
+        &[]
+    }
+
+    fn write_fields_with<'s>(
+        &self,
+        cx: &WriteCx<'s>,
+        out: &mut Flat<'s>,
+        after: &mut dyn FnMut(usize, &mut Flat<'s>),
+    ) {
+        self.write_fields(cx, out);
+        after(0, out);
+    }
+
+    fn field_texts(
+        &self,
+        _field: usize,
+        _t: &Tables,
+        _f: &mut dyn FnMut(super::text::Span),
+    ) -> Option<usize> {
+        None
+    }
 }
 
 super::table::listed!([E: Enumeration + 'static] Phrased<E>, PhrasedRow, super::table::View<'a, Phrased<E>>);

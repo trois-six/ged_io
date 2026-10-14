@@ -1305,6 +1305,14 @@ pub(crate) trait Item: sealed::Listed {
     fn view_elem<'a>(e: &'a Self::Elem, at: u32, data: &'a Dataset) -> Self::View<'a>;
     /// The view of the occurrence.
     fn view_one(o: Self::One, data: &Dataset) -> Self::View<'_>;
+
+    /// Whether its items are texts ([`Item::text_of`]).
+    const TEXT: bool = false;
+    /// The text of item `e`, when the items are texts.
+    fn text_of(e: &Self::Elem) -> Option<Span> {
+        let _ = e;
+        None
+    }
 }
 
 /// A field of a structure, in a row: one occurrence or a list of them.
@@ -1343,6 +1351,11 @@ pub(crate) trait RowSlot: Sized {
     fn copy(s: &Self::Stored, cx: &mut CopyCx<'_>) -> Self::Stored;
     /// The view of the field.
     fn view(s: Self::Stored, data: &Dataset) -> Self::View<'_>;
+    /// When the field holds a list of texts: how many, `f` called with each.
+    fn texts(s: &Self::Stored, t: &Tables, f: &mut dyn FnMut(Span)) -> Option<usize> {
+        let _ = (s, t, f);
+        None
+    }
 }
 
 impl<T: Item + 'static> RowSlot for Option<T> {
@@ -1535,6 +1548,19 @@ macro_rules! list_slot {
             #[inline]
             fn view(s: Self::Stored, data: &Dataset) -> Self::View<'_> {
                 Items::new(data, s.of(T::elems(&data.tables)), s.start)
+            }
+
+            fn texts(s: &Self::Stored, t: &Tables, f: &mut dyn FnMut(Span)) -> Option<usize> {
+                if !T::TEXT {
+                    return None;
+                }
+                let items = s.of(T::elems(t));
+                for e in items {
+                    if let Some(text) = T::text_of(e) {
+                        f(text);
+                    }
+                }
+                Some(items.len())
             }
 
         }
