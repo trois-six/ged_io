@@ -592,3 +592,37 @@ fn read_whole(
     data.set_producer(detection.clone(), level);
     (data, interpreted)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What a record whose rules rename, retype or make events of its
+    /// substructures gives, interpreted where it is read: what the drafts of
+    /// the whole file give, report included.
+    #[test]
+    fn records_interpreted_where_read_are_as_drafts() {
+        let cases = [
+            "0 HEAD\n1 SOUR FTM\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 _MILT\n2 DATE 1850\n2 PLAC Sampletown\n1 NAME Ann /Example/\n1 _MILT\n2 DATE 1850\n2 PLAC Sampletown\n1 EVEN\n2 TYPE Military service\n2 DATE 1851\n1 _MILT\n2 DATE 1851\n1 _TODO Check\n0 @I1@ INDI\n1 _MILT Y\n0 TRLR\n",
+            "0 HEAD\n1 SOUR BROSKEEP\n1 GEDC\n2 VERS 5.5.1\n0 @I1@ INDI\n1 _INTE Field 4\n2 DATE 1900\n1 _NLIV\n1 _NMAR x\n2 NOTE kept\n1 DEAT Y\n0 @F1@ FAM\n1 _NMR\n0 TRLR\n",
+            "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @R1@ REPO\n1 NAME Sample archive\n1 _EMAIL desk(at)example.invalid\n1 PHON 555\n0 @I1@ INDI\n1 NAME Ann /Example/\n2 _AKA Annie /Example/\n1 _FUN\n2 DATE 1900\n0 TRLR\n",
+        ];
+        let in_place = || crate::model::read::IN_PLACE.with(std::cell::Cell::get);
+        for text in cases {
+            let before = in_place();
+            for report in [false, true] {
+                let mut detection = Detection::from_head(text.as_bytes());
+                let level = Interpretation::Lossless;
+                let (fast, done) =
+                    read_interpreted(text.to_string(), &mut detection, level, report);
+                let mut detection = Detection::from_head(text.as_bytes());
+                let (whole, all) = read_whole(text.to_string(), &mut detection, level, report);
+                let write =
+                    |d: &crate::Dataset| crate::GedcomWriter::new().write_to_string(d).unwrap();
+                assert_eq!(write(&fast), write(&whole), "{text}");
+                assert_eq!(done.mappings(), all.mappings(), "{text}");
+            }
+            assert!(in_place() > before, "not interpreted where read: {text}");
+        }
+    }
+}

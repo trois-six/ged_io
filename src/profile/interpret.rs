@@ -29,7 +29,10 @@ use std::hash::BuildHasherDefault;
 
 use std::borrow::Cow;
 
-use crate::tree::{standard_index, PayloadRef, Structure, Tag, TagHasher, Xref, STANDARD_TAGS};
+use crate::model::driver::NodeRef;
+use crate::tree::{
+    standard_index, Escaping, PayloadRef, Structure, Tag, TagHasher, Xref, STANDARD_TAGS,
+};
 use crate::value::DateValue;
 use crate::GedcomVersion;
 
@@ -699,9 +702,16 @@ impl RuleSet {
         tag: &str,
         path: &'a [T],
     ) -> impl Iterator<Item = Applied> + use<'a, T> {
-        self.rules_of(tag, standard_index(tag))
+        let standard = standard_index(tag);
+        // A standard tag is no long form, nor in another case.
+        let any = if standard.is_some() {
+            &self.any_standard
+        } else {
+            &self.any
+        };
+        self.rules_of(tag, standard)
             .iter()
-            .chain(&self.any)
+            .chain(any)
             .filter(move |a| Context::matches_in(self.context(a), path))
             .copied()
     }
@@ -751,7 +761,7 @@ impl RuleSet {
         if rules.is_empty() && any.is_empty() {
             return false;
         }
-        rules.iter().chain(any).any(|a| {
+        any_of(rules, any, |a| {
             let op = a.rule.op;
             // What only 7.x says, 5.5.1 leaves as it is (but a
             // `FamilySearch` identifier, which is written `_FSFTID`).
@@ -782,7 +792,7 @@ impl RuleSet {
         } else {
             &self.any
         };
-        self.rules_of(tag, standard).iter().chain(any).any(|a| {
+        any_of(self.rules_of(tag, standard), any, |a| {
             let op = a.rule.op;
             let inert = op.v7_only()
                 && !v7
@@ -817,7 +827,7 @@ impl RuleSet {
         if rules.is_empty() && any.is_empty() {
             return false;
         }
-        rules.iter().chain(any).any(|a| {
+        any_of(rules, any, |a| {
             let alts = self.context(a);
             let placed = if record {
                 Context::matches_in::<&str>(alts, &[])
@@ -865,6 +875,13 @@ impl RuleSet {
             )
         })
     }
+}
+
+/// Whether `f` holds of one of `rules`, or of `any` (the rules on any
+/// tag): two loops, which every look at a structure's rules runs.
+#[inline]
+fn any_of(rules: &[Applied], any: &[Applied], mut f: impl FnMut(&Applied) -> bool) -> bool {
+    rules.iter().any(&mut f) || any.iter().any(f)
 }
 
 /// The values (first lines) of the lines of `input` tagged `tag`, as far
@@ -952,6 +969,23 @@ impl Op {
             Op::Html => value.contains(['<', '&']),
             _ => true,
         }
+    }
+
+    /// Whether [`apply`] leaves a structure as it is, without a trace, in
+    /// 5.5.1, before it looks at anything.
+    fn skips_in_551(self) -> bool {
+        matches!(
+            self,
+            Op::V7(_)
+                | Op::Assoc(_)
+                | Op::Shared
+                | Op::Creation
+                | Op::NoEvent(_)
+                | Op::TimeIntoDate
+                | Op::FamilyWitness
+                | Op::Unmarried
+                | Op::Translation(_)
+        )
     }
 
     /// Whether the op does nothing in 5.5.1.
@@ -1145,6 +1179,125 @@ impl<'r> Interpreter<'r> {
         rewrite
     }
 
+    /// Interprets the record at `root` of the lexer's arena where it is, as
+    /// [`Interpreter::record`] would interpret it, when every rule that
+    /// applies to it renames, retypes or makes an event of a substructure
+    /// of the record ([`Op::Rename`], [`Op::Fixed`], [`Op::Event`]), or
+    /// keeps a structure as it is ([`Op::Known`]): only the substructures
+    /// a rule rewrites are copied, as drafts; the others stay where they
+    /// were read. The record's structures are looked at once, in the order
+    /// read: the rules that may change each are found then, and whether
+    /// the record is to be interpreted at all (what the reader asks before
+    /// interpreting one, `wanted`); they are applied as each structure's
+    /// own substructures are done with, as [`walk`] applies them. Nothing
+    /// is reported until [`Interpreter::commit`]. `read` tells what the
+    /// arena is.
+    pub(crate) fn record_in_arena<'a>(
+        &self,
+        root: NodeRef<'a>,
+        read: &InArena<'a, '_>,
+    ) -> InPlace<'a> {
+        let mut look = Look {
+            rules: self.rules,
+            v7: self.v7,
+            read,
+            root,
+            wanted: false,
+            emulated: true,
+            notes: Vec::new(),
+            edits: Vec::new(),
+        };
+        let nodes = root.subtree();
+        let top = nodes.first().map_or(0, |n| n.depth);
+        // The structures some rule may change, each with its depth, where
+        // its substructures end, its place among the record's
+        // substructures, and its rules (in `found`): few, found by their
+        // tags alone.
+        let mut waiting: Vec<(u8, u32, usize, NodeRef<'a>, std::ops::Range<usize>)> = Vec::new();
+        let mut found: Vec<Applied> = Vec::new();
+        let mut path: Vec<&'a str> = Vec::new();
+        for (at, raw) in nodes.iter().enumerate() {
+            let depth = raw.depth.wrapping_sub(top);
+            let bit = if depth == 0 {
+                InArena::RECORD
+            } else {
+                InArena::BELOW
+            };
+            if read
+                .tried
+                .get(raw.tag as usize)
+                .is_some_and(|t| t & bit == 0)
+            {
+                continue;
+            }
+            let Some(n) = root.below(at) else { break };
+            // Most structures a rule reads are values no rule changes (a
+            // date in no dialect): told by the rules' ops alone, wherever
+            // the structure is.
+            if !look.may_change(n, depth == 0) {
+                continue;
+            }
+            // The tags above it, and its place: by the structures before it.
+            path.clear();
+            let mut want = depth;
+            let mut ordinal = 0;
+            for above in nodes.get(..at).unwrap_or_default().iter().rev() {
+                let d = above.depth.wrapping_sub(top);
+                if d == 1 && depth == 1 {
+                    ordinal += 1;
+                }
+                if d < want {
+                    want = d;
+                    path.push(tag_of(above.tag, read.others));
+                }
+            }
+            path.reverse();
+            let from = found.len();
+            look.rules_for(n, &path, &mut found);
+            if found.len() > from {
+                waiting.push((depth, raw.end, ordinal, n, from..found.len()));
+            }
+            if !look.emulated && look.wanted {
+                break;
+            }
+        }
+        // As `walk` applies them: a structure's substructures first, then
+        // the structure; the record's substructures in order.
+        waiting.sort_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)));
+        for (depth, _, ordinal, n, rules) in waiting {
+            look.apply(depth, ordinal, n, found.get(rules).unwrap_or_default());
+        }
+        let (wanted, emulated) = (look.wanted, look.emulated);
+        InPlace {
+            wanted,
+            done: emulated.then_some(Done {
+                notes: Notes(look.notes),
+                edits: look.edits,
+            }),
+        }
+    }
+
+    /// Reports what [`Interpreter::record_in_arena`] did of a record whose
+    /// identifier is `xref` (`defined`: whether a record before it has
+    /// it).
+    pub(crate) fn commit(
+        &mut self,
+        notes: Notes,
+        xref: Option<&str>,
+        defined: &dyn Fn(&str) -> bool,
+    ) {
+        let record = xref.filter(|x| !defined(x)).map(Xref::new);
+        for (applied, tag, action, line) in notes.0 {
+            self.report
+                .note(&applied, &tag, action, line, record.as_ref());
+            if action == Action::Kept && tag.starts_with('_') {
+                let uri = registered_uri(&tag)
+                    .map_or_else(|| docs_uri(applied.profile.id, &tag), str::to_string);
+                self.declare.insert((tag, uri));
+            }
+        }
+    }
+
     /// Learns what a header says that interprets the records after it:
     /// Family Tree Maker's `_SCHEMA` labels.
     pub(crate) fn read_head(&mut self, head: &Draft<'_>) {
@@ -1189,6 +1342,327 @@ impl<'r> Interpreter<'r> {
     /// The report so far, when nothing is pending.
     pub(crate) fn into_report(self) -> InterpretReport {
         self.report
+    }
+}
+
+/// The text of the tag of id `id` in a lexer's arena whose tags that are
+/// not standard are `others`.
+fn tag_of(id: u32, others: &[Box<str>]) -> &str {
+    let id = id as usize;
+    match STANDARD_TAGS.get(id) {
+        Some(tag) => tag,
+        None => others.get(id - STANDARD_TAGS.len()).map_or("", |t| t),
+    }
+}
+
+/// What a rule did to a substructure of a record interpreted where the
+/// lexer left it ([`Interpreter::record_in_arena`]), by its place among
+/// the record's substructures as read.
+pub(crate) enum Edit<'a> {
+    /// The substructure replaced by the one the rule made, or left out
+    /// (`None`: one equal to it is there).
+    Replace(usize, Option<Box<Draft<'a>>>),
+    /// The structure the rule made, after the substructure.
+    After(usize, Box<Draft<'a>>),
+}
+
+/// A substructure of a record as rules left it so far: as read, or made.
+#[derive(Clone, Copy)]
+enum Sibling<'s, 'a> {
+    Read(NodeRef<'a>),
+    New(&'s Draft<'a>),
+}
+
+/// What [`Interpreter::record_in_arena`] needs of the lexer's arena.
+pub(crate) struct InArena<'a, 'x> {
+    /// The tags of the arena that are not standard.
+    pub(crate) others: &'a [Box<str>],
+    /// The file's escaping.
+    pub(crate) escaping: Escaping,
+    /// Whether the documented extensions kept count: reported, or declared
+    /// in 7.x.
+    pub(crate) known: bool,
+    /// By the id of a tag in the arena: whether some rule may apply to a
+    /// structure of that tag, of a record (bit [`InArena::RECORD`]) or below
+    /// one ([`InArena::BELOW`]); the others are not looked at. A tag past
+    /// it may be tried anywhere.
+    pub(crate) tried: &'x [u8],
+}
+
+impl InArena<'_, '_> {
+    /// [`InArena::tried`] of a record.
+    pub(crate) const RECORD: u8 = 4;
+    /// [`InArena::tried`] below a record.
+    pub(crate) const BELOW: u8 = 8;
+}
+
+/// What interpreting a record where it was read found
+/// ([`Interpreter::record_in_arena`]).
+pub(crate) struct InPlace<'a> {
+    /// Whether a rule may change a structure of the record, as the reader
+    /// asks before interpreting it (`Pass::wants`).
+    pub(crate) wanted: bool,
+    /// What the rules did, when only those it interprets so applied.
+    pub(crate) done: Option<Done<'a>>,
+}
+
+/// The rules' work on a record interpreted where it was read: what to
+/// report ([`Interpreter::commit`]), and what changed of its
+/// substructures, in their order.
+pub(crate) struct Done<'a> {
+    pub(crate) notes: Notes,
+    pub(crate) edits: Vec<Edit<'a>>,
+}
+
+/// What the rules did to the structures of a record, to report.
+pub(crate) struct Notes(Vec<Note>);
+
+/// What a rule did to a structure: the rule, the tag, the action and the
+/// line.
+type Note = (Applied, Box<str>, Action, u32);
+
+/// The interpretation of a record where the lexer left it
+/// ([`Interpreter::record_in_arena`]).
+struct Look<'r, 'a, 'x> {
+    rules: &'r RuleSet,
+    v7: bool,
+    read: &'x InArena<'a, 'x>,
+    root: NodeRef<'a>,
+    /// Whether a rule may change a structure ([`InPlace::wanted`]).
+    wanted: bool,
+    /// Whether the rules that applied so far are those interpreted so.
+    emulated: bool,
+    notes: Vec<Note>,
+    /// What the rules changed of the record's substructures, in their
+    /// order.
+    edits: Vec<Edit<'a>>,
+}
+
+impl<'a> Look<'_, 'a, '_> {
+    /// Whether a rule on the tag of `n` (a record when `record`) may change
+    /// it, wherever it is: [`Op::may_apply_to_parts`] of each, its context
+    /// aside.
+    fn may_change(&self, n: NodeRef<'a>, record: bool) -> bool {
+        let rules = self.rules;
+        let tag = n.tag_text(self.read.others);
+        let standard = n
+            .standard_tag()
+            .and_then(|_| u16::try_from(n.tag_id()).ok());
+        let any = if standard.is_some() {
+            &rules.any_standard
+        } else {
+            &rules.any
+        };
+        let mut text = None;
+        any_of(rules.rules_of(tag, standard), any, |a| {
+            let text = text.get_or_insert_with(|| n.payload_str(self.read.escaping));
+            let payload = if n.is_pointer() {
+                PayloadRef::Pointer(text)
+            } else if n.has_no_payload() {
+                PayloadRef::None
+            } else {
+                PayloadRef::Text(text)
+            };
+            a.rule
+                .op
+                .may_apply_to_parts(tag, payload, n.has_xref(), record, self.v7)
+        })
+    }
+
+    /// The rules for `n` under `path` that may change it, added to `found`
+    /// in the order they are tried; notes whether the record is wanted, as
+    /// [`RuleSet::may_rewrite`] finds it.
+    fn rules_for(&mut self, n: NodeRef<'a>, path: &[&str], found: &mut Vec<Applied>) {
+        let rules = self.rules;
+        let tag = n.tag_text(self.read.others);
+        let mut text = None;
+        for a in rules.candidates(tag, path) {
+            let text = text.get_or_insert_with(|| n.payload_str(self.read.escaping));
+            let payload = if n.is_pointer() {
+                PayloadRef::Pointer(text)
+            } else if n.has_no_payload() {
+                PayloadRef::None
+            } else {
+                PayloadRef::Text(text)
+            };
+            let op = a.rule.op;
+            if !op.may_apply_to_parts(tag, payload, n.has_xref(), path.is_empty(), self.v7) {
+                continue;
+            }
+            let inert = op.v7_only()
+                && !self.v7
+                && !matches!(op, Op::Exid { uri, .. } if uri == super::FAMILYSEARCH_PERSON);
+            self.wanted |= !inert && (self.read.known || !matches!(op, Op::Known));
+            found.push(a);
+        }
+    }
+
+    /// Applies `rules`, those that may change `n` (`depth` deep, substructure
+    /// `k` of the record as read when one deep), as [`walk`] tries them:
+    /// the first that applies wins. A structure below the record's
+    /// substructures, or the record itself, may only be kept as it is.
+    fn apply(&mut self, depth: u8, k: usize, n: NodeRef<'a>, rules: &[Applied]) {
+        if !self.emulated {
+            return;
+        }
+        let line = n.line();
+        let tag = n.tag_text(self.read.others);
+        let mut text = None;
+        for &a in rules {
+            if !self.v7 && a.rule.op.skips_in_551() {
+                continue;
+            }
+            if depth != 1 {
+                if matches!(a.rule.op, Op::Known) {
+                    self.notes.push((a, tag.into(), Action::Kept, line));
+                } else {
+                    self.emulated = false;
+                }
+                return;
+            }
+            let (others, escaping) = (self.read.others, self.read.escaping);
+            let read = || Draft::of_arena(n, others, escaping);
+            let new = match a.rule.op {
+                Op::Known => {
+                    self.notes.push((a, tag.into(), Action::Kept, line));
+                    return;
+                }
+                Op::Rename(to) => {
+                    let text = text.get_or_insert_with(|| n.payload_str(escaping));
+                    if !renames(to, text, self.v7) {
+                        continue;
+                    }
+                    let mut new = read();
+                    retag(&mut new, to);
+                    new
+                }
+                Op::Fixed(to, value) => {
+                    let mut new = read();
+                    retag(&mut new, to);
+                    set_text(&mut new, value);
+                    new.substructures.clear();
+                    new
+                }
+                Op::Event { tag: to, label, y } if label != Label::Schema => {
+                    let node = read();
+                    let ty = label_of(&node, label);
+                    event_of(node, to, ty.as_deref(), label == Label::Payload, y)
+                }
+                _ => {
+                    self.emulated = false;
+                    return;
+                }
+            };
+            if self.place(n, k, new, a) {
+                return;
+            }
+            // An equal one is there already: no trace, the next rule.
+        }
+    }
+
+    /// The record's substructures as the rules left them so far, each
+    /// with its place among those read (a structure made, that of the one
+    /// it replaces or follows).
+    fn siblings(&self, mut f: impl FnMut(usize, Sibling<'_, 'a>)) {
+        let mut edits = self.edits.iter().peekable();
+        for (k, c) in self.root.children().enumerate() {
+            let mut kept = true;
+            while let Some(e) = edits.next_if(|e| match e {
+                Edit::Replace(at, _) | Edit::After(at, _) => *at == k,
+            }) {
+                match e {
+                    Edit::Replace(_, new) => {
+                        kept = false;
+                        if let Some(d) = new {
+                            f(k, Sibling::New(d));
+                        }
+                    }
+                    Edit::After(_, d) => {
+                        if kept {
+                            f(k, Sibling::Read(c));
+                            kept = false;
+                        }
+                        f(k, Sibling::New(d));
+                    }
+                }
+            }
+            if kept {
+                f(k, Sibling::Read(c));
+            }
+        }
+    }
+
+    /// [`place`] of `new`, made of `n`, the record's substructure `k` as
+    /// read: whether a rule applied (`false`: `new` adds nothing and leaves
+    /// no trace).
+    fn place(&mut self, n: NodeRef<'a>, k: usize, new: Draft<'a>, a: Applied) -> bool {
+        let read = self.read;
+        let want = new.tag.as_str().trim_start_matches('_').to_string();
+        // Whether a sibling `c` holds `new` (`said`: as `holds` finds,
+        // else equal).
+        let like = |c: Sibling<'_, 'a>, said: bool| -> bool {
+            let tag = match c {
+                Sibling::Read(r) => r.tag_text(read.others),
+                Sibling::New(d) => d.tag.as_str(),
+            };
+            let fits = if said {
+                tag.trim_start_matches('_') == want
+            } else {
+                tag == new.tag.as_str()
+            };
+            if !fits {
+                return false;
+            }
+            let read_draft;
+            let d = match c {
+                Sibling::Read(r) => {
+                    read_draft = Draft::of_arena(r, read.others, read.escaping);
+                    &read_draft
+                }
+                Sibling::New(d) => d,
+            };
+            if said {
+                holds(std::iter::once(d), &new)
+            } else {
+                *d == new
+            }
+        };
+        let lossless = a.rule.fidelity == Fidelity::Lossless;
+        let mut said = false;
+        let mut equal = false;
+        self.siblings(|j, c| {
+            let other = j != k || matches!(c, Sibling::New(_));
+            if lossless && other {
+                said = said || like(c, true);
+            }
+            // (Lossless, the substructure itself is left out first.)
+            if !lossless || other {
+                equal = equal || like(c, false);
+            }
+        });
+        let tag = n.tag_text(read.others);
+        if lossless {
+            // Said already: what was read stays.
+            if said {
+                return true;
+            }
+            let at = self.edits.partition_point(
+                |e| matches!(e, Edit::Replace(j, _) | Edit::After(j, _) if *j < k),
+            );
+            self.edits
+                .insert(at, Edit::Replace(k, (!equal).then(|| Box::new(new))));
+            self.notes.push((a, tag.into(), Action::Replaced, n.line()));
+            return true;
+        }
+        if equal {
+            return false;
+        }
+        let at = self
+            .edits
+            .partition_point(|e| matches!(e, Edit::Replace(j, _) | Edit::After(j, _) if *j < k));
+        self.edits.insert(at, Edit::After(k, Box::new(new)));
+        self.notes.push((a, tag.into(), Action::Added, n.line()));
+        true
     }
 }
 
@@ -1543,6 +2017,69 @@ fn noted<'s>(parent: &Draft<'s>, i: usize, applied: Applied, cx: &mut Cx<'_, 's>
     }
 }
 
+/// Whether an [`Op::Rename`] rule renames a structure to `to`, with
+/// `payload`: a sex the version has no value for (5.5.1 `_SEX X`) stays an
+/// extension, which the writer would make it again.
+fn renames(to: &str, payload: &str, v7: bool) -> bool {
+    let version = if v7 {
+        GedcomVersion::V7_0
+    } else {
+        GedcomVersion::V5_5_1
+    };
+    to != "SEX"
+        || <crate::model::Sex as crate::model::Enumeration>::known(payload, Some(version)).is_some()
+}
+
+/// The type label an [`Op::Event`] rule gives the event it makes of
+/// `node`, but from the header's schema ([`Label::Schema`]).
+fn label_of(node: &Draft<'_>, label: Label) -> Option<String> {
+    match label {
+        Label::None | Label::Schema => None,
+        Label::Text(t) => Some(t.to_string()),
+        Label::Payload => {
+            let t = payload_str(node).trim();
+            (!t.is_empty()).then(|| t.to_string())
+        }
+    }
+}
+
+/// The event or attribute `tag` an [`Op::Event`] rule makes of `node`,
+/// with the type label `ty` (its payload left out when it is the label,
+/// `payload`), said `Y` when `y` and nothing more is said.
+fn event_of<'s>(
+    mut new: Draft<'s>,
+    tag: &'static str,
+    ty: Option<&str>,
+    payload: bool,
+    y: bool,
+) -> Draft<'s> {
+    retag(&mut new, tag);
+    if payload {
+        new.payload = Value::None;
+    }
+    if let Some(ty) = ty {
+        if !has(&new, "TYPE") {
+            new.substructures.insert(0, text_node("TYPE", ty));
+        }
+    }
+    // A standard event says `Y` or nothing: a text goes to a note.
+    if !matches!(tag, "EVEN" | "FACT") {
+        if let Some(t) = new.text().map(str::to_string) {
+            if !t.eq_ignore_ascii_case("y") {
+                new.payload = Value::None;
+                new.substructures.push(text_node("NOTE", &t));
+            }
+        }
+    }
+    if tag == "FACT" && new.text().is_none() {
+        retag(&mut new, "EVEN");
+    }
+    if y && matches!(new.payload, Value::None) && new.substructures.is_empty() {
+        set_text(&mut new, "Y");
+    }
+    new
+}
+
 #[allow(clippy::too_many_lines)]
 fn apply<'s>(
     applied: Applied,
@@ -1567,20 +2104,7 @@ fn apply<'s>(
     match applied.rule.op {
         Op::Known => kept(parent, i, applied, cx),
         Op::Rename(to) => {
-            // A sex the version has no value for (5.5.1 `_SEX X`) stays an
-            // extension: the writer would make it one again.
-            let version = if v7 {
-                GedcomVersion::V7_0
-            } else {
-                GedcomVersion::V5_5_1
-            };
-            if to == "SEX"
-                && <crate::model::Sex as crate::model::Enumeration>::known(
-                    payload_str(&node),
-                    Some(version),
-                )
-                .is_none()
-            {
+            if !renames(to, payload_str(&node), v7) {
                 return Outcome::skip();
             }
             edit(parent, i, applied, cx, |s| {
@@ -1595,47 +2119,22 @@ fn apply<'s>(
             true
         }),
         Op::Event { tag, label, y } => {
-            let mut new = node.clone();
-            retag(&mut new, tag);
             let ty = match label {
-                Label::None => None,
-                Label::Text(t) => Some(t.to_string()),
-                Label::Payload => {
-                    let t = payload_str(&node).trim().to_string();
-                    new.payload = Value::None;
-                    (!t.is_empty()).then_some(t)
-                }
                 Label::Schema => {
                     let record = path.first().map_or("", DraftTag::as_str);
-                    cx.schema
+                    let found = cx
+                        .schema
                         .iter()
                         .find(|(r, t, _)| r == record && t == node.tag.as_str())
-                        .map(|(_, _, l)| l.clone())
-                }
-            };
-            if label == Label::Schema && ty.is_none() {
-                return Outcome::skip();
-            }
-            if let Some(ty) = ty {
-                if !has(&new, "TYPE") {
-                    new.substructures.insert(0, text_node("TYPE", &ty));
-                }
-            }
-            // A standard event says `Y` or nothing: a text goes to a note.
-            if !matches!(tag, "EVEN" | "FACT") {
-                if let Some(t) = new.text().map(str::to_string) {
-                    if !t.eq_ignore_ascii_case("y") {
-                        new.payload = Value::None;
-                        new.substructures.push(text_node("NOTE", &t));
+                        .map(|(_, _, l)| l.clone());
+                    if found.is_none() {
+                        return Outcome::skip();
                     }
+                    found
                 }
-            }
-            if tag == "FACT" && new.text().is_none() {
-                retag(&mut new, "EVEN");
-            }
-            if y && matches!(new.payload, Value::None) && new.substructures.is_empty() {
-                set_text(&mut new, "Y");
-            }
+                label => label_of(&node, label),
+            };
+            let new = event_of(node, tag, ty.as_deref(), label == Label::Payload, y);
             place(parent, i, vec![new], applied, cx)
         }
         Op::Name(kind, value) => name(parent, i, applied, path, cx, kind, value),

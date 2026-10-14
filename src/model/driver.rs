@@ -58,6 +58,12 @@ pub(crate) struct Arena<'a> {
     pub xrefs: &'a [(u32, RawSpan)],
     /// The store's input, which spans flagged [`Arena::INPUT`] are of.
     pub input: &'a str,
+    /// Texts written beside the input for the record (by rules that
+    /// rewrite it as it is read), which the store appends at `side_base`
+    /// in its text: what spans flagged [`Arena::INPUT`] past the input's
+    /// end are of.
+    pub side: &'a str,
+    pub side_base: usize,
 }
 
 impl<'a> Arena<'a> {
@@ -66,17 +72,27 @@ impl<'a> Arena<'a> {
     /// is read: [`crate::model::read`]), instead of a span of `text`.
     pub(crate) const INPUT: u32 = 1 << 31;
 
+    /// The characters at `start` (an offset in the store's text, of its
+    /// input or of the side texts past it), `len` long.
+    #[inline]
+    fn flagged(&self, start: usize, len: usize) -> &'a str {
+        let (text, start) = if start < self.input.len() {
+            (self.input, start)
+        } else {
+            (self.side, start.wrapping_sub(self.side_base))
+        };
+        text.get(start..start.saturating_add(len))
+            .unwrap_or_default()
+    }
+
     /// The characters of `span`: of `text`, or of `input` (the store's
-    /// input) when flagged [`Arena::INPUT`].
+    /// input, or its side texts past it) when flagged [`Arena::INPUT`].
     #[inline]
     pub(crate) fn get(&self, span: RawSpan) -> &'a str {
         if span.start & Self::INPUT == 0 {
             span.get(self.text)
         } else {
-            let start = (span.start & !Self::INPUT) as usize;
-            self.input
-                .get(start..start + span.len as usize)
-                .unwrap_or_default()
+            self.flagged((span.start & !Self::INPUT) as usize, span.len as usize)
         }
     }
 
@@ -84,14 +100,17 @@ impl<'a> Arena<'a> {
     /// `input` when flagged [`Arena::INPUT`].
     #[inline]
     pub(crate) fn piece(&self, piece: TextPiece) -> &'a str {
-        let (text, start) = if piece.start() & Self::INPUT == 0 {
-            (self.text, piece.start())
+        if piece.start() & Self::INPUT == 0 {
+            let start = piece.start() as usize;
+            self.text
+                .get(start..start + piece.len() as usize)
+                .unwrap_or_default()
         } else {
-            (self.input, piece.start() & !Self::INPUT)
-        };
-        let start = start as usize;
-        text.get(start..start + piece.len() as usize)
-            .unwrap_or_default()
+            self.flagged(
+                (piece.start() & !Self::INPUT) as usize,
+                piece.len() as usize,
+            )
+        }
     }
 
     /// Where `span` starts in the store's text.
@@ -201,6 +220,23 @@ impl<'a> NodeRef<'a> {
             next: self.index + 1,
             end: raw.end,
         }
+    }
+
+    /// The node and every structure below it, in the order read, as the
+    /// lexer left them: `subtree()[k]` is [`NodeRef::below`]`(k)`.
+    pub(crate) fn subtree(self) -> &'a [RawNode] {
+        self.arena
+            .nodes
+            .get(self.index as usize..self.raw.end as usize)
+            .unwrap_or_default()
+    }
+
+    /// The structure `k` places after this one in [`NodeRef::subtree`].
+    pub(crate) fn below(self, k: usize) -> Option<NodeRef<'a>> {
+        let index = self.index.checked_add(u32::try_from(k).ok()?)?;
+        (index < self.raw.end)
+            .then(|| NodeRef::at(self.arena, index))
+            .flatten()
     }
 
     /// The tag's text: a standard tag's, else one of `others` (the tags of

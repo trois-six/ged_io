@@ -726,7 +726,7 @@ impl Builder {
         &mut self,
         text: &str,
         tags: &mut TagInterner,
-        mut record: impl FnMut(&Self, &mut TagInterner),
+        mut record: impl FnMut(&mut Self, &mut TagInterner),
     ) {
         let mut lines = Lines::new(text);
         while let Some((start, end)) = lines.next() {

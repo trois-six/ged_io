@@ -7,11 +7,11 @@
 //! through [`dispatch_record`], the one place that knows which type a
 //! level-0 tag stands for, into the tables of a dataset.
 
-use std::collections::HashMap;
-
 use crate::profile::draft::Draft;
 use crate::profile::draft::Value;
-use crate::profile::interpret::{InterpretReport, Interpreter, Rewrite, RuleSet, PLACEHOLDER};
+use crate::profile::interpret::{
+    Edit, InArena, InterpretReport, Interpreter, Rewrite, RuleSet, PLACEHOLDER,
+};
 use crate::tree::{
     head_version, segment_bounds, Builder, Escaping, PayloadRef, RawKind, RawSpan, TagInterner,
     TextPiece,
@@ -31,6 +31,12 @@ use super::text::{Store, XrefId};
 /// The largest text one pass of the lexer indexes: offsets are 32-bit, and
 /// a piece's length takes 31 bits.
 const SEGMENT_LIMIT: usize = (u32::MAX / 2) as usize;
+
+#[cfg(test)]
+thread_local! {
+    /// The records of this thread that rules changed where they were read.
+    pub(crate) static IN_PLACE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// What [`dispatch_record`] tells of the records it types into the
 /// tables.
@@ -181,6 +187,8 @@ pub(crate) fn read_segmented(text: String, limit: usize) -> Dataset {
                     nodes: &b.nodes,
                     xrefs: &b.xrefs,
                     input,
+                    side: "",
+                    side_base: 0,
                 };
                 if let Some(root) = NodeRef::root(&arena) {
                     dispatch_record(root, &mut cx, &mut sink);
@@ -219,9 +227,9 @@ struct Located {
 /// changes that span records, once every record is read.
 #[derive(Default)]
 struct Kept {
-    /// By identifier: the first record with it, when some rule changes
-    /// other records than the one it reads.
-    first: Option<HashMap<XrefId, Located>>,
+    /// By identifier (the index of its id): the first record with it, when
+    /// some rule changes other records than the one it reads.
+    first: Option<Vec<Option<Located>>>,
     /// The records that link to records interpretation adds.
     holders: Vec<Located>,
     /// The records read so far.
@@ -238,7 +246,12 @@ impl Kept {
                 seq: self.seq,
             };
             if let (Some(first), Some(id)) = (&mut self.first, xref) {
-                first.entry(id).or_insert(located);
+                if first.len() <= id.index() {
+                    first.resize(id.index() + 1, None);
+                }
+                if let Some(slot @ None) = first.get_mut(id.index()) {
+                    *slot = Some(located);
+                }
             }
             if holder {
                 self.holders.push(located);
@@ -287,6 +300,10 @@ struct Arenas {
     nodes: Vec<crate::tree::RawNode>,
     xrefs: Vec<(u32, RawSpan)>,
     joined: Vec<TextPiece>,
+    /// Where the text the drafts' texts are appended to starts in the
+    /// store's text, when their spans are to say so ([`Arena::INPUT`] past
+    /// the input: [`Arena::side`]) rather than be spans of that text.
+    side: Option<u32>,
 }
 
 /// Whether `text` is the text of the `pieces` of the text that starts at
@@ -334,6 +351,179 @@ fn simple(d: &Draft<'_>, depth: u8) -> bool {
         && d.substructures.iter().all(|c| simple(c, depth + 1))
 }
 
+/// [`simple`] of the record at `root` of the lexer's arena, as read: what
+/// its draft would be, found node after node.
+fn simple_read(root: NodeRef<'_>, others: &[Box<str>]) -> bool {
+    const CONT: u32 = const { std_id("CONT") };
+    const CONC: u32 = const { std_id("CONC") };
+    let standard = crate::tree::STANDARD_TAGS.len();
+    let top = root.subtree().first().map_or(0, |n| n.depth);
+    // (The lexer reads as pointers what `simple` takes for pointers, and
+    // identifiers without blanks.)
+    root.subtree().iter().all(|raw| {
+        // (Standard tags are words of capitals and digits.)
+        let tag_ok = match (raw.tag as usize).checked_sub(standard) {
+            None => raw.tag != CONT && raw.tag != CONC,
+            Some(other) => others
+                .get(other)
+                .is_some_and(|t| !t.is_empty() && !t.bytes().any(|b| b <= b' ' || b == b'@')),
+        };
+        tag_ok && raw.depth.wrapping_sub(top) < crate::tree::MAX_DEPTH - 1
+    })
+}
+
+/// The structures rules made of a record's substructures, each ready to go
+/// where it goes ([`splice`]): their nodes, identifiers and joined pieces
+/// as [`push_arena`] fills them, one after the other; and the tags they
+/// use that the arena's interner does not have yet, in the order to intern
+/// them. Kept from record to record.
+#[derive(Default)]
+struct Splices {
+    made: Arenas,
+    items: Vec<Splice>,
+    tags: Vec<String>,
+}
+
+/// A structure made of a record's substructure `at` (as read), replacing
+/// it or after it: its nodes and identifiers in [`Splices::made`].
+struct Splice {
+    at: usize,
+    replace: bool,
+    nodes: std::ops::Range<usize>,
+    xrefs: std::ops::Range<usize>,
+}
+
+impl Splices {
+    fn clear(&mut self) {
+        self.made.nodes.clear();
+        self.made.xrefs.clear();
+        self.made.joined.clear();
+        self.items.clear();
+        self.tags.clear();
+    }
+}
+
+/// Fills `s` with the structures `edits` makes, each where it goes among
+/// the record's substructures, their texts appended to `written`, which
+/// starts at `side` in the store's text: `false` when one is not
+/// [`simple`].
+fn make_splices(
+    edits: &[Edit<'_>],
+    input: &str,
+    written: &mut String,
+    tags: &TagInterner,
+    side: usize,
+    s: &mut Splices,
+) -> bool {
+    s.clear();
+    s.made.side = u32::try_from(side).ok();
+    for e in edits {
+        let (at, replace, new) = match e {
+            Edit::Replace(at, new) => (*at, true, new.as_deref()),
+            Edit::After(at, new) => (*at, false, Some(&**new)),
+        };
+        let (nodes, xrefs) = (s.made.nodes.len(), s.made.xrefs.len());
+        if let Some(d) = new {
+            if !simple(d, 1) {
+                return false;
+            }
+            push_arena(d, 1, input, written, &mut s.made, tags, &mut s.tags);
+        }
+        s.items.push(Splice {
+            at,
+            replace,
+            nodes: nodes..s.made.nodes.len(),
+            xrefs: xrefs..s.made.xrefs.len(),
+        });
+    }
+    true
+}
+
+/// Where the record's substructure `at` lies in the arena `nodes`.
+fn child_range(nodes: &[crate::tree::RawNode], at: usize) -> Option<(usize, usize)> {
+    let root_end = nodes.first()?.end as usize;
+    let mut k = 1;
+    let mut ordinal = 0;
+    while k < root_end {
+        let end = nodes.get(k).map_or(root_end, |n| n.end as usize);
+        if ordinal == at {
+            return Some((k, end));
+        }
+        ordinal += 1;
+        k = end.max(k + 1);
+    }
+    None
+}
+
+/// Puts the structures of `s` where they go in the record the lexer left
+/// in `b`: the arena then holds the record as the rules made it, and is
+/// typed as any record read.
+fn splice(b: &mut Builder, s: &Splices) {
+    let joined = u32::try_from(b.joined.len()).unwrap_or(u32::MAX);
+    b.joined.extend_from_slice(&s.made.joined);
+    // The last first: the places of those before stay.
+    for sp in s.items.iter().rev() {
+        let Some((start, end)) = child_range(&b.nodes, sp.at) else {
+            continue;
+        };
+        let (from, to) = if sp.replace { (start, end) } else { (end, end) };
+        let made = s.made.nodes.get(sp.nodes.clone()).unwrap_or_default();
+        let len = made.len();
+        let first = u32::try_from(sp.nodes.start).unwrap_or(0);
+        let at = u32::try_from(from).unwrap_or(u32::MAX);
+        let shift = |i: u32| -> u32 {
+            let i = i as usize;
+            let moved = if i >= to { i - (to - from) + len } else { i };
+            u32::try_from(moved).unwrap_or(u32::MAX)
+        };
+        b.nodes.splice(
+            from..to,
+            made.iter().map(|&n| {
+                let mut n = n;
+                n.end = n.end - first + at;
+                if n.kind == RawKind::Joined {
+                    n.payload.start += joined;
+                }
+                n
+            }),
+        );
+        for n in b.nodes.iter_mut().skip(from + len) {
+            n.end = shift(n.end);
+        }
+        if let Some(r) = b.nodes.first_mut() {
+            r.end = shift(r.end);
+        }
+        // The identifiers, by node: those of what goes, out; those after,
+        // moved; those made, in.
+        let (lo, hi) = (
+            u32::try_from(from).unwrap_or(u32::MAX),
+            u32::try_from(to).unwrap_or(u32::MAX),
+        );
+        if b.xrefs.iter().any(|&(i, _)| i >= lo && i < hi) {
+            b.xrefs.retain(|&(i, _)| i < lo || i >= hi);
+        }
+        for x in &mut b.xrefs {
+            if x.0 >= hi {
+                x.0 = shift(x.0);
+            }
+        }
+        let new = s.made.xrefs.get(sp.xrefs.clone()).unwrap_or_default();
+        if !new.is_empty() {
+            let place = b.xrefs.partition_point(|&(i, _)| i < lo);
+            b.xrefs
+                .splice(place..place, new.iter().map(|&(i, x)| (i - first + at, x)));
+        }
+    }
+}
+
+/// The id a standard tag has in the lexer's arena.
+const fn std_id(tag: &str) -> u32 {
+    match crate::tree::standard_index_const(tag) {
+        Some(i) => i as u32,
+        None => u32::MAX,
+    }
+}
+
 /// Fills `arenas` with the arena lexing the GEDCOM lines of `draft` (one
 /// that is [`simple`]) would give, its texts appended to `text` (spans
 /// relative to it): no line is written and read again. The tags `tags`
@@ -354,6 +544,7 @@ fn arena_of(
     arenas.nodes.clear();
     arenas.xrefs.clear();
     arenas.joined.clear();
+    arenas.side = None;
     push_arena(draft, 0, input, text, arenas, tags, new);
 }
 
@@ -367,6 +558,7 @@ fn push_arena(
     new: &mut Vec<String>,
 ) {
     let tag = d.tag.as_str();
+    let side = arenas.side;
     let span = |s: &str, text: &mut String| {
         let len = u32::try_from(s.len()).unwrap_or(0);
         let from = input.as_ptr() as usize;
@@ -381,10 +573,13 @@ fn push_arena(
                 }
             }
         }
-        let at = text.len();
+        let at = u32::try_from(text.len()).unwrap_or(u32::MAX);
         text.push_str(s);
         RawSpan {
-            start: u32::try_from(at).unwrap_or(u32::MAX),
+            start: match side {
+                Some(base) => base.saturating_add(at) | Arena::INPUT,
+                None => at,
+            },
             len,
         }
     };
@@ -482,7 +677,7 @@ pub(crate) fn read_interpreting(
     let rules = interp.rules();
     let mut pass = Pass {
         kept: Kept {
-            first: rules.spans_records().then(HashMap::new),
+            first: rules.spans_records().then(Vec::new),
             ..Kept::default()
         },
         interp,
@@ -503,6 +698,7 @@ pub(crate) fn read_interpreting(
         clash: None,
         again: Builder::new(escaping, 1).with_spans(),
         arenas: Arenas::default(),
+        splices: Splices::default(),
         written: String::new(),
         placed: Vec::new(),
     };
@@ -522,15 +718,7 @@ pub(crate) fn read_interpreting(
             let part = input.get(start..end).unwrap_or_default();
             builder.reset(first_line);
             builder.read_records(part, &mut tags, |b, tags| {
-                let arena = Arena {
-                    text: part,
-                    base: start,
-                    joined: &b.joined,
-                    nodes: &b.nodes,
-                    xrefs: &b.xrefs,
-                    input,
-                };
-                pass.record(&arena, input, tags, &mut cx, &mut sink);
+                pass.record(b, part, start, input, tags, &mut cx, &mut sink);
             });
         }
     }
@@ -605,17 +793,23 @@ struct Pass<'p, 'r> {
     /// What reads the lines of what only lines say.
     again: Builder,
     arenas: Arenas,
+    /// What the rules made of the record interpreted where it was read.
+    splices: Splices,
     /// The texts of the record rewritten last.
     written: String,
     placed: Vec<(Placed, Option<XrefId>)>,
 }
 
 impl Pass<'_, '_> {
-    /// Reads the record of `arena`, of the text `input`: interpreted when
-    /// a rule may change it, typed into the tables either way.
+    /// Reads the record the lexer left in `b` (of `part`, which starts at
+    /// `base` in the store's input `input`): interpreted when a rule may
+    /// change it, typed into the tables either way.
+    #[allow(clippy::too_many_arguments)] // The lexer's arena and where it is.
     fn record(
         &mut self,
-        arena: &Arena<'_>,
+        b: &mut Builder,
+        part: &str,
+        base: usize,
         input: &str,
         tags: &mut TagInterner,
         cx: &mut ReadCx<'_>,
@@ -624,17 +818,131 @@ impl Pass<'_, '_> {
         if self.gave_up {
             return;
         }
-        self.fingerprints(arena, tags);
-        let Some(root) = NodeRef::root(arena) else {
-            return;
+        // Most rewrites change a substructure of the record or two: the
+        // record is interpreted where it was read, and what changed made
+        // where it stands (offsets past 31 bits aside), its structures
+        // looked at once.
+        let fast = self.input_len + self.side.len() < Arena::INPUT as usize / 2;
+        let splices = {
+            let arena = Arena {
+                text: part,
+                base,
+                joined: &b.joined,
+                nodes: &b.nodes,
+                xrefs: &b.xrefs,
+                input,
+                side: "",
+                side_base: 0,
+            };
+            self.fingerprints(&arena, tags);
+            let Some(root) = NodeRef::root(&arena) else {
+                return;
+            };
+            let head = self.look.schema && root.standard_tag() == Some("HEAD");
+            if !fast || head {
+                self.record_drafts(&arena, root, head, None, input, tags, cx, sink);
+                return;
+            }
+            if !self.wants(&arena, tags) {
+                self.place(root, cx, sink, false);
+                return;
+            }
+            let in_place = self.interp.record_in_arena(
+                root,
+                &InArena {
+                    others: &tags.others,
+                    escaping: self.escaping,
+                    known: self.look.known,
+                    tried: &self.read,
+                },
+            );
+            if !in_place.wanted {
+                self.place(root, cx, sink, false);
+                return;
+            }
+            let Some(done) = in_place.done else {
+                self.record_drafts(&arena, root, false, Some(true), input, tags, cx, sink);
+                return;
+            };
+            // What the rules made, ready to take the place of what it
+            // replaces, its texts in `written` (after the side's).
+            let mut written = std::mem::take(&mut self.written);
+            written.clear();
+            let side = self.input_len + self.side.len();
+            let mut splices = std::mem::take(&mut self.splices);
+            let fits = (done.edits.is_empty()
+                || simple_read(root, &tags.others)
+                    && make_splices(&done.edits, input, &mut written, tags, side, &mut splices))
+                && side + written.len() < Arena::INPUT as usize;
+            self.written = written;
+            if !fits {
+                self.splices = splices;
+                self.record_drafts(&arena, root, false, Some(true), input, tags, cx, sink);
+                return;
+            }
+            let index = &*sink.index;
+            let defined = |x: &str| cx.find_xref(x).is_some_and(|id| index.is_defined(id));
+            self.interp.commit(done.notes, root.xref_text(), &defined);
+            if done.edits.is_empty() {
+                self.splices = splices;
+                self.place(root, cx, sink, false);
+                return;
+            }
+            splices
         };
-        let head = self.look.schema && root.standard_tag() == Some("HEAD");
-        let escaping = self.escaping;
-        let wanted = self.wants(arena, tags);
-        if !(wanted || head) {
-            self.place(root, cx, sink, false);
-            return;
+        #[cfg(test)]
+        IN_PLACE.with(|n| n.set(n.get() + 1));
+        splice(b, &splices);
+        for tag in &splices.tags {
+            tags.intern(tag);
         }
+        self.splices = splices;
+        let written = std::mem::take(&mut self.written);
+        let side = self.input_len + self.side.len();
+        let arena = Arena {
+            text: part,
+            base,
+            joined: &b.joined,
+            nodes: &b.nodes,
+            xrefs: &b.xrefs,
+            input,
+            side: &written,
+            side_base: side,
+        };
+        if let Some(root) = NodeRef::root(&arena) {
+            self.place(root, &mut cx.with_text(&written, side), sink, false);
+        }
+        self.side.push_str(&written);
+        self.written = written;
+    }
+
+    /// Interprets the record at `root` of `arena` as drafts, then types it
+    /// ([`Interpreter::record`]). `head`: it is the header, whose schema
+    /// labels interpret the records after it. `wanted`: whether a rule may
+    /// change it, when known.
+    #[allow(clippy::too_many_arguments)] // The record, where it is, and how.
+    fn record_drafts(
+        &mut self,
+        arena: &Arena<'_>,
+        root: NodeRef<'_>,
+        head: bool,
+        wanted: Option<bool>,
+        input: &str,
+        tags: &mut TagInterner,
+        cx: &mut ReadCx<'_>,
+        sink: &mut DatasetSink<'_>,
+    ) {
+        let escaping = self.escaping;
+        let wanted = if let Some(w) = wanted {
+            w
+        } else {
+            let wanted = self.wants(arena, tags);
+            if !(wanted || head) {
+                self.place(root, cx, sink, false);
+                return;
+            }
+            wanted
+        };
         let mut drafts = vec![Draft::of_arena(root, &tags.others, escaping)];
         if head {
             if let Some(h) = drafts.first() {
@@ -699,7 +1007,16 @@ impl Pass<'_, '_> {
                 };
                 let record = self.rules.reads(tag, index, true, v7, known);
                 let below = self.rules.reads(tag, index, false, v7, known);
-                self.read.push(u8::from(record) | u8::from(below) << 1);
+                // What a rule may do to it, documented extensions counted:
+                // where interpretation tries the rules.
+                let tried = self.rules.reads(tag, index, true, v7, true);
+                let tried_below = self.rules.reads(tag, index, false, v7, true);
+                self.read.push(
+                    u8::from(record)
+                        | u8::from(below) << 1
+                        | u8::from(tried) << 2
+                        | u8::from(tried_below) << 3,
+                );
             }
         }
         arena.nodes.iter().any(|n| self.read_at(n))
@@ -859,6 +1176,8 @@ impl Pass<'_, '_> {
                     nodes: &arenas.nodes,
                     xrefs: &arenas.xrefs,
                     input,
+                    side: "",
+                    side_base: 0,
                 };
                 if let Some(root) = NodeRef::root(&arena) {
                     self.place(root, &mut cx.with_text(&written, base), sink, holder);
@@ -897,6 +1216,8 @@ impl Pass<'_, '_> {
                 nodes: &b.nodes,
                 xrefs: &b.xrefs,
                 input,
+                side: "",
+                side_base: 0,
             };
             if let Some(root) = NodeRef::root(&arena) {
                 self.place(root, &mut cx.with_text(&written, base), sink, holder);
@@ -924,7 +1245,7 @@ fn finish(
     let mut concerned: Vec<Located> = interp
         .targets()
         .filter_map(|x| data.store.find_xref(x))
-        .filter_map(|id| kept.first.as_ref()?.get(&id).copied())
+        .filter_map(|id| kept.first.as_ref()?.get(id.index()).copied().flatten())
         .chain(kept.holders.iter().copied())
         .filter(|l| l.placed != Placed::Header)
         .collect();
@@ -1034,6 +1355,8 @@ fn retype_all(
                 nodes: &b.nodes,
                 xrefs: &b.xrefs,
                 input,
+                side: "",
+                side_base: 0,
             };
             let Some(root) = NodeRef::root(&arena) else {
                 return;
@@ -1196,6 +1519,8 @@ impl RecordReader {
                     nodes: &b.nodes,
                     xrefs: &b.xrefs,
                     input,
+                    side: "",
+                    side_base: 0,
                 };
                 if let Some(root) = NodeRef::root(&arena) {
                     dispatch_record(root, &mut cx, &mut sink);
