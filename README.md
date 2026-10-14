@@ -794,18 +794,20 @@ Large files, wall time (median of 5) and peak resident set (Linux
 | Streaming read (`GedcomStreamParser`) | — (UTF-8 only) | 4.5 MB, any encoding |
 | Streaming write (`GedcomStreamParser` into `GedcomStreamWriter`, 147 MB/s) | — | 23 MB |
 
-Producer profiles, on the 100,000 generated individuals (47 MB) and two
-variants of them, wall time relative to reading without interpretation
-(`tools/perf`: `read-none`, `read`, `write-v7`, `export`):
+Producer profiles, on the 100,000 generated individuals (47 MB) and the
+two variants `tools/perf generate` writes of them (`ftm`, `paf`), wall time
+(median of 5) relative to the plain pipeline, and peak resident set
+(`tools/perf`: `read-none`, `read`, `write`, `write-v7`, `export`):
 
 | Pipeline | Time | Peak memory |
 |---|---:|---:|
 | Read, `Interpretation::None` | 1× (as before profiles) | 2.3× the input |
-| Read, default: no rule's tag in the file | 1.03× | 2.3× |
-| Read, default: a PAF header, every `DATE` checked for a dialect, none found | 1.15× | 2.3× |
-| Read, default: an `_MILT` (FTM) in every individual, every record rewritten | 5× | 11.7× (transient) |
-| Write as 7.0 a PAF file with an `_UID` in every individual (`UID` once converted) | 18× the plain write | 10.5× |
-| Export for Geneanet (27 folds) | 25× the plain write | 15× |
+| Read, default: no rule's tag in the file | 1.07× | 2.3× |
+| Read, default: a PAF header, every `DATE` checked for a dialect, none found | 1.2× | 2.2× |
+| Read, default: an `_MILT` (FTM) in every individual, every record rewritten | 2.3× | 2.9× |
+| Write as 7.0 the FTM file (its events already read as such) | 1.3× the plain 7.0 write | 3.9× |
+| Write as 7.0 a PAF file with an `_UID` in every individual (`UID` once converted) | 6× the plain 7.0 write | 3.5× |
+| Export for Geneanet (27 folds, every individual and family changed) | 12× the plain write | 12.6× |
 
 Reading interprets each record a rule may change as it reads it, and only
 those: the others are typed as they are read, the records changed are typed
@@ -814,13 +816,23 @@ input (only the texts a rule writes are kept besides). A change that spans
 records (a pedigree said in a family, read where the child is) is made
 once every record is read, to the records it concerns only.
 
+Writing a 5.5.1 dataset as 7.x converts and interprets each record that
+needs it alone, as it is written: the others are written as they are. An
+export folds drafts of the records that borrow the dataset's texts; the
+folds that read nothing another one beside them changes run record after
+record, and conformance looks again only at what the folds changed since
+it last looked. What remains of an export's cost is in the folds
+themselves, run on every record, and in typing their result again as
+reading it back would.
+
 A dataset keeps the decoded input once and every structure as a row of
 the table of its type, pointing into it: the rows take about two thirds
 of the input's size, and reading makes a few hundred allocations, not one
 or more per structure. A written file is checked and repaired for its
 version as it is written, one record at a time; the specification tables
 are built at compile time.
-`tools/perf check` runs every pipeline against the limits the CI checks;
+`tools/perf check` runs every pipeline against the limits the CI checks,
+and the profiles' against the plain ones;
 Criterion benchmarks: `cargo bench --bench read`, `--bench write`,
 `--bench memory`.
 
